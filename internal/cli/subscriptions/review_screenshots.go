@@ -4,6 +4,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"time"
@@ -137,15 +138,15 @@ Examples:
 				return shared.UsageError(err.Error())
 			}
 
-			file, info, err := openSubscriptionImageFile(pathValue)
+			snapshot, info, cleanupSnapshot, err := snapshotSubscriptionReviewScreenshot(pathValue)
 			if err != nil {
 				return fmt.Errorf("subscriptions review-screenshots create: %w", err)
 			}
-			defer file.Close()
-			if err := shared.PreflightReviewScreenshot(pathValue, file, info.Size()); err != nil {
+			defer cleanupSnapshot()
+			if err := shared.PreflightReviewScreenshot(pathValue, snapshot, info.Size()); err != nil {
 				return shared.UsageErrorCtx(ctx, "subscriptions review-screenshots create: "+err.Error())
 			}
-			checksum, err := asc.ComputeFileChecksum(pathValue, asc.ChecksumAlgorithmMD5)
+			checksum, err := asc.ComputeChecksumFromReader(io.NewSectionReader(snapshot, 0, info.Size()), asc.ChecksumAlgorithmMD5)
 			if err != nil {
 				return fmt.Errorf("subscriptions review-screenshots create: checksum failed: %w", err)
 			}
@@ -160,7 +161,7 @@ Examples:
 				return err
 			}
 
-			finalResp, err := createOrResumeSubscriptionReviewScreenshot(ctx, client, id, pathValue, info, checksum.Hash)
+			finalResp, err := createOrResumeSubscriptionReviewScreenshot(ctx, client, id, snapshot, info, checksum.Hash)
 			if err != nil {
 				return fmt.Errorf("subscriptions review-screenshots create: %w", err)
 			}

@@ -155,7 +155,7 @@ Examples:
 				return fmt.Errorf("iap review-screenshots create: %w", err)
 			}
 			defer file.Close()
-			snapshot, cleanupSnapshot, err := snapshotImageFile(file, info.Size())
+			snapshot, cleanupSnapshot, err := shared.SnapshotImageFile(file, info.Size())
 			if err != nil {
 				return fmt.Errorf("iap review-screenshots create: %w", err)
 			}
@@ -283,7 +283,7 @@ Examples:
 					return fmt.Errorf("iap review-screenshots update: %w", err)
 				}
 				defer file.Close()
-				snapshot, cleanupSnapshot, err := snapshotImageFile(file, info.Size())
+				snapshot, cleanupSnapshot, err := shared.SnapshotImageFile(file, info.Size())
 				if err != nil {
 					return fmt.Errorf("iap review-screenshots update: %w", err)
 				}

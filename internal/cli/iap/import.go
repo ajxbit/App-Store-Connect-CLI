@@ -511,7 +511,7 @@ func uploadIAPImportReviewScreenshot(ctx context.Context, client *asc.Client, ro
 	if err := asc.ValidateAssetFileInfo(name, info); err != nil {
 		return "", fmt.Errorf("validate review screenshot %q: %w", name, err)
 	}
-	snapshot, cleanupSnapshot, err := snapshotImageFile(file, info.Size())
+	snapshot, cleanupSnapshot, err := shared.SnapshotImageFile(file, info.Size())
 	if err != nil {
 		return "", fmt.Errorf("snapshot review screenshot %q: %w", name, err)
 	}

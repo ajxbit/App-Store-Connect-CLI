@@ -6,6 +6,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"sort"
 	"strings"
@@ -778,18 +779,21 @@ func executeSubscriptionsSetup(ctx context.Context, opts subscriptionsSetupOptio
 		})
 	} else {
 		// Flag validation rejected an unusable file before any request; check
-		// again in case it changed while earlier steps ran, and warn here so
-		// warnings describe the file being uploaded.
-		file, info, err := openSubscriptionReviewScreenshotFile(opts.ReviewScreenshot)
+		// the snapshot being uploaded in case the file changed while earlier
+		// steps ran, and warn here so warnings describe the uploaded bytes.
+		snapshot, info, cleanupSnapshot, err := snapshotSubscriptionReviewScreenshot(opts.ReviewScreenshot)
 		if err != nil {
 			return failSubscriptionsSetupStep(result, subscriptionsSetupStepUploadReviewScreenshot, err, "invalid review screenshot")
 		}
-		_ = file.Close()
-		checksum, err := asc.ComputeFileChecksum(opts.ReviewScreenshot, asc.ChecksumAlgorithmMD5)
+		defer cleanupSnapshot()
+		if err := shared.PreflightReviewScreenshot(opts.ReviewScreenshot, snapshot, info.Size()); err != nil {
+			return failSubscriptionsSetupStep(result, subscriptionsSetupStepUploadReviewScreenshot, err, "invalid review screenshot")
+		}
+		checksum, err := asc.ComputeChecksumFromReader(io.NewSectionReader(snapshot, 0, info.Size()), asc.ChecksumAlgorithmMD5)
 		if err != nil {
 			return failSubscriptionsSetupStep(result, subscriptionsSetupStepUploadReviewScreenshot, err, "review screenshot checksum failed")
 		}
-		screenshotResp, err := createOrResumeSubscriptionReviewScreenshot(ctx, client, result.SubscriptionID, opts.ReviewScreenshot, info, checksum.Hash)
+		screenshotResp, err := createOrResumeSubscriptionReviewScreenshot(ctx, client, result.SubscriptionID, snapshot, info, checksum.Hash)
 		if err != nil {
 			return failSubscriptionsSetupStep(result, subscriptionsSetupStepUploadReviewScreenshot, err, "failed to upload review screenshot")
 		}

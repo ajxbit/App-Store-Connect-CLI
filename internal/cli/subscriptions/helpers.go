@@ -376,16 +376,19 @@ func validateSubscriptionReviewScreenshotFile(path string) error {
 	return err
 }
 
-// openSubscriptionReviewScreenshotFile opens an App Review screenshot and
-// checks its format and dimensions before anything is uploaded.
-func openSubscriptionReviewScreenshotFile(path string) (*os.File, os.FileInfo, error) {
+// snapshotSubscriptionReviewScreenshot copies an App Review screenshot into a
+// private snapshot. Callers check, hash, and upload only the snapshot, so a
+// file replaced or rewritten after the check cannot reach App Store Connect
+// unchecked or under a different checksum.
+func snapshotSubscriptionReviewScreenshot(path string) (*os.File, os.FileInfo, func(), error) {
 	file, info, err := openSubscriptionImageFile(path)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, func() {}, err
 	}
-	if err := shared.PreflightReviewScreenshot(path, file, info.Size()); err != nil {
-		_ = file.Close()
-		return nil, nil, err
+	defer file.Close()
+	snapshot, cleanup, err := shared.SnapshotImageFile(file, info.Size())
+	if err != nil {
+		return nil, nil, func() {}, err
 	}
-	return file, info, nil
+	return snapshot, info, cleanup, nil
 }

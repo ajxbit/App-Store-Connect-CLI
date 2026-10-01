@@ -3,6 +3,7 @@ package cmdtest
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -427,6 +428,73 @@ func TestIAPImportWarnsOnceAtUpload(t *testing.T) {
 		if got := strings.Count(stderr, warning); got != 1 {
 			t.Fatalf("%q appeared %d times, want exactly 1; stderr = %q", warning, got, stderr)
 		}
+	}
+}
+
+func TestSubscriptionsReviewScreenshotsCreateUploadsTheCheckedBytes(t *testing.T) {
+	setupAuth(t)
+	t.Setenv("ASC_CONFIG_PATH", filepath.Join(t.TempDir(), "nonexistent.json"))
+
+	path := filepath.Join(t.TempDir(), "review.png")
+	writeReviewScreenshotPNG(t, path)
+	original, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read fixture: %v", err)
+	}
+	checksum := reviewScreenshotFileMD5(t, path)
+
+	originalTransport := http.DefaultTransport
+	t.Cleanup(func() { http.DefaultTransport = originalTransport })
+	var uploaded []byte
+	var committedChecksum string
+	http.DefaultTransport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		switch {
+		case req.Method == http.MethodGet && req.URL.Path == "/v1/subscriptions/8000000001/appStoreReviewScreenshot":
+			// Replace the file at its path after the local check passed.
+			if err := os.Remove(path); err != nil {
+				t.Fatalf("remove checked file: %v", err)
+			}
+			writeJPEGNamed(t, path, 640, 920)
+			return jsonResponse(http.StatusOK, `{"data":null}`)
+		case req.Method == http.MethodPost && req.URL.Path == "/v1/subscriptionAppStoreReviewScreenshots":
+			return jsonResponse(http.StatusCreated, fmt.Sprintf(`{"data":{"type":"subscriptionAppStoreReviewScreenshots","id":"shot-1","attributes":{"fileName":"review.png","fileSize":%d,"uploadOperations":[{"method":"PUT","url":"https://upload.example.com/upload/shot-1","length":%d,"offset":0}]}}}`, len(original), len(original)))
+		case req.Method == http.MethodPut && req.URL.Host == "upload.example.com":
+			body, readErr := io.ReadAll(req.Body)
+			if readErr != nil {
+				t.Fatalf("read upload body: %v", readErr)
+			}
+			uploaded = body
+			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader("")), Header: http.Header{}}, nil
+		case req.Method == http.MethodPatch && req.URL.Path == "/v1/subscriptionAppStoreReviewScreenshots/shot-1":
+			var payload struct {
+				Data struct {
+					Attributes struct {
+						SourceFileChecksum string `json:"sourceFileChecksum"`
+					} `json:"attributes"`
+				} `json:"data"`
+			}
+			if err := json.NewDecoder(req.Body).Decode(&payload); err != nil {
+				t.Fatalf("decode commit: %v", err)
+			}
+			committedChecksum = payload.Data.Attributes.SourceFileChecksum
+			return jsonResponse(http.StatusOK, `{"data":{"type":"subscriptionAppStoreReviewScreenshots","id":"shot-1","attributes":{"fileName":"review.png"}}}`)
+		case req.Method == http.MethodGet && req.URL.Path == "/v1/subscriptionAppStoreReviewScreenshots/shot-1":
+			return jsonResponse(http.StatusOK, fmt.Sprintf(`{"data":{"type":"subscriptionAppStoreReviewScreenshots","id":"shot-1","attributes":{"fileName":"review.png","sourceFileChecksum":%q,"assetDeliveryState":{"state":"COMPLETE"}}}}`, checksum))
+		default:
+			t.Fatalf("unexpected request: %s %s", req.Method, req.URL.String())
+			return nil, nil
+		}
+	})
+
+	_, stderr, runErr := runReviewScreenshotCommand(t, []string{"subscriptions", "review", "screenshots", "create", "--subscription-id", "8000000001", "--file", path, "--output", "json"})
+	if runErr != nil {
+		t.Fatalf("expected success, got %v (stderr %q)", runErr, stderr)
+	}
+	if !bytes.Equal(uploaded, original) {
+		t.Fatalf("uploaded %d bytes that differ from the %d checked bytes", len(uploaded), len(original))
+	}
+	if committedChecksum != checksum {
+		t.Fatalf("committed checksum %q, want checksum of the checked bytes %q", committedChecksum, checksum)
 	}
 }
 
