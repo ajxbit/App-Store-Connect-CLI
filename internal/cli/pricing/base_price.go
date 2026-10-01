@@ -7,7 +7,34 @@ import (
 	"time"
 
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/asc"
+	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/cli/shared"
 )
+
+// AppPriceRequestRunner runs one App Store Connect request. Callers that share
+// a request limit across concurrent reads pass a runner that applies it; the
+// runner must bound request with a timeout derived from ctx.
+type AppPriceRequestRunner func(ctx context.Context, request func(context.Context) error) error
+
+func runAppPriceRequestWithTimeout(ctx context.Context, request func(context.Context) error) error {
+	callCtx, cancel := shared.ContextWithTimeout(ctx)
+	defer cancel()
+	return request(callCtx)
+}
+
+// AppPriceEndedOn reports whether an app price with endDate no longer applies
+// on now's UTC date. App Store Connect end dates are exclusive, so a price
+// stops applying on its end date. An empty endDate never ends. known is false
+// when endDate is not a YYYY-MM-DD date.
+func AppPriceEndedOn(endDate string, now time.Time) (ended bool, known bool) {
+	endDate = strings.TrimSpace(endDate)
+	if endDate == "" {
+		return false, true
+	}
+	if _, err := time.Parse(appPriceDateLayout, endDate); err != nil {
+		return false, false
+	}
+	return endDate <= now.UTC().Format(appPriceDateLayout), true
+}
 
 // AppBasePriceStatus reports whether an app price schedule has a price for its
 // base territory, using the same schedule reads as `asc pricing current`.
@@ -23,16 +50,26 @@ type AppBasePriceStatus struct {
 }
 
 // FetchAppBasePriceStatus reads the base territory and manual prices of the
-// price schedule scheduleID. A schedule that App Store Connect reports as never
-// configured returns Configured=false without an error; every other request or
-// decoding failure is returned so callers can treat the price as unverified.
-func FetchAppBasePriceStatus(ctx context.Context, client *asc.Client, scheduleID string) (AppBasePriceStatus, error) {
+// price schedule scheduleID, running each request through run. A nil run
+// bounds each request with shared.ContextWithTimeout. A schedule that App
+// Store Connect reports as never configured returns Configured=false without
+// an error; every other request or decoding failure is returned so callers can
+// treat the price as unverified.
+func FetchAppBasePriceStatus(ctx context.Context, client *asc.Client, scheduleID string, run AppPriceRequestRunner) (AppBasePriceStatus, error) {
 	scheduleID = strings.TrimSpace(scheduleID)
 	if client == nil || scheduleID == "" {
 		return AppBasePriceStatus{}, fmt.Errorf("app price schedule ID is required")
 	}
+	if run == nil {
+		run = runAppPriceRequestWithTimeout
+	}
 
-	baseTerritoryResp, err := getAppPriceScheduleBaseTerritoryWithTimeout(ctx, client, scheduleID)
+	var baseTerritoryResp *asc.TerritoryResponse
+	err := run(ctx, func(callCtx context.Context) error {
+		var requestErr error
+		baseTerritoryResp, requestErr = client.GetAppPriceScheduleBaseTerritory(callCtx, scheduleID)
+		return requestErr
+	})
 	if err != nil {
 		if isAppPriceScheduleNotConfigured(err) {
 			return AppBasePriceStatus{}, nil
@@ -45,7 +82,7 @@ func FetchAppBasePriceStatus(ctx context.Context, client *asc.Client, scheduleID
 	}
 
 	rawPrices := 0
-	entries, _, _, err := fetchAppSchedulePriceEntries(ctx, func(callCtx context.Context, opts ...asc.AppPriceSchedulePricesOption) (*asc.AppPricesResponse, error) {
+	entries, _, _, err := fetchAppSchedulePriceEntries(ctx, run, func(callCtx context.Context, opts ...asc.AppPriceSchedulePricesOption) (*asc.AppPricesResponse, error) {
 		resp, err := client.GetAppPriceScheduleManualPrices(callCtx, scheduleID, opts...)
 		if resp != nil {
 			rawPrices += len(resp.Data)
@@ -74,12 +111,13 @@ func FetchAppBasePriceStatus(ctx context.Context, client *asc.Client, scheduleID
 
 func hasCurrentOrScheduledPrice(entries []appPriceEntry, territoryID string, now time.Time) bool {
 	territoryID = strings.ToUpper(strings.TrimSpace(territoryID))
-	today := dateOnlyUTC(now)
 	for _, entry := range entries {
 		if entry.TerritoryID != territoryID {
 			continue
 		}
-		if entry.EndAt == nil || !entry.EndAt.Before(today) {
+		// A price whose end date cannot be read is not treated as ended, so an
+		// unreadable date never reports a missing price.
+		if ended, known := AppPriceEndedOn(entry.EndDate, now); !ended || !known {
 			return true
 		}
 	}
