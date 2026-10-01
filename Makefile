@@ -36,7 +36,7 @@ GOVULNCHECK_VERSION ?= v1.6.0
 # is read-only so a test that writes config without choosing its own path fails
 # (root bypasses the mode, but the directory is still private to the run).
 # Tests that need any of these inputs set them with t.Setenv.
-TEST_ENV_PASSTHROUGH := ASC_UPDATE_GOLDEN
+TEST_ENV_PASSTHROUGH := ASC_UPDATE_GOLDEN ASC_SIGNING_RUN_LIVE_TEST ASC_SIGNING_KEYCHAIN_INSTALL_LIVE_TEST
 TEST_ENV = env $(foreach var,$(sort $(filter-out $(TEST_ENV_PASSTHROUGH),$(filter ASC_%,$(.VARIABLES)))),-u $(var)) -u DO_NOT_TRACK ASC_BYPASS_KEYCHAIN=1
 
 # $(call run_isolated_tests,<go test arguments>)

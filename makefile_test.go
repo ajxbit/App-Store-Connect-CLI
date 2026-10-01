@@ -254,6 +254,8 @@ exit 0
 				"ASC_BYPASS_KEYCHAIN=0",
 				"DO_NOT_TRACK=1",
 				"ASC_UPDATE_GOLDEN=1",
+				"ASC_SIGNING_RUN_LIVE_TEST=1",
+				"ASC_SIGNING_KEYCHAIN_INSTALL_LIVE_TEST=1",
 			)
 			if output, err := cmd.CombinedOutput(); err != nil {
 				t.Fatalf("make %s failed: %v\n%s", target, err, output)
@@ -272,7 +274,11 @@ exit 0
 
 			for name, want := range map[string]string{
 				"ASC_BYPASS_KEYCHAIN": "1",
-				"ASC_UPDATE_GOLDEN":   "1",
+				// Opt-in test switches pass through so an explicitly requested
+				// golden update or gated live test still runs under make.
+				"ASC_UPDATE_GOLDEN":                      "1",
+				"ASC_SIGNING_RUN_LIVE_TEST":              "1",
+				"ASC_SIGNING_KEYCHAIN_INSTALL_LIVE_TEST": "1",
 			} {
 				if got[name] != want {
 					t.Errorf("%s = %q, want %q", name, got[name], want)
