@@ -42,8 +42,9 @@ func ipadScreenshotChecks(platform, primaryLocale string, versionLocs []VersionL
 		}
 	}
 
+	// Only the required display type in the required scope satisfies Apple; a
+	// retired iPad slot or a set in a secondary locale does not.
 	hasRequiredIPad := false
-	hasAnyIPad := false
 	hasIPhone := false
 	requiredScopeSets := 0
 	for _, set := range sets {
@@ -55,32 +56,38 @@ func ipadScreenshotChecks(platform, primaryLocale string, versionLocs []VersionL
 		switch {
 		case displayType == RequiredIPadScreenshotDisplayType:
 			hasRequiredIPad = hasRequiredIPad || inRequiredScope
-			hasAnyIPad = true
-		case strings.HasPrefix(displayType, "APP_IPAD_"), strings.HasPrefix(displayType, "IMESSAGE_APP_IPAD_"):
-			hasAnyIPad = true
 		case strings.HasPrefix(displayType, "APP_IPHONE_"):
 			hasIPhone = true
 		}
 	}
 
-	if supportsIPad == nil {
-		if !hasIPhone || hasAnyIPad {
-			return nil
-		}
-		return []CheckResult{
-			{
-				ID:           "screenshots.required.ipad_unverified",
-				Severity:     SeverityInfo,
-				ResourceType: "appScreenshotSet",
-				Message:      "iPhone screenshots exist but no iPad screenshots; whether the build runs on iPad could not be determined from the App Store Connect API",
-				Remediation:  fmt.Sprintf("If the app supports iPad (UIDeviceFamily includes 2), upload %s screenshots before submitting; rerun with --ipa PATH to check the build", RequiredIPadScreenshotDisplayType),
-			},
-		}
-	}
-
 	// An empty primary localization is already reported by
 	// screenshots.required.localization_missing_sets.
-	if !*supportsIPad || hasRequiredIPad || requiredScopeSets == 0 {
+	if hasRequiredIPad || requiredScopeSets == 0 {
+		return nil
+	}
+
+	if supportsIPad == nil {
+		if !hasIPhone {
+			return nil
+		}
+		check := CheckResult{
+			ID:           "screenshots.required.ipad_unverified",
+			Severity:     SeverityInfo,
+			ResourceType: "appScreenshotSet",
+			Message:      fmt.Sprintf("iPhone screenshots exist but no %s screenshot set was found; whether the build runs on iPad could not be determined from the App Store Connect API", RequiredIPadScreenshotDisplayType),
+			Remediation:  fmt.Sprintf("If the app supports iPad (UIDeviceFamily includes 2), upload %s screenshots before submitting; rerun with --ipa PATH to check the build", RequiredIPadScreenshotDisplayType),
+		}
+		if primary != nil {
+			check.Locale = primary.Locale
+			check.ResourceType = "appStoreVersionLocalization"
+			check.ResourceID = primary.ID
+			check.Message = fmt.Sprintf("iPhone screenshots exist but the primary locale has no %s screenshot set; whether the build runs on iPad could not be determined from the App Store Connect API", RequiredIPadScreenshotDisplayType)
+		}
+		return []CheckResult{check}
+	}
+
+	if !*supportsIPad {
 		return nil
 	}
 	check := CheckResult{

@@ -42,16 +42,27 @@ func TestInspectIPAInfoPlistReadsDeviceFamilies(t *testing.T) {
 }
 
 func TestInspectIPAInfoPlistRejectsMalformedDeviceFamily(t *testing.T) {
-	ipa := zipArtifact(t, map[string][]byte{
-		"Payload/Demo.app/Info.plist": plistXML(t, map[string]any{
-			"CFBundleIdentifier": "com.example.demo",
-			"UIDeviceFamily":     []any{"iphone"},
-		}),
-	})
+	tests := []struct {
+		name  string
+		value any
+	}{
+		{name: "non-numeric entry", value: []any{"iphone"}},
+		{name: "empty array", value: []any{}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			ipa := zipArtifact(t, map[string][]byte{
+				"Payload/Demo.app/Info.plist": plistXML(t, map[string]any{
+					"CFBundleIdentifier": "com.example.demo",
+					"UIDeviceFamily":     test.value,
+				}),
+			})
 
-	_, err := InspectIPAInfoPlist(bytes.NewReader(ipa), int64(len(ipa)))
-	if err == nil || !strings.Contains(err.Error(), "UIDeviceFamily") {
-		t.Fatalf("expected UIDeviceFamily error, got %v", err)
+			_, err := InspectIPAInfoPlist(bytes.NewReader(ipa), int64(len(ipa)))
+			if err == nil || !strings.Contains(err.Error(), "UIDeviceFamily") {
+				t.Fatalf("expected UIDeviceFamily error, got %v", err)
+			}
+		})
 	}
 }
 

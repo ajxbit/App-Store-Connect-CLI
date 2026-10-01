@@ -97,9 +97,10 @@ iPad screenshots:
   The App Store Connect API does not report whether a build runs on iPad, so
   pass --ipa with the IOS version's .ipa to read UIDeviceFamily locally. When
   it includes iPad (2) and the primary locale has no APP_IPAD_PRO_3GEN_129
-  screenshot set, screenshots.required.ipad blocks submission. Without --ipa, a version
-  with iPhone screenshots and no iPad screenshots gets the non-blocking
-  screenshots.required.ipad_unverified info check. The IPA's bundle ID must
+  screenshot set, screenshots.required.ipad blocks submission. Without --ipa,
+  a version with iPhone screenshots but no primary-locale APP_IPAD_PRO_3GEN_129
+  set gets the non-blocking screenshots.required.ipad_unverified info check.
+  The IPA's bundle ID must
   match the app's, its CFBundleShortVersionString must match the version, and
   its CFBundleVersion must match the attached build when one is attached.
 

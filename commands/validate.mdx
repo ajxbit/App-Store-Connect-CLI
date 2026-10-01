@@ -111,9 +111,14 @@ the IPA you're about to upload. Any mismatch, or an IPA without a readable app `
 instead of guessing. `--ipa` reads only the archive's top-level app
 `Info.plist` and doesn't upload anything.
 
-Without `--ipa`, a version that has iPhone screenshots but no iPad screenshots
-gets the `screenshots.required.ipad_unverified` info finding. It never blocks,
-even with `--strict`, because iPhone-only apps don't need iPad screenshots.
+Without `--ipa`, a version that has iPhone screenshots but no
+`APP_IPAD_PRO_3GEN_129` set in the primary locale gets the
+`screenshots.required.ipad_unverified` info finding, even when a retired iPad
+slot or another locale has iPad screenshots. It never blocks, even with
+`--strict`, because iPhone-only apps don't need iPad screenshots.
+
+A `UIDeviceFamily` key that is present but empty or unreadable fails `--ipa`.
+A missing key means iPhone only, as on iOS.
 
 ## Check Apple's web-only blockers
 

@@ -408,7 +408,8 @@ func manifestFromPlist(parsed bundlePlist) IPAManifest {
 
 // deviceFamilies normalizes a decoded UIDeviceFamily value. Xcode writes an
 // array of integers; a single integer and numeric strings are also accepted.
-// An absent key returns nil, which iOS treats as iPhone only.
+// An absent key returns nil, which iOS treats as iPhone only; a present but
+// empty array declares no device family and is malformed.
 func deviceFamilies(value any) ([]int, error) {
 	if value == nil {
 		return nil, nil
@@ -416,6 +417,9 @@ func deviceFamilies(value any) ([]int, error) {
 	items, ok := value.([]any)
 	if !ok {
 		items = []any{value}
+	}
+	if len(items) == 0 {
+		return nil, fmt.Errorf("info.plist UIDeviceFamily is an empty array")
 	}
 	families := make([]int, 0, len(items))
 	for _, item := range items {

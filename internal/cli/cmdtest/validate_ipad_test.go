@@ -261,6 +261,8 @@ func TestValidateIPARejectsUnreadableIPABeforeNetwork(t *testing.T) {
 	}
 	noBundleID := validateIPAInfo([]int{1, 2})
 	delete(noBundleID, "CFBundleIdentifier")
+	emptyFamilies := validateIPAInfo(nil)
+	emptyFamilies["UIDeviceFamily"] = []any{}
 
 	tests := []struct {
 		name    string
@@ -270,6 +272,7 @@ func TestValidateIPARejectsUnreadableIPABeforeNetwork(t *testing.T) {
 		{name: "missing file", path: filepath.Join(t.TempDir(), "missing.ipa"), wantErr: "validate: --ipa:"},
 		{name: "not a zip", path: notIPA, wantErr: "validate: --ipa:"},
 		{name: "no bundle identifier", path: writeValidateIPA(t, noBundleID), wantErr: "validate: --ipa: IPA app Info.plist has no CFBundleIdentifier"},
+		{name: "empty UIDeviceFamily", path: writeValidateIPA(t, emptyFamilies), wantErr: "UIDeviceFamily"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
