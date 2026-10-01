@@ -197,7 +197,7 @@ func TestResolveSessionWithoutCachedSessionsReportsMissingWebSession(t *testing.
 
 	_, _, err := resolveSession(context.Background(), "", "", "")
 	if errors.Is(err, flag.ErrHelp) {
-		t.Fatalf("expected an auth-class error, got usage error %v", err)
+		t.Fatalf("expected the missing-session error without the usage page, got %v", err)
 	}
 	if !errors.Is(err, shared.ErrMissingWebSession) || !errors.Is(err, errNoCachedWebSession) {
 		t.Fatalf("expected ErrMissingWebSession caused by errNoCachedWebSession, got %v", err)
@@ -213,8 +213,12 @@ func TestResolveSessionWithoutCachedSessionsReportsMissingWebSession(t *testing.
 		!strings.Contains(missing.Hint, "'asc web auth import --file FILE'") {
 		t.Fatalf("hint = %q, want the terminal sign-in and session import next steps", missing.Hint)
 	}
-	if diagnostic, ok := shared.DiagnosticFromError(err); ok {
-		t.Fatalf("diagnostic = %+v, want none: a missing session is not a missing flag", diagnostic)
+	diagnostic, ok := shared.DiagnosticFromError(err)
+	if !ok || diagnostic.Code != shared.DiagnosticRequiredInputMissing || diagnostic.Parameter != "--apple-id" {
+		t.Fatalf("diagnostic = %+v (found=%v), want the required_input_missing --apple-id diagnostic the usage error reported", diagnostic, ok)
+	}
+	if got := shared.ClassifyUsageError(err); got != shared.UsageErrorMissingRequired {
+		t.Fatalf("usage classification = %q, want %q", got, shared.UsageErrorMissingRequired)
 	}
 	if stderr.Len() != 0 {
 		t.Fatalf("stderr = %q, want empty", stderr.String())
@@ -234,7 +238,7 @@ func TestResolveSessionForUncachedAccountWithoutPasswordReportsMissingWebSession
 
 	_, _, err := resolveSession(context.Background(), "user@example.com", "", "")
 	if errors.Is(err, flag.ErrHelp) {
-		t.Fatalf("expected an auth-class error, got usage error %v", err)
+		t.Fatalf("expected the missing-session error without the usage page, got %v", err)
 	}
 	if !errors.Is(err, shared.ErrMissingWebSession) {
 		t.Fatalf("expected ErrMissingWebSession, got %v", err)
@@ -450,7 +454,7 @@ func TestResolveWebSessionEmptyCacheNonInteractiveReportsMissingWebSessionWithou
 		})
 	})
 	if !errors.Is(err, shared.ErrMissingWebSession) || errors.Is(err, flag.ErrHelp) {
-		t.Fatalf("expected the auth-class missing-session error, got %v", err)
+		t.Fatalf("expected the missing-session error without the usage page, got %v", err)
 	}
 	// The root renderer prints the single diagnostic; the resolver must not.
 	if strings.Contains(stderr, "Error:") {

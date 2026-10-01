@@ -146,12 +146,12 @@ explicitly to those commands.
 
 ### No usable session
 
-A command other than `asc web auth login` fails with authentication exit code
-`3` when it has no usable session and cannot sign in. This happens when nothing
-is cached and no account is selected, or when the selected account has no
-usable cached session and neither `ASC_WEB_PASSWORD`, a saved password, nor an
-interactive terminal can supply the password. The command prints the
-error and a `Hint:` line with the next step, and no usage page:
+A command other than `asc web auth login` exits with code `2` when it has no
+usable session and cannot sign in. This happens when nothing is cached and no
+account is selected, or when the selected account has no usable cached session
+and neither `ASC_WEB_PASSWORD`, a saved password, nor an interactive terminal
+can supply the password. The command prints the error and a `Hint:` line with
+the next step instead of its usage page:
 
 ```text
 Error: no Apple web session is cached
@@ -167,14 +167,10 @@ App Store Connect API answers the same question, the hint names that command.
 session). In an interactive terminal, `web apps create` prompts for the account
 instead of failing.
 
-`asc web auth login` keeps its usage errors. Without an account it exits with
-code `2` and asks for `--apple-id`; without a password source it exits with
-code `2` and asks for a terminal or `ASC_WEB_PASSWORD`.
-
-Before 5.9.0, the missing-session failure exited with code `2` and printed the
-command's usage page. Scripts that checked for exit code `2` to detect a
-missing web session should check for `3`, or run `asc web auth status` first;
-it prints `"authenticated":false` without failing.
+`asc web auth login` keeps its usage errors and usage page. Without an account
+it asks for `--apple-id`; without a password source it asks for a terminal or
+`ASC_WEB_PASSWORD`. To check for a session without failing, run
+`asc web auth status`; it prints `"authenticated":false` and exits `0`.
 
 ## Command families
 

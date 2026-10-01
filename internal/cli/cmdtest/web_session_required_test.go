@@ -31,7 +31,7 @@ func runASCForExitCode(t *testing.T, args ...string) (int, string, string) {
 
 const webSessionRequiredHint = "Hint: asc web commands need a signed-in Apple Account session, and signing in needs an interactive terminal for the password and two-factor code. Run 'asc web auth login --apple-id EMAIL' in a terminal, or load a session exported elsewhere with 'asc web auth import --file FILE'. Unattended sign-in needs ASC_WEB_PASSWORD and ASC_WEB_2FA_CODE_COMMAND, plus --apple-id or ASC_WEB_APPLE_ID."
 
-func TestWebCommandsWithoutCachedSessionFailFastWithAuthExitCode(t *testing.T) {
+func TestWebCommandsWithoutCachedSessionFailFastWithoutUsagePage(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
 		args       []string
@@ -71,8 +71,8 @@ func TestWebCommandsWithoutCachedSessionFailFastWithAuthExitCode(t *testing.T) {
 			isolateEmptyWebSessionCache(t)
 
 			code, stdout, stderr := runASCForExitCode(t, tc.args...)
-			if code != cmd.ExitAuth {
-				t.Fatalf("exit code = %d, want %d (auth); stderr=%q", code, cmd.ExitAuth, stderr)
+			if code != cmd.ExitUsage {
+				t.Fatalf("exit code = %d, want %d (usage); stderr=%q", code, cmd.ExitUsage, stderr)
 			}
 			if stdout != "" {
 				t.Fatalf("stdout = %q, want empty", stdout)
@@ -89,8 +89,8 @@ func TestWebCommandWithUnusableSessionForNamedAccountFailsFastWithAuthExitCode(t
 	isolateEmptyWebSessionCache(t)
 
 	code, stdout, stderr := runASCForExitCode(t, "web", "privacy", "pull", "--app", "123456789", "--apple-id", "user@example.com")
-	if code != cmd.ExitAuth {
-		t.Fatalf("exit code = %d, want %d (auth); stderr=%q", code, cmd.ExitAuth, stderr)
+	if code != cmd.ExitUsage {
+		t.Fatalf("exit code = %d, want %d (usage); stderr=%q", code, cmd.ExitUsage, stderr)
 	}
 	if stdout != "" {
 		t.Fatalf("stdout = %q, want empty", stdout)
@@ -101,7 +101,7 @@ func TestWebCommandWithUnusableSessionForNamedAccountFailsFastWithAuthExitCode(t
 	}
 }
 
-func TestWebAppsCreateWithoutCachedSessionOrTerminalFailsWithAuthExitCode(t *testing.T) {
+func TestWebAppsCreateWithoutCachedSessionOrTerminalFailsWithoutUsagePage(t *testing.T) {
 	isolateEmptyWebSessionCache(t)
 
 	code, stdout, stderr := runASCForExitCode(
@@ -111,8 +111,8 @@ func TestWebAppsCreateWithoutCachedSessionOrTerminalFailsWithAuthExitCode(t *tes
 		"--bundle-id", "com.example.app",
 		"--sku", "SKU123",
 	)
-	if code != cmd.ExitAuth {
-		t.Fatalf("exit code = %d, want %d (auth); stderr=%q", code, cmd.ExitAuth, stderr)
+	if code != cmd.ExitUsage {
+		t.Fatalf("exit code = %d, want %d (usage); stderr=%q", code, cmd.ExitUsage, stderr)
 	}
 	if stdout != "" {
 		t.Fatalf("stdout = %q, want empty", stdout)

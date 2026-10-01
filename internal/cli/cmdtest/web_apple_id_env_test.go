@@ -33,7 +33,7 @@ func TestWebCommandsSelectAppleIDFromEnvironmentOverAmbiguousCache(t *testing.T)
 
 	stderr, runErr := runWebCommandForAppleIDDefault(t, "web", "review", "show", "--app", "123456789")
 	if !errors.Is(runErr, shared.ErrMissingWebSession) || errors.Is(runErr, flag.ErrHelp) {
-		t.Fatalf("expected the auth-class missing-session error, got %v", runErr)
+		t.Fatalf("expected the missing-session error without the usage page, got %v", runErr)
 	}
 	// The stderr notice naming the source is written through the session
 	// diagnostics writer bound at package init, which this harness cannot

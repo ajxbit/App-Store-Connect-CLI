@@ -848,7 +848,7 @@ func TestWebAppGroupsClassifiesOperatorFailures(t *testing.T) {
 		{
 			name:     "no usable web session for the account",
 			err:      newMissingWebSessionError("user@example.com", ""),
-			wantCode: shared.DiagnosticAuthenticationRejected,
+			wantCode: shared.DiagnosticRequiredInputMissing,
 		},
 		{
 			name:     "missing App Group",

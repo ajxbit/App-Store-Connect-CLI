@@ -513,8 +513,9 @@ type publicAPIAlternativeContextKey struct{}
 
 // contextForWebSignIn marks ctx as belonging to `asc web auth login`. That
 // command exists to create the session, so a missing Apple Account or password
-// stays a usage error for it; every other web command reports the missing
-// session as an authentication failure instead.
+// stays an ordinary usage error with its usage page for it; every other web
+// command reports the missing session as shared.MissingWebSessionError, which
+// keeps the usage exit code but prints a sign-in hint instead of the page.
 func contextForWebSignIn(ctx context.Context) context.Context {
 	return context.WithValue(ctx, webSignInContextKey{}, true)
 }
@@ -546,7 +547,8 @@ func publicAPIAlternativeFromContext(ctx context.Context) string {
 // session and no way to sign in without a terminal. appleID names the selected
 // account, if any. Without one the error also carries errNoCachedWebSession so
 // command-specific session diagnostics can tell a missing session from an
-// expired one. alternative, when set, is appended to the hint.
+// expired one, and the required_input_missing --apple-id diagnostic the usage
+// error it replaced reported. alternative, when set, is appended to the hint.
 func newMissingWebSessionError(appleID, alternative string) error {
 	message := "no Apple web session is cached"
 	trimmedAppleID := strings.TrimSpace(appleID)
@@ -564,7 +566,10 @@ func newMissingWebSessionError(appleID, alternative string) error {
 	}
 	err := &shared.MissingWebSessionError{Message: message, Hint: hint}
 	if trimmedAppleID == "" {
-		return shared.NewErrorWithCause(err, errNoCachedWebSession)
+		return shared.NewErrorWithCause(
+			shared.WithDiagnostic(err, shared.DiagnosticRequiredInputMissing, "--apple-id"),
+			errNoCachedWebSession,
+		)
 	}
 	return err
 }
@@ -1207,8 +1212,8 @@ func resolveWebSession(ctx context.Context, appleID, password, twoFactorCode str
 			return nil, "", passwordRequiredUsageError()
 		}
 		// No usable cached session and no way to sign in here: the command
-		// needs a session it cannot create, which is an authentication failure
-		// rather than a missing flag.
+		// needs a session it cannot create. Say so with the sign-in hint rather
+		// than a missing-password usage page.
 		return nil, "", newMissingWebSessionError(resolvedAppleID, publicAPIAlternativeFromContext(ctx))
 	}
 

@@ -1290,7 +1290,7 @@ func TestResolveSessionReportsMissingWebSessionWhenNoCachedSessionExists(t *test
 
 	_, _, err := resolveSession(context.Background(), "", "", "")
 	if !errors.Is(err, shared.ErrMissingWebSession) || errors.Is(err, flag.ErrHelp) {
-		t.Fatalf("expected the auth-class missing-session error, got %v", err)
+		t.Fatalf("expected the missing-session error without the usage page, got %v", err)
 	}
 
 	captureOutput(t, func() {

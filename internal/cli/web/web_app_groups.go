@@ -555,7 +555,7 @@ func developerAppGroupDiagnosticCode(err error) shared.DiagnosticCode {
 	switch {
 	case errors.As(err, &notFound):
 		return shared.DiagnosticResourceNotFound
-	case errors.Is(err, webcore.ErrDeveloperPortalTeamNotSelected), errors.Is(err, errNoCachedWebSession), errors.Is(err, shared.ErrMissingWebSession):
+	case errors.Is(err, webcore.ErrDeveloperPortalTeamNotSelected), errors.Is(err, errNoCachedWebSession):
 		return shared.DiagnosticAuthenticationRejected
 	case errors.As(err, &unverified):
 		return shared.DiagnosticStateNotReady

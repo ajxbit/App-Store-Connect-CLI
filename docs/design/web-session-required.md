@@ -1,4 +1,4 @@
-# Missing web session is an authentication failure
+# Fail fast when no web session is available
 
 ## Problem
 
@@ -27,38 +27,39 @@ breaks JSON parsing: `DESCRIPTION` was the most common first line of
   - the selected-account case with no password from `ASC_WEB_PASSWORD`, the
     saved-password store, or a terminal;
   - `web apps create` without a terminal.
-- The error maps to `ExitAuth` (`3`), like missing App Store Connect API
-  credentials.
-  - It is not a usage error, so no usage page is printed.
-  - The root renderer prints the message and a `Hint:` line. The hint says
-    that sign-in needs a terminal and names three ways forward:
-    `asc web auth login`, `asc web auth import`, and the unattended sign-in
-    variables.
-  - Telemetry records it as a validation-stage `auth_error`.
+- The error does not wrap `flag.ErrHelp` and is not reported by the command,
+  so no usage page is printed. The root renderer prints the message and a
+  `Hint:` line. The hint says that sign-in needs a terminal and names three
+  ways forward: `asc web auth login`, `asc web auth import`, and the
+  unattended sign-in variables.
 - Where the public App Store Connect API answers the same question, the hint
   names that command:
   - `web review list` points to `asc review submissions-list`.
   - `web review show` and `web review threads` point to `asc review status`.
   - The other web commands have no public API equivalent and add nothing.
-- No new telemetry diagnostic code is added. The collector validates codes
-  against a fixed list, so a new code would drop events. Like missing App
-  Store Connect credentials, the error carries no diagnostic. App Group
-  commands keep attaching `authentication_rejected` to session failures.
 - `asc web auth login` exists to create the session, so it keeps its usage
-  errors (exit `2`) for a missing account or password. An ambiguous cache stays
-  a usage error everywhere, because the fix is to pass `--apple-id`.
+  errors and usage page for a missing account or password. An ambiguous cache
+  stays an ordinary usage error everywhere, because the fix is to pass
+  `--apple-id`.
 
-## Compatibility
+## Exit code and telemetry
 
-The failure stays non-zero, but its exit code changes from `2` to `3`. The
-command docs promised `2` for the empty-cache case. Exit codes cannot carry a
-warning period, so the change ships in 5.9.0 with:
+Exit codes are a stable contract, so the failure keeps usage exit code `2`:
+`cmd.ExitCodeFromError` maps `ErrMissingWebSession` to `ExitUsage`. Telemetry
+keeps the classification the replaced usage errors had: a validation-stage
+`usage_error` with error kind `missing_required`
+(`MissingWebSessionError.UsageErrorKind`). The empty-cache case keeps the
+`required_input_missing` diagnostic on `--apple-id`. The selected-account case
+carries no diagnostic of its own, as before: the password it lacks is missing
+input, and App Group commands, which derive a diagnostic from the usage
+classification, keep reporting `required_input_missing` for it exactly as they
+did for the replaced `password is required` usage error. No new diagnostic code
+is added, because the telemetry collector validates codes against a fixed list.
 
-- updated command docs;
-- the CI exit-code list;
-- a release note (`docs/release-notes-web-session-required.md`) with migration
-  guidance: check for `3`, or probe with `asc web auth status`, which returns
-  `"authenticated":false` and exits `0`.
+The failure is an authentication problem rather than a usage problem, and the
+authentication exit code (`3`) would describe it better. Moving it to `3` is
+planned for the next major release, with migration guidance, because scripts
+may rely on `2` today.
 
 ## Tests
 
@@ -70,9 +71,9 @@ warning period, so the change ships in 5.9.0 with:
   - `web apps create`;
   - that `web auth login` keeps both usage errors.
 - Unit tests cover:
-  - the resolver for both cases and the sign-in context;
+  - the resolver for both cases, the sign-in context, and the diagnostic;
   - the public API alternative;
-  - the exit-code mapping and telemetry classification;
+  - the usage exit-code mapping and telemetry classification;
   - the `errfmt` hint;
   - the `web auth capabilities` pass-through;
   - the App Group diagnostic.

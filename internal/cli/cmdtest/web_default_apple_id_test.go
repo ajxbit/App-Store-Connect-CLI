@@ -77,7 +77,7 @@ func TestWebCommandsReportMissingWebSessionWhenNothingIsCached(t *testing.T) {
 
 			stderr, runErr := runWebCommandForAppleIDDefault(t, tc.args...)
 			if errors.Is(runErr, flag.ErrHelp) {
-				t.Fatalf("expected an auth-class error without the usage page, got usage error %v", runErr)
+				t.Fatalf("expected the missing-session error without the usage page, got %v", runErr)
 			}
 			if !errors.Is(runErr, shared.ErrMissingWebSession) {
 				t.Fatalf("expected ErrMissingWebSession, got %v", runErr)

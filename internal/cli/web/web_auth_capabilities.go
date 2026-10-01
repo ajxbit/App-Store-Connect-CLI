@@ -277,7 +277,7 @@ func wrapWebAuthCapabilitiesSessionError(err error) error {
 	}
 	if errors.Is(err, shared.ErrMissingWebSession) || errors.Is(err, errNoCachedWebSession) || errors.Is(err, flag.ErrHelp) {
 		// The session resolver already explains these: a missing session carries
-		// its own sign-in hint and authentication exit code, and the usage errors
+		// its own sign-in hint and usage exit code, and the usage errors
 		// for an ambiguous cache have written their --apple-id guidance. Preserve
 		// them unchanged so the root renderer prints that guidance once and the
 		// command keeps the resolver's exit code.
