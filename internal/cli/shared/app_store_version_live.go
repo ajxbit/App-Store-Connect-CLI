@@ -61,15 +61,37 @@ func LiveAppStoreVersionStateFilter() AppStoreVersionStateFilter {
 	}
 }
 
+// requestContextFunc derives the context for one App Store Connect request.
+type requestContextFunc func(context.Context) (context.Context, context.CancelFunc)
+
+// callerRequestContext sends every request with the caller's context, so the
+// caller's deadline bounds the whole lookup.
+func callerRequestContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	return ctx, func() {}
+}
+
 // ListAppStoreVersionsInStates lists every app store version of the app,
 // optionally narrowed to one platform, whose appStoreState or appVersionState
 // matches the filter. Versions reported under both spellings are returned
-// once, in the order first seen (appStoreState results first).
+// once, in the order first seen (appStoreState results first). Every request
+// uses ctx, so the caller's deadline bounds the whole lookup.
 func ListAppStoreVersionsInStates(ctx context.Context, client *asc.Client, appID, platform string, filter AppStoreVersionStateFilter) ([]asc.Resource[asc.AppStoreVersionAttributes], error) {
+	return listAppStoreVersionsInStates(ctx, client, appID, platform, filter, callerRequestContext)
+}
+
+// ListAppStoreVersionsInStatesWithRequestTimeouts is ListAppStoreVersionsInStates
+// for callers without their own deadline: each request, including every page
+// and each state spelling, gets a fresh ContextWithTimeout budget, so the
+// lookup is not capped by a single request timeout.
+func ListAppStoreVersionsInStatesWithRequestTimeouts(ctx context.Context, client *asc.Client, appID, platform string, filter AppStoreVersionStateFilter) ([]asc.Resource[asc.AppStoreVersionAttributes], error) {
+	return listAppStoreVersionsInStates(ctx, client, appID, platform, filter, ContextWithTimeout)
+}
+
+func listAppStoreVersionsInStates(ctx context.Context, client *asc.Client, appID, platform string, filter AppStoreVersionStateFilter, requestContext requestContextFunc) ([]asc.Resource[asc.AppStoreVersionAttributes], error) {
 	var merged []asc.Resource[asc.AppStoreVersionAttributes]
 	seen := map[string]struct{}{}
 	for _, stateOpt := range filter.options() {
-		versions, err := listAppStoreVersionsWithState(ctx, client, appID, platform, stateOpt)
+		versions, err := listAppStoreVersionsWithState(ctx, client, appID, platform, stateOpt, requestContext)
 		if err != nil {
 			return nil, err
 		}
@@ -88,7 +110,8 @@ func ListAppStoreVersionsInStates(ctx context.Context, client *asc.Client, appID
 
 // HasAppStoreVersionInStates reports whether the app has at least one app
 // store version, optionally narrowed to one platform, whose appStoreState or
-// appVersionState matches the filter. It stops after the first match.
+// appVersionState matches the filter. It stops after the first match. Every
+// request uses ctx, so the caller's deadline bounds the whole check.
 func HasAppStoreVersionInStates(ctx context.Context, client *asc.Client, appID, platform string, filter AppStoreVersionStateFilter) (bool, error) {
 	for _, stateOpt := range filter.options() {
 		opts := []asc.AppStoreVersionsOption{stateOpt, asc.WithAppStoreVersionsLimit(1)}
@@ -118,13 +141,16 @@ func (filter AppStoreVersionStateFilter) options() []asc.AppStoreVersionsOption 
 }
 
 // listAppStoreVersionsWithState lists every page of the app's versions for one
-// state option, at 200 versions per page.
-func listAppStoreVersionsWithState(ctx context.Context, client *asc.Client, appID, platform string, stateOpt asc.AppStoreVersionsOption) ([]asc.Resource[asc.AppStoreVersionAttributes], error) {
+// state option, at 200 versions per page. requestContext derives the context
+// for each request.
+func listAppStoreVersionsWithState(ctx context.Context, client *asc.Client, appID, platform string, stateOpt asc.AppStoreVersionsOption, requestContext requestContextFunc) ([]asc.Resource[asc.AppStoreVersionAttributes], error) {
 	opts := []asc.AppStoreVersionsOption{stateOpt, asc.WithAppStoreVersionsLimit(200)}
 	if trimmed := strings.TrimSpace(platform); trimmed != "" {
 		opts = append(opts, asc.WithAppStoreVersionsPlatforms([]string{trimmed}))
 	}
-	firstPage, err := client.GetAppStoreVersions(ctx, appID, opts...)
+	firstCtx, cancel := requestContext(ctx)
+	firstPage, err := client.GetAppStoreVersions(firstCtx, appID, opts...)
+	cancel()
 	if err != nil {
 		return nil, fmt.Errorf("failed to list app store versions: %w", err)
 	}
@@ -132,7 +158,9 @@ func listAppStoreVersionsWithState(ctx context.Context, client *asc.Client, appI
 		return nil, nil
 	}
 	all, err := asc.PaginateAll(ctx, firstPage, func(ctx context.Context, nextURL string) (asc.PaginatedResponse, error) {
-		return client.GetAppStoreVersions(ctx, appID, asc.WithAppStoreVersionsNextURL(nextURL))
+		pageCtx, pageCancel := requestContext(ctx)
+		defer pageCancel()
+		return client.GetAppStoreVersions(pageCtx, appID, asc.WithAppStoreVersionsNextURL(nextURL))
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to list app store versions: %w", err)

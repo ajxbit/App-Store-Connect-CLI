@@ -125,14 +125,14 @@ func ResolveDefaultAppStoreVersion(ctx context.Context, client *asc.Client, appI
 	}
 	trimmedPlatform := strings.ToUpper(strings.TrimSpace(platform))
 
-	editable, err := listAppStoreVersionsWithState(ctx, client, trimmedAppID, trimmedPlatform, asc.WithAppStoreVersionsVersionStates(defaultActiveEditableAppVersionStates))
+	editable, err := listAppStoreVersionsWithState(ctx, client, trimmedAppID, trimmedPlatform, asc.WithAppStoreVersionsVersionStates(defaultActiveEditableAppVersionStates), callerRequestContext)
 	if err != nil {
 		return DefaultAppStoreVersion{}, err
 	}
 	if selected, ok, err := selectDefaultAppStoreVersion(trimmedAppID, DefaultAppStoreVersionSourceEditable, editable); ok || err != nil {
 		return selected, err
 	}
-	removedEditable, err := listAppStoreVersionsWithState(ctx, client, trimmedAppID, trimmedPlatform, asc.WithAppStoreVersionsStates(defaultRemovedEditableAppStoreVersionStates))
+	removedEditable, err := listAppStoreVersionsWithState(ctx, client, trimmedAppID, trimmedPlatform, asc.WithAppStoreVersionsStates(defaultRemovedEditableAppStoreVersionStates), callerRequestContext)
 	if err != nil {
 		return DefaultAppStoreVersion{}, err
 	}

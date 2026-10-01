@@ -257,11 +257,9 @@ func resolveSelectedDSYMTargets(ctx context.Context, client *asc.Client, selecti
 // version as appStoreState READY_FOR_SALE on some versions and only as
 // appVersionState READY_FOR_DISTRIBUTION on others.
 func resolveLiveAppVersion(ctx context.Context, client *asc.Client, appID, platform string) (liveAppVersion, error) {
-	requestCtx, cancel := shared.ContextWithTimeout(ctx)
-	defer cancel()
 	filter := shared.LiveAppStoreVersionStateFilter()
 	filter.AppStoreStates = append(filter.AppStoreStates, dsymLivePreorderStoreState)
-	versions, err := shared.ListAppStoreVersionsInStates(requestCtx, client, appID, platform, filter)
+	versions, err := shared.ListAppStoreVersionsInStatesWithRequestTimeouts(ctx, client, appID, platform, filter)
 	if err != nil {
 		return liveAppVersion{}, fmt.Errorf("builds dsyms: %w", err)
 	}

@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/asc"
 )
@@ -145,6 +146,75 @@ func TestListAppStoreVersionsInStatesMergesBothSpellings(t *testing.T) {
 	}
 	if got, want := strings.Join(log, ","), "READY_FOR_SALE||IOS|200,|READY_FOR_DISTRIBUTION|IOS|200"; got != want {
 		t.Fatalf("request sequence = %q, want %q", got, want)
+	}
+}
+
+func TestListAppStoreVersionsInStatesWithRequestTimeoutsUsesAFreshTimeoutPerRequest(t *testing.T) {
+	var deadlines []time.Time
+	client := newSubmitReadinessTestClient(t, func(req *http.Request) (*http.Response, error) {
+		deadline, ok := req.Context().Deadline()
+		if !ok {
+			t.Fatalf("request %s has no deadline", req.URL.String())
+		}
+		deadlines = append(deadlines, deadline)
+		query := req.URL.Query()
+		switch {
+		case query.Get("filter[appStoreState]") == "READY_FOR_SALE" && query.Get("cursor") == "":
+			return submitReadinessJSONResponse(http.StatusOK, `{"data":[{"type":"appStoreVersions","id":"ver-1","attributes":{"appStoreState":"READY_FOR_SALE"}}],"links":{"next":"https://api.appstoreconnect.apple.com/v1/apps/app-1/appStoreVersions?filter%5BappStoreState%5D=READY_FOR_SALE&cursor=2"}}`)
+		case query.Get("cursor") == "2":
+			return submitReadinessJSONResponse(http.StatusOK, `{"data":[{"type":"appStoreVersions","id":"ver-2","attributes":{"appStoreState":"READY_FOR_SALE"}}],"links":{}}`)
+		case query.Get("filter[appVersionState]") == "READY_FOR_DISTRIBUTION":
+			return submitReadinessJSONResponse(http.StatusOK, `{"data":[],"links":{}}`)
+		default:
+			t.Fatalf("unexpected request %s", req.URL.String())
+			return nil, nil
+		}
+	})
+
+	versions, err := ListAppStoreVersionsInStatesWithRequestTimeouts(context.Background(), client, "app-1", "", LiveAppStoreVersionStateFilter())
+	if err != nil {
+		t.Fatalf("ListAppStoreVersionsInStatesWithRequestTimeouts() error: %v", err)
+	}
+	if len(versions) != 2 {
+		t.Fatalf("expected two versions across pages, got %d", len(versions))
+	}
+	if len(deadlines) != 3 {
+		t.Fatalf("expected three requests, got %d", len(deadlines))
+	}
+	// A deadline shared across the whole lookup would be identical on every
+	// request; a fresh per-request timeout is created later for each one.
+	for i := 1; i < len(deadlines); i++ {
+		if !deadlines[i].After(deadlines[i-1]) {
+			t.Fatalf("request %d reused an earlier deadline: %v then %v", i, deadlines[i-1], deadlines[i])
+		}
+	}
+}
+
+// Callers that own a longer budget (for example a publish --timeout override)
+// must not have each request capped at the default request timeout.
+func TestListAndHasAppStoreVersionsInStatesUseTheCallerDeadline(t *testing.T) {
+	callerDeadline := time.Now().Add(time.Hour)
+	ctx, cancel := context.WithDeadline(context.Background(), callerDeadline)
+	defer cancel()
+
+	requests := 0
+	client := newSubmitReadinessTestClient(t, func(req *http.Request) (*http.Response, error) {
+		requests++
+		deadline, ok := req.Context().Deadline()
+		if !ok || !deadline.Equal(callerDeadline) {
+			t.Fatalf("request %s deadline = %v (set=%t), want caller deadline %v", req.URL.String(), deadline, ok, callerDeadline)
+		}
+		return submitReadinessJSONResponse(http.StatusOK, `{"data":[],"links":{}}`)
+	})
+
+	if _, err := ListAppStoreVersionsInStates(ctx, client, "app-1", "IOS", LiveAppStoreVersionStateFilter()); err != nil {
+		t.Fatalf("ListAppStoreVersionsInStates() error: %v", err)
+	}
+	if _, err := HasAppStoreVersionInStates(ctx, client, "app-1", "IOS", LiveAppStoreVersionStateFilter()); err != nil {
+		t.Fatalf("HasAppStoreVersionInStates() error: %v", err)
+	}
+	if requests != 4 {
+		t.Fatalf("expected two requests per helper, got %d", requests)
 	}
 }
 
