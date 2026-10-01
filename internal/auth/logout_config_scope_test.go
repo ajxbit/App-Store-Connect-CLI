@@ -265,6 +265,22 @@ func TestRetainedGlobalConfigCredentials(t *testing.T) {
 		}
 	})
 
+	t.Run("global config with only keychain metadata", func(t *testing.T) {
+		fixture := newScopedLogoutFixture(t)
+		if err := config.SaveAt(fixture.globalPath, &config.Config{
+			KeychainMetadata: []config.KeychainMetadata{{Name: "legacy", KeyID: "KEY", IssuerID: "ISS"}},
+		}); err != nil {
+			t.Fatalf("SaveAt(global) error: %v", err)
+		}
+		path, retained, err := RetainedGlobalConfigCredentials("")
+		if err != nil {
+			t.Fatalf("RetainedGlobalConfigCredentials() error: %v", err)
+		}
+		if !retained || path != fixture.globalPath {
+			t.Fatalf("got (%q, %v), want (%q, true)", path, retained, fixture.globalPath)
+		}
+	})
+
 	t.Run("missing global config", func(t *testing.T) {
 		fixture := newScopedLogoutFixture(t)
 		if err := os.Remove(fixture.globalPath); err != nil {

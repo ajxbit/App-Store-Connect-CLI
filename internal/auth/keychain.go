@@ -1369,7 +1369,8 @@ func RetainedGlobalConfigCredentials(name string) (string, bool, error) {
 	name = strings.TrimSpace(name)
 	retained := false
 	if name == "" {
-		retained = hasAnyCredentials(cfg)
+		// Match what --include-global would clear, including keychain metadata.
+		retained = hasAnyCredentials(cfg) || len(cfg.KeychainMetadata) > 0
 	} else {
 		retained = removeCredentialFromConfig(cloneConfigForCredentialRemoval(cfg), name)
 	}
