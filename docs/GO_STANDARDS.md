@@ -93,4 +93,5 @@ if !strings.Contains(err.Error(), "not found") {  // DON'T DO THIS
 - Use `t.TempDir()` for temporary files
 - Use `t.ArtifactDir()` for test artifacts you want to inspect with `go test -artifacts`
 - Use `t.Setenv()` to set environment variables (auto-cleaned up)
-- Isolate from user config by setting `ASC_CONFIG_PATH` to a temp path
+- Isolate from user config by setting `ASC_CONFIG_PATH` to a temp path; a temporary `HOME` alone is not enough, because the upward `.asc/config.json` search from a checkout inside the developer's home reaches `~/.asc/config.json`
+- `make test`, `make test-short` (used by the pre-commit hook), `make test-parallel`, and `make test-coverage` unset inherited `ASC_*` variables and `DO_NOT_TRACK` and pin `ASC_CONFIG_PATH` to a missing file; tests that need any of those inputs set them with `t.Setenv`

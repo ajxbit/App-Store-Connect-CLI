@@ -26,6 +26,17 @@ GOFUMPT_VERSION ?= v0.10.0
 GOLANGCI_LINT_VERSION ?= v2.12.1
 GOVULNCHECK_VERSION ?= v1.6.0
 
+# Test environment
+# Tests must not depend on the invoking shell or the developer's stored asc
+# state. Unset every inherited ASC_* variable (except test-only switches) and
+# DO_NOT_TRACK, bypass the keychain, and pin ASC_CONFIG_PATH to a file that
+# never exists: a temporary HOME alone is not enough, because the upward
+# .asc/config.json search from a checkout inside the home directory reaches
+# ~/.asc/config.json. Tests that need any of these inputs set them with t.Setenv.
+TEST_ENV_PASSTHROUGH := ASC_UPDATE_GOLDEN
+TEST_CONFIG_PATH := /nonexistent/asc-test/config.json
+TEST_ENV = env $(foreach var,$(sort $(filter-out $(TEST_ENV_PASSTHROUGH),$(filter ASC_%,$(.VARIABLES)))),-u $(var)) -u DO_NOT_TRACK ASC_BYPASS_KEYCHAIN=1 ASC_CONFIG_PATH=$(TEST_CONFIG_PATH)
+
 # Directories
 SRC_DIR := .
 BUILD_DIR := build
@@ -73,20 +84,26 @@ build-debug:
 .PHONY: test
 test:
 	@echo "$(BLUE)Running tests...$(NC)"
-	ASC_BYPASS_KEYCHAIN=1 $(GO) test -v ./...
+	$(TEST_ENV) $(GO) test -v ./...
+
+# Run the short test suite (used by the pre-commit hook)
+.PHONY: test-short
+test-short:
+	@echo "$(BLUE)Running short tests...$(NC)"
+	$(TEST_ENV) $(GO) test -short ./...
 
 # Run tests with parallel package compilation
 # Defaults to GOMAXPROCS; set PARALLEL to override (e.g. PARALLEL=4)
 .PHONY: test-parallel
 test-parallel:
 	@echo "$(BLUE)Running tests (parallel=$(or $(PARALLEL),auto))...$(NC)"
-	ASC_BYPASS_KEYCHAIN=1 $(GO) test -v -count=1 $(if $(PARALLEL),-p=$(PARALLEL)) ./...
+	$(TEST_ENV) $(GO) test -v -count=1 $(if $(PARALLEL),-p=$(PARALLEL)) ./...
 
 # Run tests with coverage
 .PHONY: test-coverage
 test-coverage:
 	@echo "$(BLUE)Running tests with coverage...$(NC)"
-	ASC_BYPASS_KEYCHAIN=1 $(GO) test -coverprofile=coverage.out ./...
+	$(TEST_ENV) $(GO) test -coverprofile=coverage.out ./...
 	$(GO) tool cover -html=coverage.out -o coverage.html
 	@echo "$(GREEN)Coverage report: coverage.html$(NC)"
 
@@ -289,6 +306,7 @@ help:
 	@echo "  build-all      Build release binaries for supported platforms"
 	@echo "  build-debug    Build with debug symbols"
 	@echo "  test           Run tests"
+	@echo "  test-short     Run the short test suite"
 	@echo "  test-parallel  Run tests with optional package parallelism (PARALLEL=<n>)"
 	@echo "  test-coverage  Run tests with coverage"
 	@echo "  test-integration  Run opt-in integration tests"

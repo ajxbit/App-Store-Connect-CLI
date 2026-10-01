@@ -210,3 +210,69 @@ func TestMakeBuildRebuildsBinaryWhenSourceChanges(t *testing.T) {
 		t.Fatalf("expected rebuilt binary output %q, got %q", "second", got)
 	}
 }
+
+func TestMakeTestTargetsIsolateDeveloperEnvironment(t *testing.T) {
+	repoRoot, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+
+	for _, target := range []string{"test", "test-short", "test-parallel", "test-coverage"} {
+		t.Run(target, func(t *testing.T) {
+			workspaceDir := t.TempDir()
+			envLog := filepath.Join(workspaceDir, "test-env")
+			fakeGo := filepath.Join(workspaceDir, "fake-go")
+			script := `#!/bin/sh
+if [ "$1" = "test" ]; then
+	env > "$FAKE_GO_ENV_LOG"
+fi
+exit 0
+`
+			if err := os.WriteFile(fakeGo, []byte(script), 0o755); err != nil {
+				t.Fatalf("write fake go: %v", err)
+			}
+
+			cmd := exec.Command("make", "-f", filepath.Join(repoRoot, "Makefile"), "-C", workspaceDir, target, "GO="+fakeGo)
+			cmd.Env = append(
+				os.Environ(),
+				"FAKE_GO_ENV_LOG="+envLog,
+				"ASC_APP_ID=developer-app",
+				"ASC_CONFIG_PATH=/developer/.asc/config.json",
+				"ASC_PROFILE=developer-profile",
+				"ASC_TELEMETRY_DISABLED=1",
+				"ASC_BYPASS_KEYCHAIN=0",
+				"DO_NOT_TRACK=1",
+				"ASC_UPDATE_GOLDEN=1",
+			)
+			if output, err := cmd.CombinedOutput(); err != nil {
+				t.Fatalf("make %s failed: %v\n%s", target, err, output)
+			}
+
+			data, err := os.ReadFile(envLog)
+			if err != nil {
+				t.Fatalf("read test environment: %v", err)
+			}
+			got := map[string]string{}
+			for _, line := range strings.Split(string(data), "\n") {
+				if name, value, ok := strings.Cut(line, "="); ok {
+					got[name] = value
+				}
+			}
+
+			for name, want := range map[string]string{
+				"ASC_BYPASS_KEYCHAIN": "1",
+				"ASC_CONFIG_PATH":     "/nonexistent/asc-test/config.json",
+				"ASC_UPDATE_GOLDEN":   "1",
+			} {
+				if got[name] != want {
+					t.Errorf("%s = %q, want %q", name, got[name], want)
+				}
+			}
+			for _, name := range []string{"ASC_APP_ID", "ASC_PROFILE", "ASC_TELEMETRY_DISABLED", "DO_NOT_TRACK"} {
+				if value, ok := got[name]; ok {
+					t.Errorf("%s leaked into the test environment as %q", name, value)
+				}
+			}
+		})
+	}
+}
