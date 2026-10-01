@@ -2096,6 +2096,8 @@ func removeFromConfigIfPresent(name string, includeGlobal bool) error {
 	for _, path := range paths {
 		cfg, err := config.LoadAt(path)
 		if errors.Is(err, config.ErrNotFound) {
+			// A missing config file holds no matching credential.
+			missingCredential = true
 			continue
 		}
 		if err != nil {

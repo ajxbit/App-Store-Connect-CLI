@@ -28,6 +28,8 @@ The command still exits 0 and prints the same stdout as before. If
 `--name` matches a profile only in `~/.asc/config.json`, nothing in scope
 matches, so logout prints the warning and then fails with the existing
 not-found error (exit 1), where earlier releases removed the global profile.
+The same not-found error now applies when the active config file does not
+exist; earlier releases reported success there without removing anything.
 
 ## Migration
 

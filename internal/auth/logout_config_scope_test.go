@@ -171,6 +171,22 @@ func TestRemoveCredentialsWithConfigPathOverrideDoesNotFindGlobalOnlyProfile(t *
 	}
 }
 
+func TestRemoveCredentialsWithMissingOverrideFileDoesNotFindGlobalOnlyProfile(t *testing.T) {
+	fixture := newScopedLogoutFixture(t)
+	if err := os.Remove(fixture.overridePath); err != nil {
+		t.Fatalf("Remove(override) error: %v", err)
+	}
+	globalBefore := readConfigBytes(t, fixture.globalPath)
+
+	err := RemoveCredentials("global-only")
+	if !errors.Is(err, keyring.ErrKeyNotFound) {
+		t.Fatalf("RemoveCredentials() error = %v, want keyring.ErrKeyNotFound", err)
+	}
+	if globalAfter := readConfigBytes(t, fixture.globalPath); !bytes.Equal(globalAfter, globalBefore) {
+		t.Fatalf("global config changed:\nbefore: %s\nafter: %s", globalBefore, globalAfter)
+	}
+}
+
 func TestRemoveCredentialsWithoutConfigPathOverrideStillCleansActiveAndGlobalConfigs(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)

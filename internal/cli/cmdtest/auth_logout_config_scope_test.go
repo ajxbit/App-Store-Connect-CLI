@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	cmd "github.com/rudrankriyam/App-Store-Connect-CLI/cmd"
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/config"
 )
 
@@ -128,6 +129,36 @@ func TestAuthLogoutNamedWithConfigPathOverrideSkipsWarningWhenGlobalLacksProfile
 	}
 	requireConfigProfiles(t, overridePath, "shared")
 	requireFileUnchanged(t, globalPath, globalBefore)
+}
+
+func TestAuthLogoutNamedGlobalOnlyProfileWithMissingOverrideFileFails(t *testing.T) {
+	overridePath, globalPath := isolateScopedLogout(t)
+	globalBefore := seedLogoutConfigs(t, overridePath, globalPath)
+	if err := os.Remove(overridePath); err != nil {
+		t.Fatalf("Remove(override) error: %v", err)
+	}
+
+	var code int
+	stdout, stderr := captureOutput(t, func() {
+		code = cmd.Run([]string{"auth", "logout", "--name", "global-only", "--confirm"}, "1.0.0")
+	})
+
+	if code != cmd.ExitError {
+		t.Fatalf("exit code = %d, want %d; stderr=%q", code, cmd.ExitError, stderr)
+	}
+	if stdout != "" {
+		t.Fatalf("expected no success message, got %q", stdout)
+	}
+	for _, want := range []string{
+		"which still holds credentials named 'global-only'",
+		"auth logout: failed to remove credentials",
+	} {
+		if !strings.Contains(stderr, want) {
+			t.Fatalf("expected stderr to contain %q, got %q", want, stderr)
+		}
+	}
+	requireFileUnchanged(t, globalPath, globalBefore)
+	requireNoConfigFile(t, overridePath)
 }
 
 func TestAuthLogoutNamedIncludeGlobalRemovesFromBothConfigs(t *testing.T) {
