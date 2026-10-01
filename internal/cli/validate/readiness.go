@@ -24,6 +24,9 @@ type ReadinessOptions struct {
 	Deep      bool
 	CheckURLs bool
 	Build     *validation.Build
+	// IPA is the local binary evidence for iPad support. When nil, a missing
+	// iPad screenshot set is reported as informational only.
+	IPA *LocalIPA
 }
 
 // BuildReadinessReport fetches live App Store Connect data and returns a
@@ -264,6 +267,21 @@ func BuildReadinessReport(ctx context.Context, opts ReadinessOptions) (validatio
 		platform = string(versionData.response.Data.Attributes.Platform)
 	}
 
+	var supportsIPad *bool
+	if opts.IPA != nil {
+		if err := checkLocalIPAMatchesVersion(
+			opts.IPA,
+			platform,
+			appInfoData.app.Attributes.BundleID,
+			versionData.response.Data.Attributes.VersionString,
+			attachedBuild,
+		); err != nil {
+			return validation.Report{}, err
+		}
+		value := opts.IPA.SupportsIPad()
+		supportsIPad = &value
+	}
+
 	report := validation.Validate(validation.Input{
 		AppID:                       opts.AppID,
 		AppInfoID:                   appInfoData.appInfoID,
@@ -290,6 +308,7 @@ func BuildReadinessReport(ctx context.Context, opts ReadinessOptions) (validatio
 		AvailabilityFetchSkipReason: availabilityFetchSkipReason,
 		PricingCoverageSkipReason:   pricingCoverageSkipReason,
 		ScreenshotSets:              screenshotSets,
+		SupportsIPad:                supportsIPad,
 		Subscriptions:               subscriptions,
 		SubscriptionFetchSkipReason: subscriptionFetchSkipReason,
 		IAPs:                        iaps,

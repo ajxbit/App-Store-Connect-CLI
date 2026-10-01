@@ -158,6 +158,9 @@ type Input struct {
 	AvailabilityFetchSkipReason string
 	PricingCoverageSkipReason   string
 	ScreenshotSets              []ScreenshotSet
+	// SupportsIPad reports whether the app binary declares iPad support in
+	// UIDeviceFamily. It is nil when no binary was inspected.
+	SupportsIPad                *bool
 	Subscriptions               []Subscription
 	SubscriptionFetchSkipReason string
 	IAPs                        []IAP
