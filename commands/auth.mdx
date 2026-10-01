@@ -170,14 +170,21 @@ Remove stored API credentials.
   Confirm credential removal (required)
 </ParamField>
 
+<ParamField path="--include-global" type="boolean" default="false">
+  Also remove matching credentials from `~/.asc/config.json` when `ASC_CONFIG_PATH` points to another file
+</ParamField>
+
 **Examples:**
 
 ```bash  theme={null}
 asc auth logout --all --confirm
 asc auth logout --name "MyKey" --confirm
+asc auth logout --all --include-global --confirm
 ```
 
 `--confirm` is required. Omitting it, or passing an explicit `--confirm=false`, is a usage error (exit 2) and no credentials are changed. Omitting `--name` removes all credentials; pass `--name` or `--all` to make the target explicit.
+
+Logout removes matching credentials from the keychain and the active config file. When `ASC_CONFIG_PATH` is set, that file is the only config file logout changes. If `~/.asc/config.json` still holds matching credentials, logout leaves them in place and prints a warning to stderr naming the file. To remove them too, run logout with `ASC_CONFIG_PATH` unset or pass `--include-global`. Without `ASC_CONFIG_PATH`, logout also cleans `~/.asc/config.json`, as before.
 
 **Output:**
 
