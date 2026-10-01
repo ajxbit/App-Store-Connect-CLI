@@ -158,9 +158,10 @@ func downloadDSYMSelection(ctx context.Context, client *asc.Client, selection ds
 		defer cancel()
 	}
 
+	// resolveDSYMTargets already names the command in every error it returns.
 	targets, err := resolveDSYMTargets(runCtx, client, selection)
 	if err != nil {
-		return fmt.Errorf("builds dsyms: %w", err)
+		return err
 	}
 
 	files := make([]asc.DSYMDownloadFile, 0)
@@ -250,7 +251,10 @@ func fetchDSYMBundles(ctx context.Context, client *asc.Client, buildID string, s
 	}
 	if !selection.Wait {
 		bundles, _, err := load(ctx)
-		return bundles, err
+		if err != nil {
+			return nil, fmt.Errorf("builds dsyms: %w", err)
+		}
+		return bundles, nil
 	}
 	fmt.Fprintf(os.Stderr, "Waiting for dSYM files for build %s\n", buildID)
 	bundles, err := asc.PollUntil(ctx, selection.Poll, load)
@@ -264,9 +268,11 @@ func fetchDSYMBundles(ctx context.Context, client *asc.Client, buildID string, s
 }
 
 func loadDSYMBundles(ctx context.Context, client *asc.Client, buildID string) ([]dsymBundleInfo, error) {
+	// fetchDSYMBundles names the command once, whether this error comes back
+	// directly or through PollUntil.
 	bundlesResp, err := client.GetBuildBundlesForBuild(ctx, buildID)
 	if err != nil {
-		return nil, fmt.Errorf("builds dsyms: %w", err)
+		return nil, err
 	}
 	bundles := make([]dsymBundleInfo, 0, len(bundlesResp.Data))
 	for _, bundle := range bundlesResp.Data {
