@@ -185,6 +185,8 @@ Finance reports use Apple fiscal months, not calendar months.
 
 When `ASC_CONFIG_PATH` is unset, an empty local config can fall back to global credentials. A local config containing credential fields shadows the global store, and incomplete credential data can error instead of falling back. Setting `ASC_CONFIG_PATH` disables global fallback.
 
+Overriding `HOME` does not hide your account's `~/.asc/config.json` when you run `asc` from a directory inside your account home: the upward search in step 2 still finds it, and `asc` prints a warning. Set `ASC_CONFIG_PATH` to an absolute path to choose the config explicitly.
+
 Ensure file permissions are restrictive:
 
 ```bash  theme={null}

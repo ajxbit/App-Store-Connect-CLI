@@ -70,7 +70,8 @@ Build selection (one of):
   --app APP [--version VER] [--platform PLATFORM] [--all | --min-version VER | --after-uploaded-date TIME]
 
 --version latest is the same selector as --latest. --version live uses the
-newest READY_FOR_SALE or PREORDER_READY_FOR_SALE App Store version. Pass
+newest App Store version that is live (appVersionState READY_FOR_DISTRIBUTION
+or appStoreState READY_FOR_SALE) or PREORDER_READY_FOR_SALE. Pass
 --platform when more than one platform is live. --min-version and
 --after-uploaded-date select every matching build. Single-build file names stay
 bundleId-version-buildNumber.dSYM.zip. Bulk selectors append the build ID

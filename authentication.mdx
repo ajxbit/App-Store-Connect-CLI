@@ -266,6 +266,8 @@ When config is consulted, its path is selected in this order:
 
 When `ASC_CONFIG_PATH` is unset, an empty local config can fall back to global credentials. Once the local config contains any credential fields, it intentionally shadows the global credential store; incomplete credential data can therefore error instead of falling back. Setting `ASC_CONFIG_PATH` disables global fallback entirely.
 
+The upward search in step 2 does not stop at your home directory. When the current directory is inside your account's home directory, it reaches that account's `~/.asc/config.json` even if `HOME` points somewhere else, so overriding `HOME` does not isolate `asc` from your stored config. `asc` prints a warning when this happens; a future release will stop treating that file as a local config when `HOME` points elsewhere. To isolate a CI job, sandbox, agent, or test run from stored config, set `ASC_CONFIG_PATH` to an absolute path (it does not need to exist) and set `ASC_BYPASS_KEYCHAIN=1`.
+
 `asc auth login --bypass-keychain` or a truthy `ASC_BYPASS_KEYCHAIN` controls where that login writes: global config by default, or local config with `--local`. The environment variable also controls how later commands read credentials; the login flag does not persist the read behavior.
 
 Within stored credentials, an explicitly selected profile wins. Without one, `asc` uses the stored default, or the only stored credential when exactly one exists. Multiple credentials without a default are never selected arbitrarily; resolution either errors or uses an allowed environment fallback.

@@ -295,6 +295,7 @@ func resolvePath() (string, error) {
 		return "", err
 	}
 	if localPath != "" {
+		warnIfAccountHomeLocalConfig(localPath)
 		return localPath, nil
 	}
 
