@@ -50,6 +50,13 @@ Cancel an active review submission:
 asc submit cancel --id SUBMISSION_ID --confirm
 ```
 
+If App Store Connect refuses with `Resource is not in cancellable state`, the
+command reads the submission once and explains its state and the next step,
+for example that a `READY_FOR_REVIEW` draft was never submitted, or that an
+`UNRESOLVED_ISSUES` submission needs a fix or a Resolution Center reply. If
+that read fails, the command reports the refusal as it did before, with Apple's
+original error text.
+
 ## Canonical publish workflow
 
 Ship to the App Store with the canonical high-level publish command:
