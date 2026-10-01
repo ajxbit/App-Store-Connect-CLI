@@ -770,19 +770,15 @@ func StoreCredentialsConfig(name, keyID, issuerID, keyPath string) error {
 	return StoreCredentialsConfigWithKeyType(name, keyID, issuerID, keyPath, config.CredentialKeyTypeTeam)
 }
 
-// StoreCredentialsConfigWithKeyType stores credentials in the config file only with an explicit key type.
+// StoreCredentialsConfigWithKeyType stores credentials in the config file only
+// with an explicit key type. It writes to ASC_CONFIG_PATH when set, matching
+// where reads look, and otherwise to the global config.
 func StoreCredentialsConfigWithKeyType(name, keyID, issuerID, keyPath, keyType string) error {
-	payload := credentialPayload{
-		KeyID:          keyID,
-		IssuerID:       issuerID,
-		PrivateKeyPath: keyPath,
-		KeyType:        normalizedStoredKeyType(keyType),
-	}
-	path, err := config.GlobalPath()
+	path, err := config.DefaultWritePath()
 	if err != nil {
 		return err
 	}
-	return storeInConfigAt(name, payload, path)
+	return StoreCredentialsConfigAtWithKeyType(name, keyID, issuerID, keyPath, path, keyType)
 }
 
 // StoreCredentialsConfigAt stores credentials in the specified config file.

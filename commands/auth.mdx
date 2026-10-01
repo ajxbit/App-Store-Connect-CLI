@@ -22,7 +22,7 @@ The short version:
 
 ### `asc auth init`
 
-Create a template config.json for authentication.
+Create a template config.json for authentication. It writes the `ASC_CONFIG_PATH` file when that variable is set, otherwise `~/.asc/config.json`.
 
 <ParamField path="--force" type="boolean" default="false">
   Overwrite existing config.json
@@ -82,7 +82,7 @@ Register and store App Store Connect API key credentials.
 </ParamField>
 
 <ParamField path="--bypass-keychain" type="boolean" default="false">
-  Store credentials in config.json instead of keychain
+  Store credentials in config.json instead of keychain: the `ASC_CONFIG_PATH` file when set, otherwise `~/.asc/config.json`
 </ParamField>
 
 <ParamField path="--local" type="boolean" default="false">
