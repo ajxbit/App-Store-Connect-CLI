@@ -80,7 +80,7 @@ Checks:
   - Build attached and processed
   - Build encryption declaration readiness
   - App content rights declaration
-  - Pricing schedule and territory availability
+  - Pricing schedule, base territory price (Free counts), and territory availability
   - Screenshot presence and size compatibility
   - Required iPad screenshots for builds that run on iPad (--ipa)
   - Subscription review readiness and promotional image guidance

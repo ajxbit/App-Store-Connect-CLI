@@ -27,7 +27,7 @@ func Validate(input Input, strict bool) Report {
 	checks = append(checks, contentRightsChecks(input.AppID, input.ContentRightsDeclaration)...)
 	checks = append(checks, buildChecks(input.Build)...)
 	checks = append(checks, buildSubmissionChecks(input.Build)...)
-	checks = append(checks, pricingChecks(input.AppID, input.PriceScheduleID, input.PricingFetchSkipReason)...)
+	checks = append(checks, pricingChecks(input.AppID, input.PriceScheduleID, input.BasePriceMissing, input.BaseTerritory, input.PricingFetchSkipReason)...)
 	checks = append(checks, availabilityChecks(input.AppID, input.AvailabilityID, input.AvailableTerritories, input.AvailabilityFetchSkipReason)...)
 	checks = append(checks, screenshotPresenceChecks(input.PrimaryLocale, input.VersionLocalizations, input.ScreenshotSets)...)
 	checks = append(checks, ipadScreenshotChecks(input.Platform, input.PrimaryLocale, input.VersionLocalizations, input.ScreenshotSets, input.SupportsIPad)...)
