@@ -207,12 +207,12 @@ func TestReviewDetailsCreateRequiresContactFields(t *testing.T) {
 		{
 			name:    "email only",
 			args:    []string{"review", "details-create", "--version-id", "version-1", "--contact-email", "dev@example.com", "--notes", "Guest flow"},
-			wantErr: "Error: review details-create needs --contact-first-name, --contact-last-name, and --contact-phone; App Store Connect rejects a new review detail without its contact fields.",
+			wantErr: "Error: review details-create needs --contact-first-name and --contact-phone; App Store Connect rejects a new review detail without them.",
 		},
 		{
 			name:    "phone missing",
 			args:    []string{"review", "details-create", "--version-id", "version-1", "--contact-first-name", "Dev", "--contact-last-name", "Support", "--contact-email", "dev@example.com"},
-			wantErr: "Error: review details-create needs --contact-phone; App Store Connect rejects a new review detail without its contact fields.",
+			wantErr: "Error: review details-create needs --contact-phone; App Store Connect rejects a new review detail without them.",
 		},
 		{
 			name:    "blank value counts as missing",
@@ -222,7 +222,7 @@ func TestReviewDetailsCreateRequiresContactFields(t *testing.T) {
 		{
 			name:    "no attributes",
 			args:    []string{"review", "details-create", "--version-id", "version-1"},
-			wantErr: "Error: review details-create needs --contact-first-name, --contact-last-name, --contact-email, and --contact-phone;",
+			wantErr: "Error: review details-create needs --contact-first-name and --contact-phone;",
 		},
 	}
 	for _, test := range tests {
@@ -253,6 +253,27 @@ func TestReviewDetailsCreateSendsCompleteContacts(t *testing.T) {
 	} {
 		if !strings.Contains(*body, want) {
 			t.Fatalf("expected %s in body, got %s", want, *body)
+		}
+	}
+}
+
+func TestReviewDetailsCreateLeavesLastNameAndEmailToAppStoreConnect(t *testing.T) {
+	// Only first name and phone were observed as required on create, so a
+	// create without last name or email is sent and App Store Connect decides.
+	body := captureReviewDetailWrite(t, http.MethodPost, "/v1/appStoreReviewDetails")
+	runReviewDetailCommand(t, []string{
+		"review", "details-create", "--version-id", "version-1",
+		"--contact-first-name", "Dev", "--contact-phone", "+1 408 555 0100",
+		"--notes", "Guest flow",
+	})
+	for _, want := range []string{`"contactFirstName":"Dev"`, `"contactPhone":"+1 408 555 0100"`} {
+		if !strings.Contains(*body, want) {
+			t.Fatalf("expected %s in body, got %s", want, *body)
+		}
+	}
+	for _, unwanted := range []string{"contactLastName", "contactEmail"} {
+		if strings.Contains(*body, unwanted) {
+			t.Fatalf("expected no %s in body, got %s", unwanted, *body)
 		}
 	}
 }

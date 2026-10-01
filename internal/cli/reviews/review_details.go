@@ -146,8 +146,8 @@ func ReviewDetailsCreateCommand() *ffcli.Command {
 
 	versionID := shared.BindResourceIDFlag(fs, "version-id", "appStoreVersions", "App Store version ID (required)")
 	contactFirstName := fs.String("contact-first-name", "", "Contact first name (required for new review details)")
-	contactLastName := fs.String("contact-last-name", "", "Contact last name (required for new review details)")
-	contactEmail := fs.String("contact-email", "", "Contact email (required for new review details)")
+	contactLastName := fs.String("contact-last-name", "", "Contact last name")
+	contactEmail := fs.String("contact-email", "", "Contact email")
 	contactPhone := fs.String("contact-phone", "", reviewDetailContactPhoneUsage+" (required for new review details)")
 	demoAccountName := fs.String("demo-account-name", "", reviewDetailDemoAccountNameUsage)
 	demoAccountPassword := fs.String("demo-account-password", "", reviewDetailDemoAccountPasswordUsage)
@@ -163,9 +163,9 @@ func ReviewDetailsCreateCommand() *ffcli.Command {
 		ShortHelp:  "Create App Store review details for a version.",
 		LongHelp: `Create App Store review details for a version.
 
-New review details need ` + "`--contact-first-name`" + `, ` + "`--contact-last-name`" + `,
-` + "`--contact-email`" + `, and ` + "`--contact-phone`" + `; with ` + "`--if-exists skip`" + ` or ` + "`update`" + ` they may
-come from the existing detail. ` + "`--notes`" + ` allow at most 4,000 characters, and
+New review details need ` + "`--contact-first-name`" + ` and ` + "`--contact-phone`" + `, which App
+Store Connect rejects a new detail without; with ` + "`--if-exists skip`" + ` or ` + "`update`" + ` they
+may come from the existing detail. ` + "`--notes`" + ` allow at most 4,000 characters, and
 +1 phone numbers need 10 digits after the country code. These are checked
 before any request.
 
@@ -217,12 +217,10 @@ Any other 409 keeps failing.`,
 				return err
 			}
 			// With --if-exists skip or update the version may already carry its
-			// contact fields, so only a plain create must supply all of them.
+			// contact fields, so only a plain create must supply them.
 			if ifExistsMode == shared.IfExistsFail {
 				if err := validateReviewDetailCreateContacts(visited, map[string]string{
 					"contact-first-name": *contactFirstName,
-					"contact-last-name":  *contactLastName,
-					"contact-email":      *contactEmail,
 					"contact-phone":      *contactPhone,
 				}); err != nil {
 					return err
@@ -565,12 +563,11 @@ func validateReviewDetailDemoPasswordLength(demoAccountPassword string) error {
 	return shared.WithDiagnostic(flag.ErrHelp, shared.DiagnosticInvalidInput, "--demo-account-password")
 }
 
-// reviewDetailCreateContactFlags lists the contact flags a new review detail
-// needs, in help order.
+// reviewDetailCreateContactFlags lists the contact flags App Store Connect was
+// observed rejecting a new review detail without. Last name and email are left
+// to App Store Connect.
 var reviewDetailCreateContactFlags = []string{
 	"contact-first-name",
-	"contact-last-name",
-	"contact-email",
 	"contact-phone",
 }
 
@@ -626,8 +623,9 @@ func validateReviewDetailContactPhone(contactPhone string) error {
 	return reportReviewDetailUsageError(shared.UsageErrorInvalidValue, shared.DiagnosticInvalidInput, "--contact-phone", message)
 }
 
-// validateReviewDetailCreateContacts requires every contact field on a new
-// review detail; App Store Connect rejects the POST one missing field at a time.
+// validateReviewDetailCreateContacts requires the contact fields App Store
+// Connect demands on a new review detail; it rejects the POST one missing field
+// at a time.
 func validateReviewDetailCreateContacts(visited map[string]bool, values map[string]string) error {
 	var missing []string
 	for _, name := range reviewDetailCreateContactFlags {
@@ -639,8 +637,8 @@ func validateReviewDetailCreateContacts(visited map[string]bool, values map[stri
 		return nil
 	}
 	message := fmt.Sprintf(
-		"review details-create needs %s; App Store Connect rejects a new review detail without its contact fields. To change a version that already has review details, use asc review details-update or --if-exists update.",
-		joinReviewDetailFlags(missing),
+		"review details-create needs %s; App Store Connect rejects a new review detail without them. To change a version that already has review details, use asc review details-update or --if-exists update.",
+		strings.Join(missing, " and "),
 	)
 	return reportReviewDetailUsageError(shared.UsageErrorMissingRequired, shared.DiagnosticRequiredInputMissing, missing[0], message)
 }
@@ -650,19 +648,6 @@ func validateReviewDetailCreateContacts(visited map[string]bool, values map[stri
 func reportReviewDetailUsageError(kind shared.UsageErrorKind, code shared.DiagnosticCode, parameter, message string) error {
 	fmt.Fprintf(os.Stderr, "Error: %s\n", message)
 	return shared.WithDiagnostic(shared.NewReportedUsageError(kind, message), code, parameter)
-}
-
-func joinReviewDetailFlags(flags []string) string {
-	switch len(flags) {
-	case 0:
-		return ""
-	case 1:
-		return flags[0]
-	case 2:
-		return flags[0] + " and " + flags[1]
-	default:
-		return strings.Join(flags[:len(flags)-1], ", ") + ", and " + flags[len(flags)-1]
-	}
 }
 
 // formatReviewDetailCount formats a non-negative count with thousands
