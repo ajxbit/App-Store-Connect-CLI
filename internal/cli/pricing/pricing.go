@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"os"
 	"strings"
-	"time"
 
 	"github.com/peterbourgon/ff/v3/ffcli"
 
@@ -468,7 +467,7 @@ Examples:
 			defer cancel()
 
 			if *resolved {
-				resp, err := fetchResolvedAppSchedulePrices(requestCtx, client, trimmedScheduleID, "manual", *limit, *next, time.Now().UTC())
+				resp, err := fetchResolvedAppSchedulePrices(requestCtx, client, trimmedScheduleID, "manual", *limit, *next, shared.PricingNow())
 				if err != nil {
 					return fmt.Errorf("pricing schedule manual-prices: failed to resolve: %w", err)
 				}
@@ -558,7 +557,7 @@ Examples:
 			defer cancel()
 
 			if *resolved {
-				resp, err := fetchResolvedAppSchedulePrices(requestCtx, client, trimmedScheduleID, "automatic", *limit, *next, time.Now().UTC())
+				resp, err := fetchResolvedAppSchedulePrices(requestCtx, client, trimmedScheduleID, "automatic", *limit, *next, shared.PricingNow())
 				if err != nil {
 					return fmt.Errorf("pricing schedule automatic-prices: failed to resolve: %w", err)
 				}
