@@ -90,10 +90,12 @@ cannot mix the two spellings, so no single --state value finds every live
 version.
 
 --latest fetches every page and keeps only the newest version per platform by
-createdDate. To find the live version, run it with --state
-READY_FOR_DISTRIBUTION and again with --state READY_FOR_SALE, then keep the
-newer result on each platform. A READY_FOR_SALE result whose appVersionState
-is present and is not READY_FOR_DISTRIBUTION is not live.
+createdDate. With --state READY_FOR_DISTRIBUTION it returns the live version
+on each platform where Apple reports appVersionState. To also find a live
+version that reports only READY_FOR_SALE, list --state READY_FOR_SALE with
+--paginate rather than --latest, skip results whose appVersionState is
+present and is not READY_FOR_DISTRIBUTION, and keep the newest version left
+on each platform across both lists.
 
 Use --include to return related resources in the same response instead of
 issuing a follow-up request per version. Included review-detail passwords are
@@ -104,7 +106,7 @@ Examples:
   asc versions list --app "123456789" --version "1.0.0"
   asc versions list --app "123456789" --platform IOS --state READY_FOR_REVIEW
   asc versions list --app "123456789" --state READY_FOR_DISTRIBUTION --latest
-  asc versions list --app "123456789" --state READY_FOR_SALE --latest
+  asc versions list --app "123456789" --state READY_FOR_SALE --paginate
   asc versions list --app "123456789" --include "build,appStoreVersionSubmission"
   asc versions list --app "123456789" --paginate`,
 		FlagSet:   fs,
