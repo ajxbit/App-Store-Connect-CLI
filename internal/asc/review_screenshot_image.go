@@ -129,6 +129,29 @@ func CheckReviewScreenshotImage(path string, source io.Reader) ([]string, error)
 	return warnings, nil
 }
 
+// reviewScreenshotMaxDecodePixels bounds the full decode. The largest
+// documented screenshot is 3840x2160; anything far larger already gets a
+// size warning, and decoding it would allocate memory in proportion to its
+// declared dimensions rather than its file size.
+const reviewScreenshotMaxDecodePixels = 16 * 1024 * 1024
+
+// ReviewScreenshotDecodeWarning fully decodes an image that already passed
+// CheckReviewScreenshotImage and returns a warning when the payload is
+// truncated or corrupt, or an empty string when it decodes. It warns rather
+// than rejects because Go's decoders do not support every encoding App Store
+// Connect accepts, such as arithmetic-coded JPEG. Images whose declared size
+// exceeds reviewScreenshotMaxDecodePixels are not decoded.
+func ReviewScreenshotDecodeWarning(path string, source io.ReaderAt, size int64) string {
+	cfg, _, err := image.DecodeConfig(io.NewSectionReader(source, 0, size))
+	if err != nil || int64(cfg.Width)*int64(cfg.Height) > reviewScreenshotMaxDecodePixels {
+		return ""
+	}
+	if _, _, err := image.Decode(io.NewSectionReader(source, 0, size)); err != nil {
+		return fmt.Sprintf("review screenshot %q could not be fully decoded (%v); if delivery fails, re-export it as PNG or JPEG.", path, err)
+	}
+	return ""
+}
+
 func acceptsScreenshotDimension(dims []ScreenshotDimension, target ScreenshotDimension) bool {
 	for _, dim := range dims {
 		if dim == target {

@@ -2,7 +2,9 @@ package asc
 
 import (
 	"bytes"
+	"encoding/binary"
 	"fmt"
+	"hash/crc32"
 	"image"
 	"image/color"
 	"image/gif"
@@ -228,5 +230,52 @@ func TestCheckReviewScreenshotImageWarnsAboutAlphaChannel(t *testing.T) {
 	}
 	if !strings.Contains(warnings[0], `review screenshot "review.png" has an alpha channel`) {
 		t.Fatalf("unexpected warning %q", warnings[0])
+	}
+}
+
+// pngHeaderOnly returns a PNG signature and IHDR chunk declaring the given
+// size with no image data, so nothing but the header is ever allocated.
+func pngHeaderOnly(width, height uint32) []byte {
+	ihdr := make([]byte, 13)
+	binary.BigEndian.PutUint32(ihdr[0:4], width)
+	binary.BigEndian.PutUint32(ihdr[4:8], height)
+	ihdr[8] = 8 // bit depth
+	ihdr[9] = 2 // true color
+	chunk := append([]byte("IHDR"), ihdr...)
+	var buf bytes.Buffer
+	buf.WriteString("\x89PNG\r\n\x1a\n")
+	_ = binary.Write(&buf, binary.BigEndian, uint32(len(ihdr)))
+	buf.Write(chunk)
+	_ = binary.Write(&buf, binary.BigEndian, crc32.ChecksumIEEE(chunk))
+	return buf.Bytes()
+}
+
+func TestReviewScreenshotDecodeWarningSkipsOversizedImages(t *testing.T) {
+	data := pngHeaderOnly(30000, 30000)
+	warnings, err := CheckReviewScreenshotImage("huge.png", bytes.NewReader(data))
+	if err != nil {
+		t.Fatalf("header check error = %v", err)
+	}
+	if len(warnings) != 1 || !strings.Contains(warnings[0], "is 30000x30000 pixels") {
+		t.Fatalf("warnings = %q, want the size warning", warnings)
+	}
+	if warning := ReviewScreenshotDecodeWarning("huge.png", bytes.NewReader(data), int64(len(data))); warning != "" {
+		t.Fatalf("warning = %q, want the oversized image left undecoded", warning)
+	}
+}
+
+func TestReviewScreenshotDecodeWarningFlagsTruncatedPayload(t *testing.T) {
+	data := encodeOpaquePNG(t, 640, 920)
+	truncated := data[:len(data)/2]
+
+	if _, err := CheckReviewScreenshotImage("review.png", bytes.NewReader(truncated)); err != nil {
+		t.Fatalf("header check error = %v, want the header to pass", err)
+	}
+	warning := ReviewScreenshotDecodeWarning("review.png", bytes.NewReader(truncated), int64(len(truncated)))
+	if !strings.Contains(warning, `review screenshot "review.png" could not be fully decoded`) {
+		t.Fatalf("warning = %q, want a decode warning", warning)
+	}
+	if warning := ReviewScreenshotDecodeWarning("review.png", bytes.NewReader(data), int64(len(data))); warning != "" {
+		t.Fatalf("warning = %q, want none for a complete image", warning)
 	}
 }

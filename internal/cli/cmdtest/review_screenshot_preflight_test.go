@@ -323,6 +323,26 @@ func TestSubscriptionsReviewScreenshotsCreateWarnsAboutUndocumentedSizeAndUpload
 	}
 }
 
+func TestIAPReviewScreenshotsCreateWarnsAboutTruncatedImageAndUploads(t *testing.T) {
+	setupAuth(t)
+	t.Setenv("ASC_CONFIG_PATH", filepath.Join(t.TempDir(), "nonexistent.json"))
+
+	path := filepath.Join(t.TempDir(), "review.png")
+	data := reviewScreenshotPNG(t)
+	if err := os.WriteFile(path, data[:len(data)/2], 0o600); err != nil {
+		t.Fatalf("write truncated png: %v", err)
+	}
+
+	stderr, uploaded := runIAPReviewScreenshotCreateWithMockUpload(t, path)
+	if !uploaded {
+		t.Fatal("expected the screenshot to upload despite the decode warning")
+	}
+	want := fmt.Sprintf("Warning: review screenshot %q could not be fully decoded", path)
+	if !strings.Contains(stderr, want) {
+		t.Fatalf("stderr %q does not contain %q", stderr, want)
+	}
+}
+
 func TestIAPReviewScreenshotsCreateWarnsAboutAlphaChannelAndUploads(t *testing.T) {
 	setupAuth(t)
 	t.Setenv("ASC_CONFIG_PATH", filepath.Join(t.TempDir(), "nonexistent.json"))

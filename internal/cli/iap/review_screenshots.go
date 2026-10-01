@@ -132,7 +132,8 @@ func IAPReviewScreenshotsCreateCommand() *ffcli.Command {
 The file must be a PNG or JPEG named .png, .jpg, or .jpeg; any other file is
 rejected before anything is uploaded. The command also warns, and still
 uploads, when the size matches no documented App Store screenshot size (such
-as 1290x2796 for iPhone) or the image has an alpha channel.
+as 1290x2796 for iPhone), the image has an alpha channel, or the image data
+does not fully decode.
 
 Examples:
   asc iap review-screenshots create --iap-id "IAP_ID" --file "./review.png"`,
