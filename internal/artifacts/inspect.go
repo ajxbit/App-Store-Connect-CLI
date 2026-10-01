@@ -408,8 +408,11 @@ func manifestFromPlist(parsed bundlePlist) IPAManifest {
 
 // deviceFamilies normalizes a decoded UIDeviceFamily value. Xcode writes an
 // array of integers; a single integer and numeric strings are also accepted.
-// An absent key returns nil, which iOS treats as iPhone only; a present but
-// empty array declares no device family and is malformed.
+// An absent key returns nil: Apple's Information Property List Key Reference
+// documents value 1 (iPhone and iPod touch) as the default, and Xcode always
+// writes the key from the Targeted Device Family build setting, so a binary
+// without it is iPhone-only. A present but empty array declares no device
+// family and is malformed.
 func deviceFamilies(value any) ([]int, error) {
 	if value == nil {
 		return nil, nil
