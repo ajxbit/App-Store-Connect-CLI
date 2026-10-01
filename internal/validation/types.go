@@ -148,6 +148,8 @@ type Input struct {
 	Build                       *Build
 	PriceScheduleID             string
 	PricingFetchSkipReason      string
+	BaseTerritory               string
+	BasePriceMissing            bool
 	AvailabilityID              string
 	AvailableTerritories        int
 	AppAvailableTerritories     []string
