@@ -601,10 +601,20 @@ version. Any other 409 keeps failing.`,
 			copyMetadata := copyMetadataFromValue != ""
 			conflictHandled := false
 			if err != nil {
+				readBackFailed := false
 				existing, handled, resolveErr := shared.ResolveIfExistsConflict(ifExistsMode, err, versionsCreateExistsCodes, func() (*asc.AppStoreVersionResponse, bool, error) {
-					return findExistingAppStoreVersion(requestCtx, client, resolvedAppID, attrs.VersionString, normalizedPlatform)
+					found, ok, lookupErr := findExistingAppStoreVersion(requestCtx, client, resolvedAppID, attrs.VersionString, normalizedPlatform)
+					readBackFailed = lookupErr != nil && !asc.IsNotFound(lookupErr)
+					return found, ok, lookupErr
 				})
 				if resolveErr != nil {
+					// An unhandled conflict comes back as Apple's original
+					// error. Explain it from the platform's current versions
+					// unless the read-back already failed, in which case
+					// another read is unlikely to help.
+					if !readBackFailed {
+						resolveErr = shared.WithAppStoreVersionCreateConflictDiagnostics(requestCtx, client, resolvedAppID, attrs.VersionString, normalizedPlatform, resolveErr)
+					}
 					return fmt.Errorf("versions create: %w", resolveErr)
 				}
 				if !handled {

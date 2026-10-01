@@ -55,7 +55,7 @@ func writeIAPImportScreenshot(t *testing.T, dir string) string {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		t.Fatalf("create screenshot dir: %v", err)
 	}
-	writePNG(t, path, 40, 40)
+	writeReviewScreenshotPNG(t, path)
 	return path
 }
 
