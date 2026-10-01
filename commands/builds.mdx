@@ -59,7 +59,19 @@ asc builds links view --build-id BUILD_ID --type individualTesters --paginate
 ```bash  theme={null}
 asc builds wait --build-id BUILD_ID
 asc builds wait --app APP_ID --latest
+asc builds wait --app APP_ID --build-number 78 --platform IOS --timeout 50s --report-pending
 ```
+
+When `--timeout` expires first, the command exits `1` and the error names the
+last known state (for example, a build upload App Store Connect accepted but
+has not exposed as a build yet) and the command that resumes the wait. Add
+`--report-pending` when the caller runs under a short time limit: the timeout
+then prints a pending result to stdout and exits `7` instead. The JSON result
+has `status: "pending"`, `phase` (`discovery` before the build exists,
+`processing` after), the matching `buildId` and `processingState` or `upload`,
+`elapsed`, and `resumeCommand`, which switches to `--build-id` once the build is
+known. A build upload that `FAILED` is still reported as an error with exit
+code `1`.
 
 ### Distribute to TestFlight groups
 

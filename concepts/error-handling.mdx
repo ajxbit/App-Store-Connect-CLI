@@ -24,6 +24,7 @@ echo $?  # 0 = success
 | `4`  | Resource not found     | App, build, or resource does not exist                          |
 | `5`  | Conflict               | Resource already exists or version conflict                     |
 | `6`  | Read-only refusal      | `ASC_READ_ONLY` or `--read-only` blocked a mutating request     |
+| `7`  | Still pending          | `asc builds wait --report-pending` timed out before processing  |
 
 ### HTTP Status Mapping
 
