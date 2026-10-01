@@ -20,6 +20,7 @@ const (
 	ExitNotFound = 4 // Resource not found
 	ExitConflict = 5 // Conflict / resource already exists
 	ExitReadOnly = 6 // Read-only mode refused a mutating request
+	ExitPending  = 7 // An opted-in bounded wait ended before its target finished (builds wait --report-pending)
 
 	// HTTP 4xx range: 10 + (status - 400)
 	// Note: 404 and 409 are mapped to ExitNotFound and ExitConflict above.
@@ -48,6 +49,11 @@ func ExitCodeFromError(err error) int {
 	// page but keeps the usage exit code its callers rely on.
 	if errors.Is(err, flag.ErrHelp) || shared.IsReportedUsageError(err) || errors.Is(err, shared.ErrMissingWebSession) {
 		return ExitUsage
+	}
+
+	// Opted-in pending outcome of a bounded wait
+	if errors.Is(err, shared.ErrPending) {
+		return ExitPending
 	}
 
 	// Policy refusal from ASC_READ_ONLY / --read-only

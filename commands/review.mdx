@@ -14,7 +14,7 @@ asc review status --app "123456789"
 asc review doctor --app "123456789"
 asc review details-get --id "DETAIL_ID"
 asc review details-for-version --version-id "VERSION_ID"
-asc review details-create --version-id "VERSION_ID" --contact-email "dev@example.com"
+asc review details-create --version-id "VERSION_ID" --contact-first-name "Dev" --contact-last-name "Support" --contact-email "dev@example.com" --contact-phone "+1 408 555 0100"
 asc review details-update --id "DETAIL_ID" --notes "Updated review notes"
 asc review attachments-list --review-detail "DETAIL_ID"
 asc review attachments-get --id "ATTACHMENT_ID"
@@ -171,6 +171,9 @@ review submission.
 Use `--clear-platform`, `--clear-submitted`, or `--clear-canceled` to send JSON
 `null`. Setting `--submitted=true` or `--canceled=true` requires `--confirm`.
 The corresponding false and clear operations do not.
+When `--canceled=true` is refused because the submission is not cancellable,
+the error explains the submission's current state the same way as
+`asc review submissions-cancel`.
 
 ```bash  theme={null}
 asc review submissions-update --id "SUBMISSION_ID" --platform IOS
@@ -247,6 +250,13 @@ Cancel a review submission.
 asc review submissions-cancel --id "SUBMISSION_ID" --confirm
 ```
 
+If App Store Connect refuses with `Resource is not in cancellable state`, the
+command reads the submission once and explains its state and the next step,
+for example that a `READY_FOR_REVIEW` draft was never submitted, or that an
+`UNRESOLVED_ISSUES` submission needs a fix or a Resolution Center reply. If
+that read fails, the command reports the refusal as it did before, with Apple's
+original error text.
+
 ***
 
 ### `asc review details-update`
@@ -262,11 +272,11 @@ Update App Store review details.
 </ParamField>
 
 <ParamField path="--contact-phone" type="string">
-  Contact phone
+  Contact phone with a plus sign and country code, for example `+1 408 555 0100`
 </ParamField>
 
 <ParamField path="--notes" type="string">
-  Reviewer instructions or context
+  Reviewer instructions or context; at most 4,000 characters
 </ParamField>
 
 <ParamField path="--demo-account-required" type="boolean">

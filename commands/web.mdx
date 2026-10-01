@@ -923,6 +923,9 @@ Available commands:
 * `asc web review iaps` - attach a non-renewing IAP to the next app version review
 * `asc web review reply` - send one confirmed Resolution Center text reply
 
+Every app-scoped `asc web review` command resolves `--app` like the rest of
+`asc`: an explicit `--app` wins, then `ASC_APP_ID`, then the configured app ID.
+
 `asc web review show` auto-downloads attachments from the HTTPS signed URLs
 Apple returns, which must be on its `.apple.com`, `.mzstatic.com`,
 `.amazonaws.com`, or `.cloudfront.net` hosts. A signed URL on any other host is
@@ -936,7 +939,7 @@ Subscription JSON includes both `submitWithNextAppStoreVersion` and
 `submitWithNextAppStoreVersionKnown`. When the presence field is `false`, Apple
 omitted the attachment attribute and the boolean value is not authoritative.
 
-`asc web review iaps attach` requires `--app`, `--iap-id`, and `--confirm`.
+`asc web review iaps attach` requires `--app` (or `ASC_APP_ID`), `--iap-id`, and `--confirm`.
 `--iap-id` accepts the iris resource ID or the product ID from `asc iap list`.
 
 ```bash  theme={null}
