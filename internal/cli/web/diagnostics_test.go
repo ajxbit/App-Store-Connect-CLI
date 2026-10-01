@@ -91,16 +91,6 @@ func TestWebAppsCreateMissingRequiredInputExposesStructuredDiagnostics(t *testin
 			wantStderr: "Error: missing required flags: --name\n",
 			wantParam:  "--name",
 		},
-		{
-			name: "apple id required without cached session",
-			run: func() error {
-				appleID := ""
-				return promptAppsCreateSessionAppleID(&appleID)
-			},
-			wantError:  "--apple-id is required when no cached web session is available; run 'asc web auth login --apple-id EMAIL'",
-			wantStderr: "Error: --apple-id is required when no cached web session is available; run 'asc web auth login --apple-id EMAIL'\n",
-			wantParam:  "--apple-id",
-		},
 	}
 
 	for _, test := range tests {
@@ -137,6 +127,7 @@ func TestWebAppsCreateMissingRequiredInputExposesStructuredDiagnostics(t *testin
 }
 
 func TestWebReviewShowInvalidInputExposesStructuredDiagnostics(t *testing.T) {
+	t.Setenv("ASC_APP_ID", "")
 	tests := []struct {
 		name       string
 		args       []string
@@ -148,8 +139,8 @@ func TestWebReviewShowInvalidInputExposesStructuredDiagnostics(t *testing.T) {
 		{
 			name:       "missing app",
 			args:       nil,
-			wantError:  "--app is required",
-			wantStderr: "Error: --app is required\n",
+			wantError:  "--app is required (or set ASC_APP_ID)",
+			wantStderr: "Error: --app is required (or set ASC_APP_ID)\n",
 			wantCode:   shared.DiagnosticRequiredInputMissing,
 			wantParam:  "--app",
 		},

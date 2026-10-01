@@ -113,13 +113,11 @@ When the flag is omitted, the account is resolved in this order:
    CLI prints `Using cached web session for user@example.com; pass --apple-id
    to override` on stderr so the chosen account is visible.
 
-When neither `--apple-id` nor `ASC_WEB_APPLE_ID` selects an account and the
-cache is empty, non-interactive commands exit with code `2` and point to
-`asc web auth login --apple-id EMAIL`; `web apps create` can instead prompt for
-the account in an interactive terminal. When neither source selects an account
-and several sessions are cached, the command lists the cached Apple IDs and
-exits with code `2` only when the existing remembered-account lookup cannot
-select one, so you can pick an account with `--apple-id`.
+When neither `--apple-id` nor `ASC_WEB_APPLE_ID` selects an account and several
+sessions are cached, the command lists the cached Apple IDs and exits with code
+`2` only when the existing remembered-account lookup cannot select one, so you
+can pick an account with `--apple-id`. When nothing is cached, see
+[No usable session](#no-usable-session).
 
 ```bash
 # One cached account: no flag needed
@@ -145,6 +143,34 @@ default to the last cached session, `asc web auth logout` requires `--apple-id`
 or `--all`, and `--apple-id` on `asc web auth import` asserts which Apple
 Account the bundle must belong to rather than selecting one. Pass `--apple-id`
 explicitly to those commands.
+
+### No usable session
+
+A command other than `asc web auth login` exits with code `2` when it has no
+usable session and cannot sign in. This happens when nothing is cached and no
+account is selected, or when the selected account has no usable cached session
+and neither `ASC_WEB_PASSWORD`, a saved password, nor an interactive terminal
+can supply the password. The command prints the error and a `Hint:` line with
+the next step instead of its usage page:
+
+```text
+Error: no Apple web session is cached
+Hint: asc web commands need a signed-in Apple Account session, and signing in needs an interactive terminal for the password and two-factor code. Run 'asc web auth login --apple-id EMAIL' in a terminal, or load a session exported elsewhere with 'asc web auth import --file FILE'. Unattended sign-in needs ASC_WEB_PASSWORD and ASC_WEB_2FA_CODE_COMMAND, plus --apple-id or ASC_WEB_APPLE_ID.
+```
+
+When an account was selected, the first line names it:
+`Error: no usable Apple web session for user@example.com`. Where the public
+App Store Connect API answers the same question, the hint names that command.
+`asc web review list` points to `asc review submissions-list --app APP_ID`.
+`asc web review show` and `asc web review threads` point to
+`asc review status --app APP_ID` (Resolution Center messages still need a web
+session). In an interactive terminal, `web apps create` prompts for the account
+instead of failing.
+
+`asc web auth login` keeps its usage errors and usage page. Without an account
+it asks for `--apple-id`; without a password source it asks for a terminal or
+`ASC_WEB_PASSWORD`. To check for a session without failing, run
+`asc web auth status`; it prints `"authenticated":false` and exits `0`.
 
 ## Command families
 
@@ -897,6 +923,9 @@ Available commands:
 * `asc web review iaps` - attach a non-renewing IAP to the next app version review
 * `asc web review reply` - send one confirmed Resolution Center text reply
 
+Every app-scoped `asc web review` command resolves `--app` like the rest of
+`asc`: an explicit `--app` wins, then `ASC_APP_ID`, then the configured app ID.
+
 `asc web review show` auto-downloads attachments from the HTTPS signed URLs
 Apple returns, which must be on its `.apple.com`, `.mzstatic.com`,
 `.amazonaws.com`, or `.cloudfront.net` hosts. A signed URL on any other host is
@@ -910,7 +939,7 @@ Subscription JSON includes both `submitWithNextAppStoreVersion` and
 `submitWithNextAppStoreVersionKnown`. When the presence field is `false`, Apple
 omitted the attachment attribute and the boolean value is not authoritative.
 
-`asc web review iaps attach` requires `--app`, `--iap-id`, and `--confirm`.
+`asc web review iaps attach` requires `--app` (or `ASC_APP_ID`), `--iap-id`, and `--confirm`.
 `--iap-id` accepts the iris resource ID or the product ID from `asc iap list`.
 
 ```bash  theme={null}

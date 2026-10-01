@@ -731,6 +731,11 @@ func TestValidateSubcommandsRejectParentValidateFlags(t *testing.T) {
 			args:    []string{"validate", "--strict", "testflight", "--app", "app-1", "--build-id", "build-1"},
 			wantErr: "--strict must be passed after the validate subcommand name",
 		},
+		{
+			name:    "ipa before subcommand",
+			args:    []string{"validate", "--ipa", "App.ipa", "testflight", "--app", "app-1", "--build-id", "build-1"},
+			wantErr: "--ipa is only valid for asc validate",
+		},
 	}
 
 	for _, test := range tests {

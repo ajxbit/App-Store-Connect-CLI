@@ -76,6 +76,11 @@ func TestExitCodeFromError(t *testing.T) {
 			expected: ExitAuth,
 		},
 		{
+			name:     "wrapped missing Apple web session keeps usage exit code",
+			err:      fmt.Errorf("web review show failed: %w", &shared.MissingWebSessionError{Message: "no Apple web session is cached"}),
+			expected: ExitUsage,
+		},
+		{
 			name:     "ErrNotFound returns not found",
 			err:      asc.ErrNotFound,
 			expected: ExitNotFound,
@@ -89,6 +94,16 @@ func TestExitCodeFromError(t *testing.T) {
 			name:     "generic error returns generic error",
 			err:      errors.New("something went wrong"),
 			expected: ExitError,
+		},
+		{
+			name:     "pending wait returns pending",
+			err:      shared.NewPendingError("build is still pending"),
+			expected: ExitPending,
+		},
+		{
+			name:     "wrapped pending wait returns pending",
+			err:      fmt.Errorf("builds wait: %w", shared.NewPendingError("build is still pending")),
+			expected: ExitPending,
 		},
 		{
 			name:     "read-only refusal returns read-only",
@@ -200,6 +215,9 @@ func TestExitCodeConstants(t *testing.T) {
 	}
 	if ExitReadOnly != 6 {
 		t.Errorf("ExitReadOnly = %d, want 6", ExitReadOnly)
+	}
+	if ExitPending != 7 {
+		t.Errorf("ExitPending = %d, want 7", ExitPending)
 	}
 }
 

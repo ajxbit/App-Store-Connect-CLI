@@ -1070,11 +1070,33 @@ Examples:
 	}
 }
 
+// reviewPublicAPIAppArg renders the app for a suggested App Store Connect API
+// command, using a placeholder for anything other than a plain numeric app ID.
+func reviewPublicAPIAppArg(appID string) string {
+	if shared.IsNumericAppID(appID) {
+		return appID
+	}
+	return "APP_ID"
+}
+
+// reviewSubmissionsPublicAPIAlternative names the public API command that lists
+// an app's review submissions without a web session.
+func reviewSubmissionsPublicAPIAlternative(appID string) string {
+	return fmt.Sprintf(`Without a web session, 'asc review submissions-list --app "%s"' lists review submissions through the App Store Connect API.`, reviewPublicAPIAppArg(appID))
+}
+
+// reviewStatusPublicAPIAlternative names the public API command that reports an
+// app's App Review state without a web session; Resolution Center threads and
+// messages have no public API equivalent.
+func reviewStatusPublicAPIAlternative(appID string) string {
+	return fmt.Sprintf(`Without a web session, 'asc review status --app "%s"' reports App Review state through the App Store Connect API; Resolution Center messages need a web session.`, reviewPublicAPIAppArg(appID))
+}
+
 // WebReviewListCommand lists review submissions for an app.
 func WebReviewListCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("web review list", flag.ExitOnError)
 
-	appID := fs.String("app", "", "App ID")
+	appID := fs.String("app", "", "App ID (or ASC_APP_ID env)")
 	stateCSV := fs.String("state", "", "Optional comma-separated state filter")
 	authFlags := bindWebSessionFlags(fs)
 	output := shared.BindOutputFlags(fs)
@@ -1086,16 +1108,16 @@ func WebReviewListCommand() *ffcli.Command {
 		FlagSet:    fs,
 		UsageFunc:  shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
-			trimmedAppID := strings.TrimSpace(*appID)
+			trimmedAppID := strings.TrimSpace(shared.ResolveAppID(*appID))
 			if trimmedAppID == "" {
-				return shared.UsageError("--app is required")
+				return shared.UsageError("--app is required (or set ASC_APP_ID)")
 			}
 			states, err := parseSubmissionStates(*stateCSV)
 			if err != nil {
 				return err
 			}
 
-			session, requestCtx, cancel, err := resolveWebSessionForCommand(ctx, authFlags)
+			session, requestCtx, cancel, err := resolveWebSessionForCommand(contextWithPublicAPIAlternative(ctx, reviewSubmissionsPublicAPIAlternative(trimmedAppID)), authFlags)
 			defer cancel()
 			if err != nil {
 				return err
@@ -1127,7 +1149,7 @@ func WebReviewListCommand() *ffcli.Command {
 func WebReviewThreadsCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("web review threads", flag.ExitOnError)
 
-	appID := fs.String("app", "", "App ID")
+	appID := fs.String("app", "", "App ID (or ASC_APP_ID env)")
 	drafts := fs.Bool("drafts", false, "Also read each thread's unsent draft message (one extra request per thread)")
 	plainText := fs.Bool("plain-text", false, "Project draft messageBody HTML into plain text (requires --drafts)")
 	authFlags := bindWebSessionFlags(fs)
@@ -1159,10 +1181,10 @@ are never returned because this surface is read-only.
 					"args",
 				)
 			}
-			trimmedAppID := strings.TrimSpace(*appID)
+			trimmedAppID := strings.TrimSpace(shared.ResolveAppID(*appID))
 			if trimmedAppID == "" {
 				return shared.WithDiagnostic(
-					shared.UsageError("--app is required"),
+					shared.UsageError("--app is required (or set ASC_APP_ID)"),
 					shared.DiagnosticRequiredInputMissing,
 					"--app",
 				)
@@ -1175,7 +1197,7 @@ are never returned because this surface is read-only.
 				)
 			}
 
-			session, requestCtx, cancel, err := resolveWebSessionForCommand(ctx, authFlags)
+			session, requestCtx, cancel, err := resolveWebSessionForCommand(contextWithPublicAPIAlternative(ctx, reviewStatusPublicAPIAlternative(trimmedAppID)), authFlags)
 			defer cancel()
 			if err != nil {
 				return err
@@ -1229,7 +1251,7 @@ are never returned because this surface is read-only.
 func WebReviewShowCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("web review show", flag.ExitOnError)
 
-	appID := fs.String("app", "", "App ID")
+	appID := fs.String("app", "", "App ID (or ASC_APP_ID env)")
 	submissionID := fs.String("submission", "", "Review submission ID (default: latest unresolved, else latest)")
 	outDir := fs.String("out", "", "Directory for auto-downloaded screenshots (default: ./.asc/web-review/<app>/<submission>)")
 	pattern := fs.String("pattern", "", "Optional filename glob filter for auto-download (for example: *.png)")
@@ -1255,10 +1277,10 @@ Selection:
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
-			trimmedAppID := strings.TrimSpace(*appID)
+			trimmedAppID := strings.TrimSpace(shared.ResolveAppID(*appID))
 			if trimmedAppID == "" {
 				return shared.WithDiagnostic(
-					shared.UsageError("--app is required"),
+					shared.UsageError("--app is required (or set ASC_APP_ID)"),
 					shared.DiagnosticRequiredInputMissing,
 					"--app",
 				)
@@ -1274,7 +1296,7 @@ Selection:
 				}
 			}
 
-			session, requestCtx, cancel, err := resolveWebSessionForCommand(ctx, authFlags)
+			session, requestCtx, cancel, err := resolveWebSessionForCommand(contextWithPublicAPIAlternative(ctx, reviewStatusPublicAPIAlternative(trimmedAppID)), authFlags)
 			defer cancel()
 			if err != nil {
 				return err
