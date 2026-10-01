@@ -277,7 +277,7 @@ func validateIAPImportProduct(root rootfs.Root, raw iapImportProduct, index int)
 	product.ReviewScreenshot = screenshot
 	name, err := resolveIAPImportScreenshotName(root, screenshot)
 	if err != nil {
-		return iapImportProduct{}, "", shared.UsageErrorf("iap import: products[%d]: reviewScreenshot %q: %v", index, screenshot, err)
+		return iapImportProduct{}, "", shared.ReviewScreenshotUsageError("--file", fmt.Sprintf("iap import: products[%d]: reviewScreenshot %q: %v", index, screenshot, err))
 	}
 	return product, name, nil
 }

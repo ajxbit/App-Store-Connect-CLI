@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/asc"
 )
@@ -25,4 +26,16 @@ func PreflightReviewScreenshot(path string, file io.ReaderAt, size int64) error 
 		fmt.Fprintf(os.Stderr, "Warning: %s\n", warning)
 	}
 	return nil
+}
+
+// ReviewScreenshotUsageError reports a review screenshot rejected before any
+// request. It prints message as one "Error:" line and returns a usage error
+// (exit 2) that does not wrap flag.ErrHelp, so the command's full usage page
+// does not follow and bury the one actionable line. parameter names the flag
+// that supplied the screenshot for diagnostics. Commands under a re-parented
+// tree pass message through RewriteUsageMessage first.
+func ReviewScreenshotUsageError(parameter, message string) error {
+	message = strings.TrimSpace(SanitizeTerminal(message))
+	fmt.Fprintf(os.Stderr, "Error: %s\n", message)
+	return WithDiagnostic(NewReportedUsageError(UsageErrorInvalidValue, message), DiagnosticInvalidInput, parameter)
 }

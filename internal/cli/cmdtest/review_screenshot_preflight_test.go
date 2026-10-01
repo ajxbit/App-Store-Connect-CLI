@@ -4,8 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
-	"flag"
 	"fmt"
 	"image"
 	"image/color"
@@ -19,6 +17,8 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	rootcmd "github.com/rudrankriyam/App-Store-Connect-CLI/cmd"
 )
 
 var (
@@ -74,19 +74,20 @@ func failOnAnyRequest(t *testing.T) *int {
 	return &requests
 }
 
-func runReviewScreenshotCommand(t *testing.T, args []string) (string, string, error) {
+// runReviewScreenshotCommand runs args and returns stderr and the run error.
+func runReviewScreenshotCommand(t *testing.T, args []string) (string, error) {
 	t.Helper()
 	root := RootCommand("1.2.3")
 	root.FlagSet.SetOutput(io.Discard)
 
 	var runErr error
-	stdout, stderr := captureOutput(t, func() {
+	_, stderr := captureOutput(t, func() {
 		if err := root.Parse(args); err != nil {
 			t.Fatalf("parse error: %v", err)
 		}
 		runErr = root.Run(context.Background())
 	})
-	return stdout, stderr, runErr
+	return stderr, runErr
 }
 
 func writeJPEGNamed(t *testing.T, path string, width, height int) {
@@ -100,19 +101,27 @@ func writeJPEGNamed(t *testing.T, path string, width, height int) {
 	}
 }
 
-func assertReviewScreenshotUsageError(t *testing.T, err error, stdout, stderr string, requests int, want string) {
+// assertReviewScreenshotRejectedBeforeRequest runs args through the root
+// entrypoint and asserts the review screenshot was rejected as a usage error
+// (exit 2) with exactly the one diagnostic line wantError, without the
+// command's usage page, and before any App Store Connect request.
+func assertReviewScreenshotRejectedBeforeRequest(t *testing.T, args []string, requests *int, wantError string) {
 	t.Helper()
-	if !errors.Is(err, flag.ErrHelp) {
-		t.Fatalf("expected usage error (exit 2), got %v", err)
+	code := -1
+	stdout, stderr := captureOutput(t, func() {
+		code = rootcmd.Run(args, "1.2.3")
+	})
+	if code != rootcmd.ExitUsage {
+		t.Fatalf("exit code = %d, want %d (usage); stderr = %q", code, rootcmd.ExitUsage, stderr)
 	}
-	if requests != 0 {
-		t.Fatalf("expected no App Store Connect requests, got %d", requests)
+	if *requests != 0 {
+		t.Fatalf("expected no App Store Connect requests, got %d", *requests)
 	}
 	if stdout != "" {
 		t.Fatalf("expected empty stdout, got %q", stdout)
 	}
-	if !strings.Contains(stderr, want) {
-		t.Fatalf("stderr %q does not contain %q", stderr, want)
+	if want := "Error: " + wantError + "\n"; stderr != want {
+		t.Fatalf("stderr = %q, want exactly %q", stderr, want)
 	}
 }
 
@@ -155,7 +164,15 @@ func TestReviewScreenshotUploadsRejectFormatProblemsBeforeAnyRequest(t *testing.
 			file:  "review.png",
 			write: func(t *testing.T, path string) { writeJPEGNamed(t, path, 1290, 2796) },
 			want: func(path string) string {
-				return fmt.Sprintf("review screenshot %q is JPEG data but has a .png extension; rename it to review.jpg", path)
+				return fmt.Sprintf("review screenshot %q is JPEG data but has a .png extension; rename it to review.jpg or re-export it as PNG", path)
+			},
+		},
+		{
+			name:  "GIF data with .png extension",
+			file:  "review.png",
+			write: writeGIF,
+			want: func(path string) string {
+				return fmt.Sprintf("review screenshot %q is GIF data; App Store Connect accepts PNG or JPEG screenshots (.png, .jpg, or .jpeg); re-export it as PNG or JPEG", path)
 			},
 		},
 		{
@@ -177,8 +194,7 @@ func TestReviewScreenshotUploadsRejectFormatProblemsBeforeAnyRequest(t *testing.
 				path := filepath.Join(t.TempDir(), fixture.file)
 				fixture.write(t, path)
 
-				stdout, stderr, err := runReviewScreenshotCommand(t, command.args(path))
-				assertReviewScreenshotUsageError(t, err, stdout, stderr, *requests, "Error: "+command.prefix+fixture.want(path))
+				assertReviewScreenshotRejectedBeforeRequest(t, command.args(path), requests, command.prefix+fixture.want(path))
 			})
 		}
 	}
@@ -192,14 +208,13 @@ func TestSubscriptionsSetupRejectsMislabeledReviewScreenshotBeforeAnyRequest(t *
 	path := filepath.Join(t.TempDir(), "paywall.png")
 	writeJPEGNamed(t, path, 1290, 2796)
 
-	stdout, stderr, err := runReviewScreenshotCommand(t, []string{
+	assertReviewScreenshotRejectedBeforeRequest(t, []string{
 		"subscriptions", "setup",
 		"--group-id", "GROUP_ID",
 		"--reference-name", "Pro Monthly",
 		"--product-id", "com.example.pro.monthly",
 		"--review-screenshot", path,
-	})
-	assertReviewScreenshotUsageError(t, err, stdout, stderr, *requests, fmt.Sprintf("invalid --review-screenshot: review screenshot %q is JPEG data but has a .png extension", path))
+	}, requests, fmt.Sprintf("invalid --review-screenshot: review screenshot %q is JPEG data but has a .png extension; rename it to paywall.jpg or re-export it as PNG", path))
 }
 
 func TestIAPImportRejectsNonPNGReviewScreenshotBeforeAnyRequest(t *testing.T) {
@@ -209,17 +224,27 @@ func TestIAPImportRejectsNonPNGReviewScreenshotBeforeAnyRequest(t *testing.T) {
 
 	dir := t.TempDir()
 	filePath := writeIAPImportFile(t, dir, `{"products":[{"type":"CONSUMABLE","referenceName":"Coins","productId":"com.example.coins","reviewScreenshot":"shots/coins.png"}]}`)
-	screenshotPath := writeIAPImportScreenshot(t, dir)
+	writeGIF(t, writeIAPImportScreenshot(t, dir))
+
+	assertReviewScreenshotRejectedBeforeRequest(
+		t,
+		[]string{"iap", "import", "--app", "123456789", "--file", filePath, "--confirm", "--output", "json"},
+		requests,
+		`iap import: products[0]: reviewScreenshot "shots/coins.png": review screenshot "shots/coins.png" is GIF data; App Store Connect accepts PNG or JPEG screenshots (.png, .jpg, or .jpeg); re-export it as PNG or JPEG`,
+	)
+}
+
+// writeGIF writes GIF data, which App Store Connect does not accept as a
+// review screenshot, to path whatever its extension.
+func writeGIF(t *testing.T, path string) {
+	t.Helper()
 	var buf bytes.Buffer
 	if err := gif.Encode(&buf, image.NewPaletted(image.Rect(0, 0, 640, 920), color.Palette{color.Black, color.White}), nil); err != nil {
 		t.Fatalf("encode gif: %v", err)
 	}
-	if err := os.WriteFile(screenshotPath, buf.Bytes(), 0o600); err != nil {
+	if err := os.WriteFile(path, buf.Bytes(), 0o600); err != nil {
 		t.Fatalf("write gif: %v", err)
 	}
-
-	stdout, stderr, err := runIAPImport(t, []string{"iap", "import", "--app", "123456789", "--file", filePath, "--confirm", "--output", "json"})
-	assertReviewScreenshotUsageError(t, err, stdout, stderr, *requests, `review screenshot "shots/coins.png" is GIF data`)
 }
 
 // runIAPReviewScreenshotCreateWithMockUpload runs a successful create against
@@ -252,7 +277,7 @@ func runIAPReviewScreenshotCreateWithMockUpload(t *testing.T, path string) (stri
 		}
 	})
 
-	_, stderr, runErr := runReviewScreenshotCommand(t, []string{"iap", "review-screenshots", "create", "--iap-id", "9000000001", "--file", path, "--output", "json"})
+	stderr, runErr := runReviewScreenshotCommand(t, []string{"iap", "review-screenshots", "create", "--iap-id", "9000000001", "--file", path, "--output", "json"})
 	if runErr != nil {
 		t.Fatalf("expected success, got %v", runErr)
 	}
@@ -310,7 +335,7 @@ func TestSubscriptionsReviewScreenshotsCreateWarnsAboutUndocumentedSizeAndUpload
 		}
 	})
 
-	_, stderr, runErr := runReviewScreenshotCommand(t, []string{"subscriptions", "review", "screenshots", "create", "--subscription-id", "8000000001", "--file", path, "--output", "json"})
+	stderr, runErr := runReviewScreenshotCommand(t, []string{"subscriptions", "review", "screenshots", "create", "--subscription-id", "8000000001", "--file", path, "--output", "json"})
 	if runErr != nil {
 		t.Fatalf("expected success, got %v", runErr)
 	}
@@ -506,7 +531,7 @@ func TestSubscriptionsReviewScreenshotsCreateUploadsTheCheckedBytes(t *testing.T
 		}
 	})
 
-	_, stderr, runErr := runReviewScreenshotCommand(t, []string{"subscriptions", "review", "screenshots", "create", "--subscription-id", "8000000001", "--file", path, "--output", "json"})
+	stderr, runErr := runReviewScreenshotCommand(t, []string{"subscriptions", "review", "screenshots", "create", "--subscription-id", "8000000001", "--file", path, "--output", "json"})
 	if runErr != nil {
 		t.Fatalf("expected success, got %v (stderr %q)", runErr, stderr)
 	}
@@ -542,7 +567,7 @@ func TestSubscriptionsSetupRechecksReviewScreenshotReplacedAfterValidation(t *te
 		}
 	})
 
-	_, stderr, err := runReviewScreenshotCommand(t, []string{
+	stderr, err := runReviewScreenshotCommand(t, []string{
 		"subscriptions", "setup",
 		"--group-id", "group-1",
 		"--reference-name", "Pro Monthly",
