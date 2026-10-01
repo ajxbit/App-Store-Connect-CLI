@@ -1,10 +1,12 @@
 package asc
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"image"
 	"image/color"
+	"image/jpeg"
 	"io"
 	"path/filepath"
 	"sort"
@@ -87,12 +89,21 @@ func reviewScreenshotDimensions() []ScreenshotDimension {
 // errors. Documented constraints that no live upload has confirmed for review
 // screenshots, the size list and the alpha rule, are returned as warnings.
 func CheckReviewScreenshotImage(path string, source io.Reader) ([]string, error) {
-	cfg, format, err := image.DecodeConfig(source)
-	if err != nil {
-		return nil, fmt.Errorf("review screenshot %q is not a PNG or JPEG image (%w); App Store Connect accepts .png, .jpg, or .jpeg screenshots", path, err)
+	// Identify the container from its signature rather than from Go's
+	// decoders, which reject some valid encodings such as arithmetic-coded
+	// JPEG; only the decoder's opinion of the contents is advisory.
+	signature := make([]byte, 12)
+	n, err := io.ReadFull(source, signature)
+	if err != nil && !errors.Is(err, io.ErrUnexpectedEOF) && !errors.Is(err, io.EOF) {
+		return nil, fmt.Errorf("read review screenshot %q: %w", path, err)
 	}
-	format = strings.ToLower(strings.TrimSpace(format))
-	if format != "png" && format != "jpeg" {
+	signature = signature[:n]
+	format := sniffImageFormat(signature)
+	switch format {
+	case "png", "jpeg":
+	case "":
+		return nil, fmt.Errorf("review screenshot %q is not a PNG or JPEG image; App Store Connect accepts .png, .jpg, or .jpeg screenshots", path)
+	default:
 		return nil, fmt.Errorf("review screenshot %q is %s data; App Store Connect accepts PNG or JPEG screenshots (.png, .jpg, or .jpeg); re-export it as PNG or JPEG", path, strings.ToUpper(format))
 	}
 
@@ -110,6 +121,15 @@ func CheckReviewScreenshotImage(path string, source io.Reader) ([]string, error)
 	}
 	if err := ValidateImageFormatMatchesExtension(path, format); err != nil {
 		return nil, fmt.Errorf("review screenshot %w", err)
+	}
+
+	cfg, _, err := image.DecodeConfig(io.MultiReader(bytes.NewReader(signature), source))
+	if err != nil {
+		var unsupported jpeg.UnsupportedError
+		if format == "jpeg" && errors.As(err, &unsupported) {
+			return []string{fmt.Sprintf("review screenshot %q uses a JPEG encoding this tool cannot read (%v), so its size and alpha were not checked; if delivery fails, re-export it as baseline JPEG or PNG.", path, err)}, nil
+		}
+		return nil, fmt.Errorf("review screenshot %q is not a readable %s image (%w); re-export it as PNG or JPEG", path, strings.ToUpper(format), err)
 	}
 
 	var warnings []string
@@ -150,6 +170,24 @@ func ReviewScreenshotDecodeWarning(path string, source io.ReaderAt, size int64) 
 		return fmt.Sprintf("review screenshot %q could not be fully decoded (%v); if delivery fails, re-export it as PNG or JPEG.", path, err)
 	}
 	return ""
+}
+
+// sniffImageFormat names the image container from its leading bytes, using
+// the names the image package registers ("png", "jpeg", "gif"). WebP is named
+// so its error is specific; anything else returns an empty string.
+func sniffImageFormat(signature []byte) string {
+	switch {
+	case bytes.HasPrefix(signature, []byte("\x89PNG\r\n\x1a\n")):
+		return "png"
+	case bytes.HasPrefix(signature, []byte("\xff\xd8\xff")):
+		return "jpeg"
+	case bytes.HasPrefix(signature, []byte("GIF87a")), bytes.HasPrefix(signature, []byte("GIF89a")):
+		return "gif"
+	case len(signature) >= 12 && bytes.Equal(signature[0:4], []byte("RIFF")) && bytes.Equal(signature[8:12], []byte("WEBP")):
+		return "webp"
+	default:
+		return ""
+	}
 }
 
 func acceptsScreenshotDimension(dims []ScreenshotDimension, target ScreenshotDimension) bool {

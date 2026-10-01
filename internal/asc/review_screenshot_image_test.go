@@ -133,10 +133,34 @@ func TestCheckReviewScreenshotImageRejectsUnsupportedFormats(t *testing.T) {
 			want: []string{`review screenshot "review.gif" is GIF data`, "PNG or JPEG"},
 		},
 		{
-			name: "undecodable data",
+			name: "WebP data",
 			path: "review.webp",
 			data: func(t *testing.T) []byte { return []byte("RIFF\x00\x00\x00\x00WEBPVP8 ") },
-			want: []string{`review screenshot "review.webp" is not a PNG or JPEG image`, ".png, .jpg, or .jpeg"},
+			want: []string{`review screenshot "review.webp" is WEBP data`, "PNG or JPEG"},
+		},
+		{
+			name: "HEIC data named .png",
+			path: "review.png",
+			data: func(t *testing.T) []byte { return []byte("\x00\x00\x00\x18ftypheic\x00\x00\x00\x00") },
+			want: []string{`review screenshot "review.png" is not a PNG or JPEG image`, ".png, .jpg, or .jpeg"},
+		},
+		{
+			name: "empty file",
+			path: "review.png",
+			data: func(t *testing.T) []byte { return nil },
+			want: []string{`review screenshot "review.png" is not a PNG or JPEG image`},
+		},
+		{
+			name: "PNG signature without a header",
+			path: "review.png",
+			data: func(t *testing.T) []byte { return []byte("\x89PNG\r\n\x1a\n") },
+			want: []string{`review screenshot "review.png" is not a readable PNG image`},
+		},
+		{
+			name: "JPEG signature with a corrupt header",
+			path: "review.jpg",
+			data: func(t *testing.T) []byte { return []byte("\xff\xd8\xff\x00garbage") },
+			want: []string{`review screenshot "review.jpg" is not a readable JPEG image`},
 		},
 		{
 			name: "JPEG data with .png extension",
@@ -230,6 +254,22 @@ func TestCheckReviewScreenshotImageWarnsAboutAlphaChannel(t *testing.T) {
 	}
 	if !strings.Contains(warnings[0], `review screenshot "review.png" has an alpha channel`) {
 		t.Fatalf("unexpected warning %q", warnings[0])
+	}
+}
+
+func TestCheckReviewScreenshotImageWarnsWhenAJPEGHeaderIsUnsupported(t *testing.T) {
+	// SOI followed by an arithmetic-coding SOF9 frame, which App Store Connect
+	// can accept but Go's JPEG decoder does not support.
+	data := []byte("\xff\xd8\xff\xc9\x00\x0b\x08\x0b\x40\x05\x0a\x01\x01\x11\x00")
+	warnings, err := CheckReviewScreenshotImage("review.jpg", bytes.NewReader(data))
+	if err != nil {
+		t.Fatalf("CheckReviewScreenshotImage() error = %v, want a warning only", err)
+	}
+	if len(warnings) != 1 || !strings.Contains(warnings[0], `review screenshot "review.jpg" uses a JPEG encoding this tool cannot read`) {
+		t.Fatalf("warnings = %q, want one unsupported-encoding warning", warnings)
+	}
+	if warning := ReviewScreenshotDecodeWarning("review.jpg", bytes.NewReader(data), int64(len(data))); warning != "" {
+		t.Fatalf("decode warning = %q, want none after the header warning", warning)
 	}
 }
 
