@@ -9,7 +9,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"path"
+	"strconv"
 	"strings"
 	"time"
 
@@ -38,6 +40,9 @@ type IPAManifest struct {
 	BuildNumber      string
 	MinimumOSVersion string
 	Platforms        []string
+	// DeviceFamilies lists the top-level app's UIDeviceFamily values (1 is
+	// iPhone, 2 is iPad). It is nil when the key is absent or unreadable.
+	DeviceFamilies   []int
 	TeamID           string
 	SignerCommonName string
 	Status           string
@@ -117,6 +122,9 @@ type bundlePlist struct {
 	MinimumSystem    string   `plist:"LSMinimumSystemVersion"`
 	Platforms        []string `plist:"CFBundleSupportedPlatforms"`
 	Platform         string   `plist:"DTPlatformName"`
+	// DeviceFamily is decoded loosely so an unusual UIDeviceFamily value never
+	// makes the rest of the Info.plist unreadable.
+	DeviceFamily any `plist:"UIDeviceFamily"`
 }
 
 // IPAOptions selects optional IPA inspection work.
@@ -159,27 +167,55 @@ func inspectIPAVerifying(source io.ReaderAt, size int64, includeEntitlements, in
 	return manifest, err
 }
 
-// inspectIPA verifies the code signature when policy is non-nil.
-func inspectIPA(source io.ReaderAt, size int64, includeEntitlements, includeProfile bool, policy *trustPolicy) (IPAManifest, error) {
+// InspectIPAInfoPlist reads only the IPA's top-level app Info.plist, under
+// the same archive bounds as InspectIPA, without reading the executable or the
+// embedded profile. Unlike InspectIPA, it fails when UIDeviceFamily is present
+// but malformed, so a caller that acts on the device families never mistakes
+// an unreadable declaration for an iPhone-only app.
+func InspectIPAInfoPlist(source io.ReaderAt, size int64) (IPAManifest, error) {
+	scan, err := scanIPA(source, size)
+	if err != nil {
+		return IPAManifest{Status: "unreadable"}, err
+	}
+	mainPlist, err := readZipPlist(scan.main)
+	if err != nil {
+		return IPAManifest{Status: "unreadable"}, err
+	}
+	if _, err := deviceFamilies(mainPlist.DeviceFamily); err != nil {
+		return IPAManifest{Status: "unreadable"}, err
+	}
+	manifest := manifestFromPlist(mainPlist)
+	manifest.Status = "readable"
+	return manifest, nil
+}
+
+// ipaScan holds the members an IPA inspection selects from the archive.
+type ipaScan struct {
+	reader *zip.Reader
+	main   *zip.File
+	nested []*zip.File
+}
+
+// scanIPA opens a bounded IPA zip and selects its single top-level app
+// Info.plist and the nested bundle Info.plist members.
+func scanIPA(source io.ReaderAt, size int64) (ipaScan, error) {
 	if err := validateZIPDirectory(source, size); err != nil {
-		return IPAManifest{Status: "unreadable"}, fmt.Errorf("open IPA: %w", err)
+		return ipaScan{}, fmt.Errorf("open IPA: %w", err)
 	}
 	bounded := &zipDirectoryReader{ReaderAt: source, remaining: maxZIPDirectoryBytes + (512 << 10)}
 	reader, err := zip.NewReader(bounded, size)
 	bounded.remaining = -1
 	if err != nil {
-		return IPAManifest{Status: "unreadable"}, fmt.Errorf("open IPA: %w", err)
+		return ipaScan{}, fmt.Errorf("open IPA: %w", err)
 	}
 	if len(reader.File) > maxZipEntries {
-		return IPAManifest{Status: "unreadable"}, fmt.Errorf("IPA contains %d entries; limit is %d", len(reader.File), maxZipEntries)
+		return ipaScan{}, fmt.Errorf("IPA contains %d entries; limit is %d", len(reader.File), maxZipEntries)
 	}
+	scan := ipaScan{reader: reader}
 	var declared uint64
-	var main *zip.File
-	var nested []*zip.File
-	var profile *zip.File
 	for _, file := range reader.File {
 		if file.UncompressedSize64 > maxZipDeclaredBytes-declared {
-			return IPAManifest{Status: "unreadable"}, fmt.Errorf("IPA declared expansion exceeds the limit")
+			return ipaScan{}, fmt.Errorf("IPA declared expansion exceeds the limit")
 		}
 		declared += file.UncompressedSize64
 		name := zipMemberName(file.Name)
@@ -187,19 +223,30 @@ func inspectIPA(source io.ReaderAt, size int64, includeEntitlements, includeProf
 			continue
 		}
 		if isTopLevelAppInfoPlist(name) {
-			if main != nil {
-				return IPAManifest{Status: "unreadable"}, fmt.Errorf("IPA has multiple top-level app Info.plist entries")
+			if scan.main != nil {
+				return ipaScan{}, fmt.Errorf("IPA has multiple top-level app Info.plist entries")
 			}
-			main = file
+			scan.main = file
 			continue
 		}
 		if isNestedInfoPlist(name) {
-			nested = append(nested, file)
+			scan.nested = append(scan.nested, file)
 		}
 	}
-	if main == nil {
-		return IPAManifest{Status: "unreadable"}, fmt.Errorf("IPA has no top-level app Info.plist")
+	if scan.main == nil {
+		return ipaScan{}, fmt.Errorf("IPA has no top-level app Info.plist")
 	}
+	return scan, nil
+}
+
+// inspectIPA verifies the code signature when policy is non-nil.
+func inspectIPA(source io.ReaderAt, size int64, includeEntitlements, includeProfile bool, policy *trustPolicy) (IPAManifest, error) {
+	scan, err := scanIPA(source, size)
+	if err != nil {
+		return IPAManifest{Status: "unreadable"}, err
+	}
+	reader, main, nested := scan.reader, scan.main, scan.nested
+	var profile *zip.File
 	appRoot := strings.TrimSuffix(zipMemberName(main.Name), "Info.plist")
 	for _, file := range reader.File {
 		if zipMemberName(file.Name) == appRoot+"embedded.mobileprovision" {
@@ -347,6 +394,7 @@ func manifestFromPlist(parsed bundlePlist) IPAManifest {
 	if len(platforms) == 0 && parsed.Platform != "" {
 		platforms = []string{parsed.Platform}
 	}
+	families, _ := deviceFamilies(parsed.DeviceFamily)
 	return IPAManifest{
 		BundleID:         parsed.BundleID,
 		Name:             firstNonEmpty(parsed.DisplayName, parsed.Name),
@@ -354,6 +402,59 @@ func manifestFromPlist(parsed bundlePlist) IPAManifest {
 		BuildNumber:      parsed.BuildNumber,
 		MinimumOSVersion: firstNonEmpty(parsed.MinimumOSVersion, parsed.MinimumSystem),
 		Platforms:        platforms,
+		DeviceFamilies:   families,
+	}
+}
+
+// deviceFamilies normalizes a decoded UIDeviceFamily value. Xcode writes an
+// array of integers; a single integer and numeric strings are also accepted.
+// An absent key returns nil: Apple's Information Property List Key Reference
+// documents value 1 (iPhone and iPod touch) as the default, and Xcode always
+// writes the key from the Targeted Device Family build setting, so a binary
+// without it is iPhone-only. A present but empty array declares no device
+// family and is malformed.
+func deviceFamilies(value any) ([]int, error) {
+	if value == nil {
+		return nil, nil
+	}
+	items, ok := value.([]any)
+	if !ok {
+		items = []any{value}
+	}
+	if len(items) == 0 {
+		return nil, fmt.Errorf("info.plist UIDeviceFamily is an empty array")
+	}
+	families := make([]int, 0, len(items))
+	for _, item := range items {
+		family, ok := deviceFamilyValue(item)
+		if !ok {
+			return nil, fmt.Errorf("info.plist UIDeviceFamily has unreadable value %v", item)
+		}
+		families = append(families, family)
+	}
+	return families, nil
+}
+
+func deviceFamilyValue(value any) (int, bool) {
+	switch typed := value.(type) {
+	case uint64:
+		if typed > math.MaxInt32 {
+			return 0, false
+		}
+		return int(typed), true
+	case int64:
+		if typed < 0 || typed > math.MaxInt32 {
+			return 0, false
+		}
+		return int(typed), true
+	case string:
+		parsed, err := strconv.Atoi(strings.TrimSpace(typed))
+		if err != nil || parsed < 0 {
+			return 0, false
+		}
+		return parsed, true
+	default:
+		return 0, false
 	}
 }
 
