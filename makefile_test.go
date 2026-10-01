@@ -220,11 +220,20 @@ func TestMakeTestTargetsIsolateDeveloperEnvironment(t *testing.T) {
 	for _, target := range []string{"test", "test-short", "test-parallel", "test-coverage"} {
 		t.Run(target, func(t *testing.T) {
 			workspaceDir := t.TempDir()
+			tempDir := filepath.Join(workspaceDir, "tmp")
+			if err := os.Mkdir(tempDir, 0o700); err != nil {
+				t.Fatalf("mkdir tmp: %v", err)
+			}
 			envLog := filepath.Join(workspaceDir, "test-env")
+			stateLog := filepath.Join(workspaceDir, "test-state")
 			fakeGo := filepath.Join(workspaceDir, "fake-go")
 			script := `#!/bin/sh
 if [ "$1" = "test" ]; then
 	env > "$FAKE_GO_ENV_LOG"
+	config_dir=$(dirname "$ASC_CONFIG_PATH")
+	[ -d "$config_dir" ] && echo "config-dir-exists" >> "$FAKE_GO_STATE_LOG"
+	[ -e "$ASC_CONFIG_PATH" ] && echo "config-exists" >> "$FAKE_GO_STATE_LOG"
+	[ -w "$config_dir" ] && echo "config-dir-writable" >> "$FAKE_GO_STATE_LOG"
 fi
 exit 0
 `
@@ -235,7 +244,9 @@ exit 0
 			cmd := exec.Command("make", "-f", filepath.Join(repoRoot, "Makefile"), "-C", workspaceDir, target, "GO="+fakeGo)
 			cmd.Env = append(
 				os.Environ(),
+				"TMPDIR="+tempDir,
 				"FAKE_GO_ENV_LOG="+envLog,
+				"FAKE_GO_STATE_LOG="+stateLog,
 				"ASC_APP_ID=developer-app",
 				"ASC_CONFIG_PATH=/developer/.asc/config.json",
 				"ASC_PROFILE=developer-profile",
@@ -261,7 +272,6 @@ exit 0
 
 			for name, want := range map[string]string{
 				"ASC_BYPASS_KEYCHAIN": "1",
-				"ASC_CONFIG_PATH":     "/nonexistent/asc-test/config.json",
 				"ASC_UPDATE_GOLDEN":   "1",
 			} {
 				if got[name] != want {
@@ -273,6 +283,110 @@ exit 0
 					t.Errorf("%s leaked into the test environment as %q", name, value)
 				}
 			}
+
+			// The config path is a missing file in a fresh per-run directory
+			// that tests cannot write to and that is removed afterwards.
+			configPath := got["ASC_CONFIG_PATH"]
+			configDir := filepath.Dir(configPath)
+			if filepath.Base(configPath) != "config.json" || filepath.Dir(configDir) != tempDir ||
+				!strings.HasPrefix(filepath.Base(configDir), "asc-test-config.") {
+				t.Fatalf("ASC_CONFIG_PATH = %q, want config.json in a fresh directory under %q", configPath, tempDir)
+			}
+			state, err := os.ReadFile(stateLog)
+			if err != nil {
+				t.Fatalf("read test state: %v", err)
+			}
+			want := "config-dir-exists\n"
+			if os.Geteuid() == 0 {
+				// Root bypasses the read-only mode; the directory is still
+				// fresh, empty, and private to this run.
+				want += "config-dir-writable\n"
+			}
+			if string(state) != want {
+				t.Fatalf("config state during the run = %q, want %q", state, want)
+			}
+			if _, err := os.Stat(configDir); !os.IsNotExist(err) {
+				t.Fatalf("config directory %q still exists after the run (stat error %v)", configDir, err)
+			}
 		})
+	}
+}
+
+func TestMakeTestFailsWhenTestsWriteSharedConfig(t *testing.T) {
+	repoRoot, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	workspaceDir := t.TempDir()
+	tempDir := filepath.Join(workspaceDir, "tmp")
+	if err := os.Mkdir(tempDir, 0o700); err != nil {
+		t.Fatalf("mkdir tmp: %v", err)
+	}
+	fakeGo := filepath.Join(workspaceDir, "fake-go")
+	// Simulate a test that writes the inherited config path, as a root runner
+	// could despite the read-only directory.
+	script := `#!/bin/sh
+if [ "$1" = "test" ]; then
+	chmod 700 "$(dirname "$ASC_CONFIG_PATH")"
+	echo "{}" > "$ASC_CONFIG_PATH"
+fi
+exit 0
+`
+	if err := os.WriteFile(fakeGo, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake go: %v", err)
+	}
+
+	cmd := exec.Command("make", "-f", filepath.Join(repoRoot, "Makefile"), "-C", workspaceDir, "test-short", "GO="+fakeGo)
+	cmd.Env = append(os.Environ(), "TMPDIR="+tempDir)
+	output, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("make test-short succeeded although tests wrote the shared config:\n%s", output)
+	}
+	if !strings.Contains(string(output), "tests wrote to the shared test config directory") {
+		t.Fatalf("make test-short output does not explain the failure:\n%s", output)
+	}
+	entries, err := os.ReadDir(tempDir)
+	if err != nil {
+		t.Fatalf("read tmp: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("config directory left behind: %v", entries)
+	}
+}
+
+func TestMakeTestRemovesConfigDirectoryWhenInterrupted(t *testing.T) {
+	repoRoot, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	workspaceDir := t.TempDir()
+	tempDir := filepath.Join(workspaceDir, "tmp")
+	if err := os.Mkdir(tempDir, 0o700); err != nil {
+		t.Fatalf("mkdir tmp: %v", err)
+	}
+	fakeGo := filepath.Join(workspaceDir, "fake-go")
+	// Terminate the recipe shell while the test command runs, as Ctrl-C or a
+	// cancelled CI job would.
+	script := `#!/bin/sh
+if [ "$1" = "test" ]; then
+	kill -TERM "$PPID"
+fi
+exit 0
+`
+	if err := os.WriteFile(fakeGo, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake go: %v", err)
+	}
+
+	cmd := exec.Command("make", "-f", filepath.Join(repoRoot, "Makefile"), "-C", workspaceDir, "test-short", "GO="+fakeGo)
+	cmd.Env = append(os.Environ(), "TMPDIR="+tempDir)
+	if output, err := cmd.CombinedOutput(); err == nil {
+		t.Fatalf("make test-short succeeded although the run was terminated:\n%s", output)
+	}
+	entries, err := os.ReadDir(tempDir)
+	if err != nil {
+		t.Fatalf("read tmp: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("config directory left behind after termination: %v", entries)
 	}
 }
