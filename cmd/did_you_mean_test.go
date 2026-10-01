@@ -137,8 +137,205 @@ func TestRun_UnknownChildOffersSynonymSuggestions(t *testing.T) {
 	}
 }
 
+// Agents most often guess command paths that predate the versions model or
+// mirror a sibling group's spelling (`asc iap review-screenshots` against
+// `asc subscriptions review screenshots`). Nearest-name matching cannot bridge
+// those, and at the root it named an unrelated command (`asc app-info` offered
+// `asc ipa-info`), so each observed guess maps to the current commands.
+func TestRun_UnknownChildMapsLegacyAndAsymmetricPaths(t *testing.T) {
+	resetReportFlags(t)
+
+	tests := []struct {
+		args  []string
+		group string
+		want  []string
+	}{
+		{
+			args:  []string{"app-info"},
+			group: "asc",
+			want:  []string{"asc apps info view --app APP_ID", "asc apps info list --app APP_ID"},
+		},
+		{
+			args:  []string{"app-infos"},
+			group: "asc",
+			want:  []string{"asc apps info list --app APP_ID", "asc apps info view --app APP_ID"},
+		},
+		{
+			args:  []string{"app-availability"},
+			group: "asc",
+			want: []string{
+				"asc pricing availability view --app APP_ID",
+				"asc pricing availability edit --app APP_ID --territory TERRITORIES --available true",
+			},
+		},
+		{
+			args:  []string{"submissions"},
+			group: "asc",
+			want:  []string{"asc review submissions list --app APP_ID", "asc review status --app APP_ID"},
+		},
+		{
+			args:  []string{"privacy"},
+			group: "asc",
+			want:  []string{"asc web privacy pull --app APP_ID"},
+		},
+		{
+			args:  []string{"beta"},
+			group: "asc",
+			want:  []string{"asc testflight groups list --app APP_ID", "asc testflight testers list --app APP_ID"},
+		},
+		{
+			args:  []string{"apps", "availability"},
+			group: "asc apps",
+			want: []string{
+				"asc pricing availability view --app APP_ID",
+				"asc pricing availability edit --app APP_ID --territory TERRITORIES --available true",
+			},
+		},
+		{
+			args:  []string{"subscriptions", "localizations"},
+			group: "asc subscriptions",
+			want: []string{
+				"asc subscriptions versions list --subscription-id SUBSCRIPTION_ID",
+				"asc subscriptions versions localizations list --version-id VERSION_ID",
+			},
+		},
+		{
+			args:  []string{"subscriptions", "localizations", "list", "--subscription-id", "123"},
+			group: "asc subscriptions",
+			want: []string{
+				"asc subscriptions versions list --subscription-id SUBSCRIPTION_ID",
+				"asc subscriptions versions localizations list --version-id VERSION_ID",
+			},
+		},
+		{
+			args:  []string{"subscriptions", "prices"},
+			group: "asc subscriptions",
+			want: []string{
+				"asc subscriptions pricing prices list --subscription-id SUBSCRIPTION_ID",
+				"asc subscriptions pricing prices set --subscription-id SUBSCRIPTION_ID --price PRICE --territory TERRITORY",
+			},
+		},
+		{
+			args:  []string{"subscriptions", "availability"},
+			group: "asc subscriptions",
+			want: []string{
+				"asc subscriptions pricing availability view --subscription-id SUBSCRIPTION_ID",
+				"asc subscriptions pricing availability edit --subscription-id SUBSCRIPTION_ID --territories TERRITORIES",
+			},
+		},
+		{
+			args:  []string{"subscriptions", "review-screenshots"},
+			group: "asc subscriptions",
+			want: []string{
+				"asc subscriptions review screenshots create --subscription-id SUBSCRIPTION_ID --file FILE_PATH",
+				"asc subscriptions review screenshots view --screenshot-id SCREENSHOT_ID",
+			},
+		},
+		{
+			args:  []string{"subscriptions", "introductory-offers"},
+			group: "asc subscriptions",
+			want: []string{
+				"asc subscriptions offers introductory list --subscription-id SUBSCRIPTION_ID",
+				"asc subscriptions offers introductory create --subscription-id SUBSCRIPTION_ID --territory TERRITORY " +
+					"--offer-duration DURATION --offer-mode MODE --number-of-periods PERIODS",
+			},
+		},
+		{
+			args:  []string{"subscriptions", "groups", "localizations"},
+			group: "asc subscriptions groups",
+			want: []string{
+				"asc subscriptions groups versions list --group-id GROUP_ID",
+				"asc subscriptions groups versions localizations list --version-id VERSION_ID",
+			},
+		},
+		{
+			args:  []string{"versions", "localizations"},
+			group: "asc versions",
+			want: []string{
+				"asc localizations list --version VERSION_ID",
+				"asc localizations list --app APP_ID --version VERSION",
+			},
+		},
+		{
+			args:  []string{"versions", "get-build"},
+			group: "asc versions",
+			want: []string{
+				"asc versions view --version-id VERSION_ID --include-build",
+				"asc builds info --build-id BUILD_ID",
+			},
+		},
+		{
+			args:  []string{"testflight", "beta-groups"},
+			group: "asc testflight",
+			want: []string{
+				"asc testflight groups list --app APP_ID",
+				"asc testflight groups create --app APP_ID --name NAME",
+			},
+		},
+		{
+			args:  []string{"testflight", "groups", "builds"},
+			group: "asc testflight groups",
+			want: []string{
+				"asc builds add-groups --build-id BUILD_ID --group GROUP_ID",
+				"asc testflight groups list --build-id BUILD_ID",
+			},
+		},
+		{
+			args:  []string{"pricing", "view"},
+			group: "asc pricing",
+			want:  []string{"asc pricing current --app APP_ID", "asc pricing availability view --app APP_ID"},
+		},
+		{
+			args:  []string{"pricing", "set"},
+			group: "asc pricing",
+			want: []string{
+				"asc pricing schedule create --app APP_ID --price-point PRICE_POINT_ID --base-territory TERRITORY",
+				"asc pricing schedule create --app APP_ID --free --base-territory TERRITORY",
+			},
+		},
+		{
+			args:  []string{"pricing", "availability", "territories"},
+			group: "asc pricing availability",
+			want: []string{
+				"asc pricing availability view --app APP_ID",
+				"asc pricing availability territory-availabilities --availability AVAILABILITY_ID",
+				"asc pricing territories list",
+			},
+		},
+		{
+			args:  []string{"review", "submissions", "create"},
+			group: "asc review submissions",
+			want:  []string{"asc review submissions-create --app APP_ID --platform IOS"},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(strings.Join(test.args, " "), func(t *testing.T) {
+			stdout, stderr := captureCommandOutput(t, func() {
+				if code := Run(test.args, "1.0.0"); code != ExitUsage {
+					t.Fatalf("Run() exit code = %d, want %d", code, ExitUsage)
+				}
+			})
+
+			guess := test.args[len(strings.Fields(test.group))-1]
+			want := "Error: unknown command `" + test.group + " " + guess + "`\nTry:\n"
+			for _, suggestion := range test.want {
+				want += "  " + suggestion + "\n"
+			}
+			want += "For help:\n  " + test.group + " --help\n"
+			if stdout != "" {
+				t.Fatalf("stdout = %q, want empty", stdout)
+			}
+			if stderr != want {
+				t.Fatalf("stderr = %q, want %q", stderr, want)
+			}
+		})
+	}
+}
+
 func TestUnknownChildSynonymsCoverTheTelemetryGroups(t *testing.T) {
 	wantGroups := []string{
+		"asc",
 		"asc age-rating",
 		"asc agreements",
 		"asc apps",
@@ -147,7 +344,10 @@ func TestUnknownChildSynonymsCoverTheTelemetryGroups(t *testing.T) {
 		"asc iap",
 		"asc localizations",
 		"asc metadata",
+		"asc pricing",
+		"asc pricing availability",
 		"asc review",
+		"asc review submissions",
 		"asc screenshots",
 		"asc subscriptions",
 		"asc subscriptions groups",
@@ -188,8 +388,8 @@ func TestUnknownChildSynonymsResolveToRealCommands(t *testing.T) {
 
 	for group, synonyms := range unknownChildSynonyms {
 		groupPath := strings.Fields(group)
-		if len(groupPath) < 2 || groupPath[0] != "asc" {
-			t.Fatalf("synonym key %q must be a full `asc ...` group path", group)
+		if len(groupPath) == 0 || groupPath[0] != "asc" {
+			t.Fatalf("synonym key %q must be `asc` or a full `asc ...` group path", group)
 		}
 		groupCommand := resolveCommandPath(root, groupPath[1:])
 		if groupCommand == nil {
@@ -503,6 +703,12 @@ var synonymsVerifiedAgainstValidation = map[string]string{
 	// age_rating.go: edit requires only a selector (--id or --app), so a single
 	// declaration flag is enough; every example sets two or more.
 	"asc age-rating edit --app APP_ID --kids-age-band KIDS_AGE_BAND": "edit requires only a selector",
+	// pricing.go: schedule create sets StartDateDefaultToday, so --start-date is
+	// optional; the only --free example still passes it.
+	"asc pricing schedule create --app APP_ID --free --base-territory TERRITORY": "start date defaults to today",
+	// group_version_localizations.go: list requires only --version-id; its one
+	// example adds --paginate.
+	"asc subscriptions groups versions localizations list --version-id VERSION_ID": "list requires only --version-id",
 }
 
 // A curated suggestion must carry every flag some documented example of the
