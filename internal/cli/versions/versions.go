@@ -81,11 +81,19 @@ func VersionsListCommand() *ffcli.Command {
 		ShortHelp:  "List app store versions for an app.",
 		LongHelp: `List app store versions for an app.
 
-The App Store Connect API can report every historical version of an app as
-READY_FOR_SALE, so a state filter alone cannot identify the live version.
+App Store Connect reports a live version under two state attributes:
+appVersionState READY_FOR_DISTRIBUTION and the deprecated appStoreState
+READY_FOR_SALE. Apple fills them inconsistently: some live versions report
+only READY_FOR_DISTRIBUTION, and versions that were later replaced can still
+report READY_FOR_SALE. --state filters on one attribute per command and
+cannot mix the two spellings, so no single --state value finds every live
+version.
+
 --latest fetches every page and keeps only the newest version per platform by
-createdDate; combine it with --state READY_FOR_SALE to get the version that
-is actually live on each platform.
+createdDate. To find the live version, run it with --state
+READY_FOR_DISTRIBUTION and again with --state READY_FOR_SALE, then keep the
+newer result on each platform. A READY_FOR_SALE result whose appVersionState
+is present and is not READY_FOR_DISTRIBUTION is not live.
 
 Use --include to return related resources in the same response instead of
 issuing a follow-up request per version. Included review-detail passwords are
@@ -95,6 +103,7 @@ Examples:
   asc versions list --app "123456789"
   asc versions list --app "123456789" --version "1.0.0"
   asc versions list --app "123456789" --platform IOS --state READY_FOR_REVIEW
+  asc versions list --app "123456789" --state READY_FOR_DISTRIBUTION --latest
   asc versions list --app "123456789" --state READY_FOR_SALE --latest
   asc versions list --app "123456789" --include "build,appStoreVersionSubmission"
   asc versions list --app "123456789" --paginate`,
