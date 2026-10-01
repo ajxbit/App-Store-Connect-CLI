@@ -12,6 +12,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	rootcmd "github.com/rudrankriyam/App-Store-Connect-CLI/cmd"
 )
 
 const iapImportTwoProductsFile = `{
@@ -568,8 +570,8 @@ func TestIAPImportRejectsInvalidFilesBeforeAnyRequest(t *testing.T) {
 				"--confirm",
 				"--output", "json",
 			})
-			if !errors.Is(runErr, flag.ErrHelp) {
-				t.Fatalf("expected a usage error, got %v", runErr)
+			if code := rootcmd.ExitCodeFromError(runErr); code != rootcmd.ExitUsage {
+				t.Fatalf("expected a usage error (exit %d), got exit %d: %v", rootcmd.ExitUsage, code, runErr)
 			}
 			if stdout != "" {
 				t.Fatalf("expected empty stdout, got %q", stdout)
@@ -608,14 +610,17 @@ func TestIAPImportRejectsScreenshotOutsideTheImportRoot(t *testing.T) {
 		"--confirm",
 		"--output", "json",
 	})
-	if !errors.Is(runErr, flag.ErrHelp) {
-		t.Fatalf("expected a usage error, got %v", runErr)
+	if code := rootcmd.ExitCodeFromError(runErr); code != rootcmd.ExitUsage {
+		t.Fatalf("expected a usage error (exit %d), got exit %d: %v", rootcmd.ExitUsage, code, runErr)
 	}
 	if stdout != "" {
 		t.Fatalf("expected empty stdout, got %q", stdout)
 	}
 	if !strings.Contains(stderr, "must stay inside") {
 		t.Fatalf("expected a containment error on stderr, got %q", stderr)
+	}
+	if strings.Contains(stderr, "USAGE") {
+		t.Fatalf("expected a one-line diagnostic without the usage page, got %q", stderr)
 	}
 }
 

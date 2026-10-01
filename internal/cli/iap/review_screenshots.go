@@ -162,7 +162,7 @@ Examples:
 			}
 			defer cleanupSnapshot()
 			if err := shared.PreflightReviewScreenshot(pathValue, snapshot, info.Size()); err != nil {
-				return shared.UsageError("iap review-screenshots create: " + err.Error())
+				return shared.ReviewScreenshotUsageError("--file", "iap review-screenshots create: "+err.Error())
 			}
 
 			checksum, err := asc.ComputeChecksumFromReader(snapshot, asc.ChecksumAlgorithmMD5)
@@ -290,7 +290,7 @@ Examples:
 				}
 				defer cleanupSnapshot()
 				if err := shared.PreflightReviewScreenshot(pathValue, snapshot, info.Size()); err != nil {
-					return shared.UsageError("iap review-screenshots update: " + err.Error())
+					return shared.ReviewScreenshotUsageError("--file", "iap review-screenshots update: "+err.Error())
 				}
 
 				checksum, err := asc.ComputeChecksumFromReader(snapshot, asc.ChecksumAlgorithmMD5)

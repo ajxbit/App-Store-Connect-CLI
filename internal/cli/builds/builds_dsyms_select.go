@@ -209,7 +209,7 @@ func resolveDSYMTargets(ctx context.Context, client *asc.Client, selection dsymS
 	defer cancel()
 	buildResp, err := ResolveBuild(requestCtx, client, selection.Resolve)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("builds dsyms: %w", err)
 	}
 	if buildResp == nil || strings.TrimSpace(buildResp.Data.ID) == "" {
 		return nil, fmt.Errorf("builds dsyms: no build matched")
@@ -224,7 +224,7 @@ func resolveDSYMTargets(ctx context.Context, client *asc.Client, selection dsymS
 func resolveSelectedDSYMTargets(ctx context.Context, client *asc.Client, selection dsymSelection) ([]dsymTarget, error) {
 	appID, err := shared.ResolveAppIDWithLookup(ctx, client, selection.Resolve.AppID)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("builds dsyms: %w", err)
 	}
 	exactVersion := selection.Resolve.Version
 	platform := selection.Resolve.Platform

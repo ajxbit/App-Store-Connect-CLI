@@ -145,7 +145,7 @@ Examples:
 			}
 			defer cleanupSnapshot()
 			if err := shared.PreflightReviewScreenshot(pathValue, snapshot, info.Size()); err != nil {
-				return shared.UsageErrorCtx(ctx, "subscriptions review-screenshots create: "+err.Error())
+				return shared.ReviewScreenshotUsageError("--file", shared.RewriteUsageMessage(ctx, "subscriptions review-screenshots create: "+err.Error()))
 			}
 			checksum, err := asc.ComputeChecksumFromReader(io.NewSectionReader(snapshot, 0, info.Size()), asc.ChecksumAlgorithmMD5)
 			if err != nil {

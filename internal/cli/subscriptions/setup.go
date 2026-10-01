@@ -343,7 +343,7 @@ Examples:
 			}
 			if opts.ReviewScreenshot != "" {
 				if err := validateSubscriptionReviewScreenshotFile(opts.ReviewScreenshot); err != nil {
-					return shared.UsageError(fmt.Sprintf("invalid --review-screenshot: %v", err))
+					return shared.ReviewScreenshotUsageError("--review-screenshot", fmt.Sprintf("invalid --review-screenshot: %v", err))
 				}
 			}
 

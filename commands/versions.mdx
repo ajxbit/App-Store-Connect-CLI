@@ -398,6 +398,15 @@ asc versions attach-build --version-id "VERSION_ID" --build-id "BUILD_ID"
 asc versions list --app "123456789" --state WAITING_FOR_REVIEW,IN_REVIEW
 ```
 
+### Find the live version
+
+App Store Connect reports a live version as `appVersionState` `READY_FOR_DISTRIBUTION`, the deprecated `appStoreState` `READY_FOR_SALE`, or both, and one `--state` filter cannot match both. Replaced versions can still report `READY_FOR_SALE`, so list that state with `--paginate` rather than `--latest`, skip results whose `appVersionState` is present and is not `READY_FOR_DISTRIBUTION`, and keep the newest version left on each platform across both lists.
+
+```bash  theme={null}
+asc versions list --app "123456789" --state READY_FOR_DISTRIBUTION --latest
+asc versions list --app "123456789" --state READY_FOR_SALE --paginate
+```
+
 ### Update version release type
 
 ```bash  theme={null}
@@ -420,7 +429,8 @@ asc versions release --version-id "VERSION_ID" --confirm
 * `PENDING_DEVELOPER_RELEASE` - Approved and waiting for developer to release
 * `PROCESSING_FOR_APP_STORE` - Processing for release
 * `PENDING_APPLE_RELEASE` - Pending Apple release
-* `READY_FOR_SALE` - Live on the App Store
+* `READY_FOR_DISTRIBUTION` - Live on the App Store (`appVersionState`)
+* `READY_FOR_SALE` - Live on the App Store (deprecated `appStoreState`; replaced versions can still report it)
 * `REMOVED_FROM_SALE` - Removed from sale
 * `DEVELOPER_REJECTED` - Rejected by developer
 * `REJECTED` - Rejected by Apple
