@@ -362,3 +362,17 @@ func openSubscriptionImageFile(path string) (*os.File, os.FileInfo, error) {
 	}
 	return file, info, nil
 }
+
+// openSubscriptionReviewScreenshotFile opens an App Review screenshot and
+// checks its format and dimensions before anything is uploaded.
+func openSubscriptionReviewScreenshotFile(path string) (*os.File, os.FileInfo, error) {
+	file, info, err := openSubscriptionImageFile(path)
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := shared.PreflightReviewScreenshot(path, file, info.Size()); err != nil {
+		_ = file.Close()
+		return nil, nil, err
+	}
+	return file, info, nil
+}

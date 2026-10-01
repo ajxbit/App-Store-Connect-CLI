@@ -129,6 +129,10 @@ func IAPReviewScreenshotsCreateCommand() *ffcli.Command {
 		ShortHelp:  "Upload an in-app purchase review screenshot.",
 		LongHelp: `Upload an in-app purchase review screenshot.
 
+The file must be a PNG or JPEG named .png, .jpg, or .jpeg at an App Store
+screenshot size, such as 1290x2796 for iPhone. The command checks this before
+uploading and lists the accepted sizes when the file does not match.
+
 Examples:
   asc iap review-screenshots create --iap-id "IAP_ID" --file "./review.png"`,
 		FlagSet:   fs,
@@ -155,6 +159,9 @@ Examples:
 				return fmt.Errorf("iap review-screenshots create: %w", err)
 			}
 			defer cleanupSnapshot()
+			if err := shared.PreflightReviewScreenshot(pathValue, snapshot, info.Size()); err != nil {
+				return fmt.Errorf("iap review-screenshots create: %w", err)
+			}
 
 			checksum, err := asc.ComputeChecksumFromReader(snapshot, asc.ChecksumAlgorithmMD5)
 			if err != nil {
@@ -269,7 +276,8 @@ Examples:
 			}
 
 			if fileProvided {
-				file, info, err := openImageFile(strings.TrimSpace(*filePath))
+				pathValue := strings.TrimSpace(*filePath)
+				file, info, err := openImageFile(pathValue)
 				if err != nil {
 					return fmt.Errorf("iap review-screenshots update: %w", err)
 				}
@@ -279,6 +287,9 @@ Examples:
 					return fmt.Errorf("iap review-screenshots update: %w", err)
 				}
 				defer cleanupSnapshot()
+				if err := shared.PreflightReviewScreenshot(pathValue, snapshot, info.Size()); err != nil {
+					return fmt.Errorf("iap review-screenshots update: %w", err)
+				}
 
 				checksum, err := asc.ComputeChecksumFromReader(snapshot, asc.ChecksumAlgorithmMD5)
 				if err != nil {

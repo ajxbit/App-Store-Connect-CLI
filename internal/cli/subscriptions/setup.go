@@ -341,7 +341,7 @@ Examples:
 				return shared.UsageError("--repair requires pricing flags")
 			}
 			if opts.ReviewScreenshot != "" {
-				file, _, err := openSubscriptionImageFile(opts.ReviewScreenshot)
+				file, _, err := openSubscriptionReviewScreenshotFile(opts.ReviewScreenshot)
 				if err != nil {
 					return shared.UsageError(fmt.Sprintf("invalid --review-screenshot: %v", err))
 				}

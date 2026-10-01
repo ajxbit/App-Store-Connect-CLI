@@ -308,6 +308,18 @@ func resolveIAPImportScreenshotName(root rootfs.Root, value string) (string, err
 	if err := asc.ValidateImageFile(resolved); err != nil {
 		return "", err
 	}
+	file, err := root.OpenFile(name)
+	if err != nil {
+		return "", err
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return "", err
+	}
+	if err := shared.PreflightReviewScreenshot(name, file, info.Size()); err != nil {
+		return "", err
+	}
 	return name, nil
 }
 
