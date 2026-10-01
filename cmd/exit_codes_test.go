@@ -76,6 +76,11 @@ func TestExitCodeFromError(t *testing.T) {
 			expected: ExitAuth,
 		},
 		{
+			name:     "wrapped missing Apple web session returns auth failure",
+			err:      fmt.Errorf("web review show failed: %w", &shared.MissingWebSessionError{Message: "no Apple web session is cached"}),
+			expected: ExitAuth,
+		},
+		{
 			name:     "ErrNotFound returns not found",
 			err:      asc.ErrNotFound,
 			expected: ExitNotFound,

@@ -768,7 +768,7 @@ func runtimeFailureContext(analysis invocationAnalysis, err error, exitCode int)
 		return eventContext
 	}
 	switch {
-	case errors.Is(err, shared.ErrMissingAuth):
+	case errors.Is(err, shared.ErrMissingAuth), errors.Is(err, shared.ErrMissingWebSession):
 		eventContext.FailureStage = telemetry.FailureStageValidation
 	case shared.IsValidationError(err):
 		eventContext.FailureStage = telemetry.FailureStageValidation

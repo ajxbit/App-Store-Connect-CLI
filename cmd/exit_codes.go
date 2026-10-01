@@ -56,6 +56,7 @@ func ExitCodeFromError(err error) int {
 
 	// Well-known error types
 	if errors.Is(err, shared.ErrMissingAuth) ||
+		errors.Is(err, shared.ErrMissingWebSession) ||
 		errors.Is(err, asc.ErrUnauthorized) ||
 		errors.Is(err, asc.ErrForbidden) ||
 		errors.Is(err, webcore.ErrInvalidAppleAccountCredentials) {
