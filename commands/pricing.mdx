@@ -300,14 +300,21 @@ asc pricing availability view --id "AVAILABILITY_ID"
 ### `asc pricing availability create`
 
 Initialize app availability for territories. Selected territories are set to
-`--available` and every other territory starts unavailable.
+`--available` and every other territory starts unavailable. Pass exactly one
+of `--territory` or `--all-territories`.
 
 <ParamField path="--app" type="string" required>
   App Store Connect app ID
 </ParamField>
 
-<ParamField path="--territory" type="string" required>
-  Territory codes (comma-separated, e.g., USA,GBR,DEU)
+<ParamField path="--territory" type="string">
+  Territory codes (comma-separated, e.g., USA,GBR,DEU). Required unless
+  `--all-territories` is set.
+</ParamField>
+
+<ParamField path="--all-territories" type="boolean" default="false">
+  Apply `--available` to every territory in Apple's current territory catalog.
+  Mutually exclusive with `--territory`.
 </ParamField>
 
 <ParamField path="--available" type="boolean" required>
@@ -321,7 +328,8 @@ Initialize app availability for territories. Selected territories are set to
 <ParamField path="--if-exists" type="string" default="fail">
   Behavior when the app already has an availability record: `fail` returns
   Apple's 409, `skip` prints the existing record unchanged and exits 0, and
-  `update` applies `--territory` and `--available` to it through the same
+  `update` applies `--territory` (or, with `--all-territories`, every
+  territory in the existing record) and `--available` to it through the same
   path as `asc pricing availability edit`. Only the recognized
   already-exists conflict is handled; every other 409 keeps failing.
 </ParamField>
@@ -335,6 +343,7 @@ reports the record as left unchanged.
 
 ```bash  theme={null}
 asc pricing availability create --app "123456789" --territory "USA,GBR,DEU" --available true --available-in-new-territories true
+asc pricing availability create --app "123456789" --all-territories --available true --available-in-new-territories true
 asc pricing availability create --app "123456789" --territory "USA,GBR,DEU" --available true --available-in-new-territories true --if-exists skip
 asc pricing availability create --app "123456789" --territory "USA,GBR,DEU" --available true --available-in-new-territories true --if-exists update
 ```
