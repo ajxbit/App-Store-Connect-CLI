@@ -363,6 +363,19 @@ func openSubscriptionImageFile(path string) (*os.File, os.FileInfo, error) {
 	return file, info, nil
 }
 
+// validateSubscriptionReviewScreenshotFile rejects an App Review screenshot
+// whose format or dimensions App Store Connect would refuse. It prints no
+// warnings; the upload prints them for the bytes it actually sends.
+func validateSubscriptionReviewScreenshotFile(path string) error {
+	file, _, err := openSubscriptionImageFile(path)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	_, err = asc.CheckReviewScreenshotImage(path, file)
+	return err
+}
+
 // openSubscriptionReviewScreenshotFile opens an App Review screenshot and
 // checks its format and dimensions before anything is uploaded.
 func openSubscriptionReviewScreenshotFile(path string) (*os.File, os.FileInfo, error) {

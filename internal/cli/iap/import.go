@@ -308,16 +308,14 @@ func resolveIAPImportScreenshotName(root rootfs.Root, value string) (string, err
 	if err := asc.ValidateImageFile(resolved); err != nil {
 		return "", err
 	}
+	// Reject an unusable screenshot before anything is created. Warnings are
+	// printed at upload time, for the bytes actually sent.
 	file, err := root.OpenFile(name)
 	if err != nil {
 		return "", err
 	}
 	defer file.Close()
-	info, err := file.Stat()
-	if err != nil {
-		return "", err
-	}
-	if err := shared.PreflightReviewScreenshot(name, file, info.Size()); err != nil {
+	if _, err := asc.CheckReviewScreenshotImage(name, file); err != nil {
 		return "", err
 	}
 	return name, nil
@@ -518,6 +516,11 @@ func uploadIAPImportReviewScreenshot(ctx context.Context, client *asc.Client, ro
 		return "", fmt.Errorf("snapshot review screenshot %q: %w", name, err)
 	}
 	defer cleanupSnapshot()
+	// Planning already rejected an unusable file; check the bytes about to be
+	// uploaded in case the file changed since then, and warn about them.
+	if err := shared.PreflightReviewScreenshot(name, snapshot, info.Size()); err != nil {
+		return "", fmt.Errorf("validate review screenshot %q: %w", name, err)
+	}
 
 	checksum, err := asc.ComputeChecksumFromReader(snapshot, asc.ChecksumAlgorithmMD5)
 	if err != nil {

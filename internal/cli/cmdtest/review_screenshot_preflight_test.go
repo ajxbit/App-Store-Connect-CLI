@@ -277,3 +277,122 @@ func TestIAPReviewScreenshotsCreateWarnsAboutAlphaChannelAndUploads(t *testing.T
 		t.Fatalf("stderr %q does not contain %q", stderr, want)
 	}
 }
+
+func TestIAPImportRechecksReviewScreenshotReplacedAfterPlanning(t *testing.T) {
+	setupAuth(t)
+	t.Setenv("ASC_CONFIG_PATH", filepath.Join(t.TempDir(), "nonexistent.json"))
+
+	dir := t.TempDir()
+	filePath := writeIAPImportFile(t, dir, `{"products":[{"type":"CONSUMABLE","referenceName":"Coins","productId":"com.example.coins","reviewScreenshot":"shots/coins.png"}]}`)
+	screenshotPath := writeIAPImportScreenshot(t, dir)
+
+	createdProduct := false
+	originalTransport := http.DefaultTransport
+	t.Cleanup(func() { http.DefaultTransport = originalTransport })
+	http.DefaultTransport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		switch {
+		case req.Method == http.MethodGet && req.URL.Path == "/v1/apps/123456789/inAppPurchasesV2":
+			writeOpaquePNG(t, screenshotPath, 40, 40)
+			return jsonResponse(http.StatusOK, `{"data":[]}`)
+		case req.Method == http.MethodPost && req.URL.Path == "/v2/inAppPurchases":
+			createdProduct = true
+			return jsonResponse(http.StatusCreated, `{"data":{"type":"inAppPurchases","id":"iap-1","attributes":{}}}`)
+		default:
+			t.Fatalf("unexpected request after the screenshot was replaced: %s %s", req.Method, req.URL.String())
+			return nil, nil
+		}
+	})
+
+	_, stderr, err := runIAPImport(t, []string{"iap", "import", "--app", "123456789", "--file", filePath, "--confirm", "--output", "json"})
+	if err == nil || !createdProduct {
+		t.Fatalf("run error = %v, product created = %t, stderr = %q; want rejection after product creation", err, createdProduct, stderr)
+	}
+	if want := `review screenshot "shots/coins.png" is 40x40 pixels`; !strings.Contains(err.Error(), want) {
+		t.Fatalf("error %q does not contain %q", err.Error(), want)
+	}
+}
+
+func TestIAPImportWarnsAboutAlphaChannelOnceAtUpload(t *testing.T) {
+	setupAuth(t)
+	t.Setenv("ASC_CONFIG_PATH", filepath.Join(t.TempDir(), "nonexistent.json"))
+
+	dir := t.TempDir()
+	filePath := writeIAPImportFile(t, dir, `{"products":[{"type":"CONSUMABLE","referenceName":"Coins","productId":"com.example.coins","reviewScreenshot":"shots/coins.png"}]}`)
+	screenshotPath := writeIAPImportScreenshot(t, dir)
+	img := image.NewNRGBA(image.Rect(0, 0, 640, 920))
+	img.SetNRGBA(0, 0, color.NRGBA{R: 255, A: 128})
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, img); err != nil {
+		t.Fatalf("encode png: %v", err)
+	}
+	if err := os.WriteFile(screenshotPath, buf.Bytes(), 0o600); err != nil {
+		t.Fatalf("write png: %v", err)
+	}
+
+	originalTransport := http.DefaultTransport
+	t.Cleanup(func() { http.DefaultTransport = originalTransport })
+	reserved := false
+	http.DefaultTransport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		switch {
+		case req.Method == http.MethodGet && req.URL.Path == "/v1/apps/123456789/inAppPurchasesV2":
+			return jsonResponse(http.StatusOK, `{"data":[]}`)
+		case req.Method == http.MethodPost && req.URL.Path == "/v2/inAppPurchases":
+			return jsonResponse(http.StatusCreated, `{"data":{"type":"inAppPurchases","id":"iap-1","attributes":{}}}`)
+		case req.Method == http.MethodPost && req.URL.Path == "/v1/inAppPurchaseAppStoreReviewScreenshots":
+			reserved = true
+			return jsonResponse(http.StatusCreated, `{"data":{"type":"inAppPurchaseAppStoreReviewScreenshots","id":"shot-1","attributes":{"fileName":"coins.png"}}}`)
+		default:
+			t.Fatalf("unexpected request: %s %s", req.Method, req.URL.String())
+			return nil, nil
+		}
+	})
+
+	_, stderr, _ := runIAPImport(t, []string{"iap", "import", "--app", "123456789", "--file", filePath, "--confirm", "--output", "json"})
+	if !reserved {
+		t.Fatalf("expected the screenshot upload to proceed despite the warning; stderr = %q", stderr)
+	}
+	if got := strings.Count(stderr, `Warning: review screenshot "shots/coins.png" has an alpha channel`); got != 1 {
+		t.Fatalf("alpha warnings = %d, want exactly 1; stderr = %q", got, stderr)
+	}
+}
+
+func TestSubscriptionsSetupRechecksReviewScreenshotReplacedAfterValidation(t *testing.T) {
+	setupAuth(t)
+	t.Setenv("ASC_CONFIG_PATH", filepath.Join(t.TempDir(), "nonexistent.json"))
+
+	path := filepath.Join(t.TempDir(), "review.png")
+	writeReviewScreenshotPNG(t, path)
+
+	originalTransport := http.DefaultTransport
+	t.Cleanup(func() { http.DefaultTransport = originalTransport })
+	createdSubscription := false
+	http.DefaultTransport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		switch {
+		case req.Method == http.MethodGet && req.URL.Path == "/v1/subscriptionGroups/group-1/subscriptions":
+			return jsonResponse(http.StatusOK, `{"data":[],"links":{"next":""}}`)
+		case req.Method == http.MethodPost && req.URL.Path == "/v1/subscriptions":
+			createdSubscription = true
+			writeOpaquePNG(t, path, 1024, 1024)
+			return jsonResponse(http.StatusCreated, `{"data":{"type":"subscriptions","id":"sub-1","attributes":{"name":"Pro Monthly","productId":"com.example.pro.monthly","subscriptionPeriod":"ONE_MONTH","state":"MISSING_METADATA"}}}`)
+		default:
+			t.Fatalf("unexpected request after the screenshot was replaced: %s %s", req.Method, req.URL.String())
+			return nil, nil
+		}
+	})
+
+	_, stderr, err := runReviewScreenshotCommand(t, []string{
+		"subscriptions", "setup",
+		"--group-id", "group-1",
+		"--reference-name", "Pro Monthly",
+		"--product-id", "com.example.pro.monthly",
+		"--subscription-period", "ONE_MONTH",
+		"--review-screenshot", path,
+		"--output", "json",
+	})
+	if err == nil || !createdSubscription {
+		t.Fatalf("run error = %v, subscription created = %t, stderr = %q; want rejection after subscription creation", err, createdSubscription, stderr)
+	}
+	if want := fmt.Sprintf("review screenshot %q is 1024x1024 pixels", path); !strings.Contains(err.Error(), want) {
+		t.Fatalf("error %q does not contain %q", err.Error(), want)
+	}
+}

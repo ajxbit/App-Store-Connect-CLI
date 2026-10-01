@@ -341,11 +341,9 @@ Examples:
 				return shared.UsageError("--repair requires pricing flags")
 			}
 			if opts.ReviewScreenshot != "" {
-				file, _, err := openSubscriptionReviewScreenshotFile(opts.ReviewScreenshot)
-				if err != nil {
+				if err := validateSubscriptionReviewScreenshotFile(opts.ReviewScreenshot); err != nil {
 					return shared.UsageError(fmt.Sprintf("invalid --review-screenshot: %v", err))
 				}
-				_ = file.Close()
 			}
 
 			if err := shared.ValidateFinitePriceFlag("--price", opts.Price); err != nil {
@@ -779,7 +777,10 @@ func executeSubscriptionsSetup(ctx context.Context, opts subscriptionsSetupOptio
 			Message: "no review screenshot provided",
 		})
 	} else {
-		file, info, err := openSubscriptionImageFile(opts.ReviewScreenshot)
+		// Flag validation rejected an unusable file before any request; check
+		// again in case it changed while earlier steps ran, and warn here so
+		// warnings describe the file being uploaded.
+		file, info, err := openSubscriptionReviewScreenshotFile(opts.ReviewScreenshot)
 		if err != nil {
 			return failSubscriptionsSetupStep(result, subscriptionsSetupStepUploadReviewScreenshot, err, "invalid review screenshot")
 		}
