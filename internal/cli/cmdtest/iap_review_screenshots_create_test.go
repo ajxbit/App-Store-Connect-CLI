@@ -169,8 +169,7 @@ func TestIAPReviewScreenshotsCreateFailsWhenDeliveryVerificationFails(t *testing
 func TestIAPReviewScreenshotsCreateFallsBackToNumericIDAfterLookupTimeout(t *testing.T) {
 	setupStableSelectorAuth(t)
 	t.Setenv("ASC_APP_ID", "")
-	t.Setenv("ASC_TIMEOUT", "10ms")
-	t.Setenv("ASC_TIMEOUT_SECONDS", "")
+	lookupTimeout := expireSelectorLookup(t)
 
 	imagePath := filepath.Join(t.TempDir(), "review.png")
 	writeReviewScreenshotPNG(t, imagePath)
@@ -190,8 +189,7 @@ func TestIAPReviewScreenshotsCreateFallsBackToNumericIDAfterLookupTimeout(t *tes
 		requests++
 		switch {
 		case req.Method == http.MethodGet && req.URL.Path == "/v1/apps/app-123/inAppPurchasesV2":
-			<-req.Context().Done()
-			return nil, req.Context().Err()
+			return lookupTimeout(req)
 		case req.Method == http.MethodPost && req.URL.Path == "/v1/inAppPurchaseAppStoreReviewScreenshots":
 			if err := req.Context().Err(); err != nil {
 				t.Fatalf("expected fresh upload context after lookup timeout, got %v", err)
