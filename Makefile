@@ -26,6 +26,37 @@ GOFUMPT_VERSION ?= v0.10.0
 GOLANGCI_LINT_VERSION ?= v2.12.1
 GOVULNCHECK_VERSION ?= v1.6.0
 
+# Test environment
+# Tests must not depend on the invoking shell or the developer's stored asc
+# state. Unset every inherited ASC_* variable (except test-only switches) and
+# DO_NOT_TRACK, bypass the keychain, and point ASC_CONFIG_PATH at a missing
+# file in a fresh per-run directory that is removed afterwards: a temporary HOME
+# alone is not enough, because the upward .asc/config.json search from a
+# checkout inside the home directory reaches ~/.asc/config.json. The directory
+# is read-only so a test that writes config without choosing its own path fails
+# (root bypasses the mode, but the directory is still private to the run).
+# Tests that need any of these inputs set them with t.Setenv.
+TEST_ENV_PASSTHROUGH := ASC_UPDATE_GOLDEN ASC_SIGNING_RUN_LIVE_TEST ASC_SIGNING_KEYCHAIN_INSTALL_LIVE_TEST
+TEST_ENV = env $(foreach var,$(sort $(filter-out $(TEST_ENV_PASSTHROUGH),$(filter ASC_%,$(.VARIABLES)))),-u $(var)) -u DO_NOT_TRACK ASC_BYPASS_KEYCHAIN=1
+
+# $(call run_isolated_tests,<go test arguments>)
+# The EXIT trap removes the directory however the run ends, including Ctrl-C.
+define run_isolated_tests
+	@config_dir="$$(mktemp -d "$${TMPDIR:-/tmp}/asc-test-config.XXXXXX")" || exit 1; \
+	trap 'chmod 700 "$$config_dir" 2>/dev/null; rm -rf "$$config_dir"' EXIT; \
+	trap 'exit 130' INT; \
+	trap 'exit 143' TERM; \
+	chmod 500 "$$config_dir"; \
+	echo "ASC_CONFIG_PATH=$$config_dir/config.json $(GO) test $(1)"; \
+	$(TEST_ENV) ASC_CONFIG_PATH="$$config_dir/config.json" $(GO) test $(1); \
+	status=$$?; \
+	if [ -n "$$(ls -A "$$config_dir")" ]; then \
+		echo "error: tests wrote to the shared test config directory $$config_dir; set ASC_CONFIG_PATH in the test instead" >&2; \
+		[ $$status -ne 0 ] || status=1; \
+	fi; \
+	exit $$status
+endef
+
 # Directories
 SRC_DIR := .
 BUILD_DIR := build
@@ -73,20 +104,26 @@ build-debug:
 .PHONY: test
 test:
 	@echo "$(BLUE)Running tests...$(NC)"
-	ASC_BYPASS_KEYCHAIN=1 $(GO) test -v ./...
+	$(call run_isolated_tests,-v ./...)
+
+# Run the short test suite (used by the pre-commit hook)
+.PHONY: test-short
+test-short:
+	@echo "$(BLUE)Running short tests...$(NC)"
+	$(call run_isolated_tests,-short ./...)
 
 # Run tests with parallel package compilation
 # Defaults to GOMAXPROCS; set PARALLEL to override (e.g. PARALLEL=4)
 .PHONY: test-parallel
 test-parallel:
 	@echo "$(BLUE)Running tests (parallel=$(or $(PARALLEL),auto))...$(NC)"
-	ASC_BYPASS_KEYCHAIN=1 $(GO) test -v -count=1 $(if $(PARALLEL),-p=$(PARALLEL)) ./...
+	$(call run_isolated_tests,-v -count=1 $(if $(PARALLEL),-p=$(PARALLEL)) ./...)
 
 # Run tests with coverage
 .PHONY: test-coverage
 test-coverage:
 	@echo "$(BLUE)Running tests with coverage...$(NC)"
-	ASC_BYPASS_KEYCHAIN=1 $(GO) test -coverprofile=coverage.out ./...
+	$(call run_isolated_tests,-coverprofile=coverage.out ./...)
 	$(GO) tool cover -html=coverage.out -o coverage.html
 	@echo "$(GREEN)Coverage report: coverage.html$(NC)"
 
@@ -289,6 +326,7 @@ help:
 	@echo "  build-all      Build release binaries for supported platforms"
 	@echo "  build-debug    Build with debug symbols"
 	@echo "  test           Run tests"
+	@echo "  test-short     Run the short test suite"
 	@echo "  test-parallel  Run tests with optional package parallelism (PARALLEL=<n>)"
 	@echo "  test-coverage  Run tests with coverage"
 	@echo "  test-integration  Run opt-in integration tests"
