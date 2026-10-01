@@ -559,7 +559,10 @@ func TestReviewDetailsCreateIfExistsUpdateReusesExistingDemoCredentials(t *testi
 
 func TestReviewDetailsCreateDefaultIfExistsFailPreservesConflict(t *testing.T) {
 	stdout, _, seen, runErr := runIfExistsCommand(t, []string{
-		"review", "details-create", "--version-id", "version-1", "--notes", "new notes", "--output", "json",
+		"review", "details-create", "--version-id", "version-1",
+		"--contact-first-name", "Dev", "--contact-last-name", "Support",
+		"--contact-email", "dev@example.com", "--contact-phone", "+1 408 555 0100",
+		"--notes", "new notes", "--output", "json",
 	}, func(req ifExistsRequest) (*http.Response, error) {
 		if req.Method == http.MethodPost && req.Path == "/v1/appStoreReviewDetails" {
 			return jsonResponse(http.StatusConflict, reviewDetailExists409)
