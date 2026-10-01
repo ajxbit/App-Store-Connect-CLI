@@ -440,6 +440,14 @@ asc auth logout --all --confirm
 
 `--all` always attempts config cleanup and also attempts keychain cleanup. If config cleanup succeeds, a keychain cleanup error is treated as non-fatal.
 
+Config cleanup follows the same file selection as reads. When `ASC_CONFIG_PATH` is set, logout changes only that config file (plus the keychain), so an isolated CI job, sandbox, agent, or test run cannot remove the credentials in your `~/.asc/config.json`. If that file still holds matching credentials, logout prints a warning naming it. To remove them as well, run logout with `ASC_CONFIG_PATH` unset, or pass `--include-global`:
+
+```bash  theme={null}
+asc auth logout --all --include-global --confirm
+```
+
+Without `ASC_CONFIG_PATH`, logout removes matching credentials from the active config file and `~/.asc/config.json`. A keychain login that replaces a profile follows the same rule when it removes the old config entry.
+
 `--confirm` is required. Running logout without it is a usage error and no credentials are removed.
 
 ## Security best practices

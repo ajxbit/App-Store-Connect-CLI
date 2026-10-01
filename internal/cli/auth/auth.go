@@ -29,8 +29,8 @@ var (
 	listCredentialSummaries  = authsvc.ListCredentialSummaries
 	keychainAvailable        = authsvc.KeychainAvailable
 	migrateKeychainToConfig  = authsvc.MigrateKeychainToConfig
-	removeStoredCredential   = authsvc.RemoveCredentials
-	removeStoredCredentials  = authsvc.RemoveAllCredentials
+	removeStoredCredential   = authsvc.RemoveCredentialsWithOptions
+	removeStoredCredentials  = authsvc.RemoveAllCredentialsWithOptions
 )
 
 // Auth command factory
@@ -486,6 +486,30 @@ func loginConfigPath(local bool) (string, error) {
 
 // warnLocalConfigShadowed explains that an explicit --local write is not the
 // file later commands read while ASC_CONFIG_PATH is set.
+// warnRetainedGlobalCredentials tells the user when logout left credentials in
+// ~/.asc/config.json because ASC_CONFIG_PATH scoped cleanup to another file.
+// An empty name refers to all stored credentials.
+func warnRetainedGlobalCredentials(name string) {
+	globalPath, retained, err := authsvc.RetainedGlobalConfigCredentials(name)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: could not check ~/.asc/config.json for credentials that auth logout left in place: %s\n", shared.SanitizeTerminal(err.Error()))
+		return
+	}
+	if !retained {
+		return
+	}
+	held := "stored credentials"
+	if name != "" {
+		held = fmt.Sprintf("credentials named '%s'", shared.SanitizeTerminal(name))
+	}
+	fmt.Fprintf(
+		os.Stderr,
+		"Warning: ASC_CONFIG_PATH is set, so auth logout did not change %s, which still holds %s; to remove them, run auth logout with ASC_CONFIG_PATH unset or pass --include-global.\n",
+		shared.SanitizeTerminal(globalPath),
+		held,
+	)
+}
+
 func warnLocalConfigShadowed(localPath string) {
 	overridePath, ok, err := config.OverridePath()
 	if !ok {
@@ -995,6 +1019,7 @@ func AuthLogoutCommand() *ffcli.Command {
 	all := fs.Bool("all", false, "Remove all stored credentials")
 	name := fs.String("name", "", "Remove a named credential")
 	confirm := fs.Bool("confirm", false, "Confirm credential removal (required)")
+	includeGlobal := fs.Bool("include-global", false, "Also remove matching credentials from ~/.asc/config.json when ASC_CONFIG_PATH points to another file")
 
 	return &ffcli.Command{
 		Name:       "logout",
@@ -1005,9 +1030,17 @@ func AuthLogoutCommand() *ffcli.Command {
 Omitting --name removes all stored credentials. --confirm is required before
 any credential is removed.
 
+Logout removes matching credentials from the keychain and the active config
+file. When ASC_CONFIG_PATH is set, that file is the only config file changed;
+~/.asc/config.json is left alone, and a warning names it if it still holds
+matching credentials. Pass --include-global to remove them from
+~/.asc/config.json as well. Without ASC_CONFIG_PATH, logout also cleans
+~/.asc/config.json.
+
 Examples:
   asc auth logout --all --confirm
-  asc auth logout --name "MyKey" --confirm`,
+  asc auth logout --name "MyKey" --confirm
+  asc auth logout --all --include-global --confirm`,
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
@@ -1034,15 +1067,24 @@ Examples:
 				return shared.UsageError("--confirm is required to remove stored credentials")
 			}
 
+			opts := authsvc.RemoveOptions{IncludeGlobalConfig: *includeGlobal}
 			if trimmedName != "" {
-				if err := removeStoredCredential(trimmedName); err != nil {
+				err := removeStoredCredential(trimmedName, opts)
+				if !opts.IncludeGlobalConfig {
+					warnRetainedGlobalCredentials(trimmedName)
+				}
+				if err != nil {
 					return fmt.Errorf("auth logout: failed to remove credentials: %w", err)
 				}
 				fmt.Printf("Successfully removed stored credential '%s'\n", trimmedName)
 				return nil
 			}
 
-			if err := removeStoredCredentials(); err != nil {
+			err := removeStoredCredentials(opts)
+			if !opts.IncludeGlobalConfig {
+				warnRetainedGlobalCredentials("")
+			}
+			if err != nil {
 				return fmt.Errorf("auth logout: failed to remove credentials: %w", err)
 			}
 
