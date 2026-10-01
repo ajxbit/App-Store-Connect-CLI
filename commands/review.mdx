@@ -171,6 +171,9 @@ review submission.
 Use `--clear-platform`, `--clear-submitted`, or `--clear-canceled` to send JSON
 `null`. Setting `--submitted=true` or `--canceled=true` requires `--confirm`.
 The corresponding false and clear operations do not.
+When `--canceled=true` is refused because the submission is not cancellable,
+the error explains the submission's current state the same way as
+`asc review submissions-cancel`.
 
 ```bash  theme={null}
 asc review submissions-update --id "SUBMISSION_ID" --platform IOS
@@ -246,6 +249,13 @@ Cancel a review submission.
 ```bash  theme={null}
 asc review submissions-cancel --id "SUBMISSION_ID" --confirm
 ```
+
+If App Store Connect refuses with `Resource is not in cancellable state`, the
+command reads the submission once and explains its state and the next step,
+for example that a `READY_FOR_REVIEW` draft was never submitted, or that an
+`UNRESOLVED_ISSUES` submission needs a fix or a Resolution Center reply. If
+that read fails, the command reports the refusal as it did before, with Apple's
+original error text.
 
 ***
 
