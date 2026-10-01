@@ -351,11 +351,11 @@ output flags.
 
 Upload screenshots for App Review.
 
-The file must be a PNG or JPEG named `.png`, `.jpg`, or `.jpeg` at an App Store
-screenshot size, such as 1290x2796 for iPhone. The create and update commands,
-and `asc iap import`, check the file before uploading and list the accepted
-sizes when it does not match, so a wrong file fails before anything is
-uploaded.
+The file must be a PNG or JPEG named `.png`, `.jpg`, or `.jpeg`. The create and
+update commands, and `asc iap import`, reject any other file before anything
+is uploaded. They also print a warning, and still upload, when the size matches
+no documented App Store screenshot size (such as 1290x2796 for iPhone; the
+warning names the nearest one) or the image has an alpha channel.
 
 ```bash  theme={null}
 # Create review screenshot

@@ -1092,11 +1092,12 @@ asc subscriptions offers offer-codes list \
 
 Manage review screenshots for subscription approval.
 
-The file must be a PNG or JPEG named `.png`, `.jpg`, or `.jpeg` at an App Store
-screenshot size, such as 1290x2796 for iPhone. The create command and
-`asc subscriptions setup` (with `--review-screenshot`) check the file before
-uploading and list the accepted sizes when it does not match, so a wrong file
-fails before anything is uploaded.
+The file must be a PNG or JPEG named `.png`, `.jpg`, or `.jpeg`. The create
+command and `asc subscriptions setup` (with `--review-screenshot`) reject any
+other file before anything is uploaded. They also print a warning, and still
+upload, when the size matches no documented App Store screenshot size (such as
+1290x2796 for iPhone; the warning names the nearest one) or the image has an
+alpha channel.
 
 ```bash  theme={null}
 # Upload review screenshot

@@ -109,9 +109,10 @@ func SubscriptionsReviewScreenshotsCreateCommand() *ffcli.Command {
 		ShortHelp:  "Upload a review screenshot for a subscription.",
 		LongHelp: `Upload a review screenshot for a subscription.
 
-The file must be a PNG or JPEG named .png, .jpg, or .jpeg at an App Store
-screenshot size, such as 1290x2796 for iPhone. The command checks this before
-uploading and lists the accepted sizes when the file does not match.
+The file must be a PNG or JPEG named .png, .jpg, or .jpeg; any other file is
+rejected before anything is uploaded. The command also warns, and still
+uploads, when the size matches no documented App Store screenshot size (such
+as 1290x2796 for iPhone) or the image has an alpha channel.
 
 Examples:
   asc subscriptions review-screenshots create --subscription-id "SUB_ID" --file "./screenshot.png"`,
@@ -136,11 +137,14 @@ Examples:
 				return shared.UsageError(err.Error())
 			}
 
-			file, info, err := openSubscriptionReviewScreenshotFile(pathValue)
+			file, info, err := openSubscriptionImageFile(pathValue)
 			if err != nil {
 				return fmt.Errorf("subscriptions review-screenshots create: %w", err)
 			}
 			defer file.Close()
+			if err := shared.PreflightReviewScreenshot(pathValue, file, info.Size()); err != nil {
+				return shared.UsageErrorCtx(ctx, "subscriptions review-screenshots create: "+err.Error())
+			}
 			checksum, err := asc.ComputeFileChecksum(pathValue, asc.ChecksumAlgorithmMD5)
 			if err != nil {
 				return fmt.Errorf("subscriptions review-screenshots create: checksum failed: %w", err)

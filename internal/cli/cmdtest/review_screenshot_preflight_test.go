@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"image"
 	"image/color"
+	"image/gif"
 	"image/jpeg"
 	"image/png"
 	"io"
@@ -87,8 +88,35 @@ func runReviewScreenshotCommand(t *testing.T, args []string) (string, string, er
 	return stdout, stderr, runErr
 }
 
-func TestReviewScreenshotUploadsRejectUnsupportedDimensionsBeforeAnyRequest(t *testing.T) {
-	tests := []struct {
+func writeJPEGNamed(t *testing.T, path string, width, height int) {
+	t.Helper()
+	var buf bytes.Buffer
+	if err := jpeg.Encode(&buf, image.NewGray(image.Rect(0, 0, width, height)), nil); err != nil {
+		t.Fatalf("encode jpeg: %v", err)
+	}
+	if err := os.WriteFile(path, buf.Bytes(), 0o600); err != nil {
+		t.Fatalf("write jpeg: %v", err)
+	}
+}
+
+func assertReviewScreenshotUsageError(t *testing.T, err error, stdout, stderr string, requests int, want string) {
+	t.Helper()
+	if !errors.Is(err, flag.ErrHelp) {
+		t.Fatalf("expected usage error (exit 2), got %v", err)
+	}
+	if requests != 0 {
+		t.Fatalf("expected no App Store Connect requests, got %d", requests)
+	}
+	if stdout != "" {
+		t.Fatalf("expected empty stdout, got %q", stdout)
+	}
+	if !strings.Contains(stderr, want) {
+		t.Fatalf("stderr %q does not contain %q", stderr, want)
+	}
+}
+
+func TestReviewScreenshotUploadsRejectFormatProblemsBeforeAnyRequest(t *testing.T) {
+	commands := []struct {
 		name   string
 		args   func(path string) []string
 		prefix string
@@ -115,72 +143,53 @@ func TestReviewScreenshotUploadsRejectUnsupportedDimensionsBeforeAnyRequest(t *t
 			prefix: "iap review-screenshots update: ",
 		},
 	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			setupAuth(t)
-			t.Setenv("ASC_CONFIG_PATH", filepath.Join(t.TempDir(), "nonexistent.json"))
-			requests := failOnAnyRequest(t)
+	fixtures := []struct {
+		name  string
+		file  string
+		write func(t *testing.T, path string)
+		want  func(path string) string
+	}{
+		{
+			name:  "JPEG data with .png extension",
+			file:  "review.png",
+			write: func(t *testing.T, path string) { writeJPEGNamed(t, path, 1290, 2796) },
+			want: func(path string) string {
+				return fmt.Sprintf("review screenshot %q is JPEG data but has a .png extension; rename it to review.jpg", path)
+			},
+		},
+		{
+			name:  "PNG data with .webp extension",
+			file:  "review.webp",
+			write: func(t *testing.T, path string) { writeReviewScreenshotPNG(t, path) },
+			want: func(path string) string {
+				return fmt.Sprintf("review screenshot %q has a .webp extension; App Store Connect accepts only .png, .jpg, or .jpeg file names; rename it to review.png", path)
+			},
+		},
+	}
+	for _, command := range commands {
+		for _, fixture := range fixtures {
+			t.Run(command.name+"/"+fixture.name, func(t *testing.T) {
+				setupAuth(t)
+				t.Setenv("ASC_CONFIG_PATH", filepath.Join(t.TempDir(), "nonexistent.json"))
+				requests := failOnAnyRequest(t)
 
-			path := filepath.Join(t.TempDir(), "paywall.png")
-			writeOpaquePNG(t, path, 1179, 2560)
+				path := filepath.Join(t.TempDir(), fixture.file)
+				fixture.write(t, path)
 
-			stdout, _, err := runReviewScreenshotCommand(t, tt.args(path))
-			if err == nil {
-				t.Fatal("expected unsupported dimensions error")
-			}
-			if *requests != 0 {
-				t.Fatalf("expected no App Store Connect requests, got %d", *requests)
-			}
-			if stdout != "" {
-				t.Fatalf("expected empty stdout, got %q", stdout)
-			}
-			for _, want := range []string{
-				tt.prefix + fmt.Sprintf("review screenshot %q is 1179x2560 pixels", path),
-				"nearest accepted size: 1179x2556",
-				"1290x2796",
-			} {
-				if !strings.Contains(err.Error(), want) {
-					t.Fatalf("error %q does not contain %q", err.Error(), want)
-				}
-			}
-		})
+				stdout, stderr, err := runReviewScreenshotCommand(t, command.args(path))
+				assertReviewScreenshotUsageError(t, err, stdout, stderr, *requests, "Error: "+command.prefix+fixture.want(path))
+			})
+		}
 	}
 }
 
-func TestReviewScreenshotUploadsRejectMislabeledFormatBeforeAnyRequest(t *testing.T) {
-	setupAuth(t)
-	t.Setenv("ASC_CONFIG_PATH", filepath.Join(t.TempDir(), "nonexistent.json"))
-	requests := failOnAnyRequest(t)
-
-	path := filepath.Join(t.TempDir(), "review.png")
-	var buf bytes.Buffer
-	if err := jpeg.Encode(&buf, image.NewGray(image.Rect(0, 0, 1290, 2796)), nil); err != nil {
-		t.Fatalf("encode jpeg: %v", err)
-	}
-	if err := os.WriteFile(path, buf.Bytes(), 0o600); err != nil {
-		t.Fatalf("write jpeg: %v", err)
-	}
-
-	_, _, err := runReviewScreenshotCommand(t, []string{"iap", "review-screenshots", "create", "--iap-id", "9000000001", "--file", path})
-	if err == nil {
-		t.Fatal("expected mislabeled format error")
-	}
-	if *requests != 0 {
-		t.Fatalf("expected no App Store Connect requests, got %d", *requests)
-	}
-	want := fmt.Sprintf("review screenshot %q is JPEG data but has a .png extension; rename it to review.jpg", path)
-	if !strings.Contains(err.Error(), want) {
-		t.Fatalf("error %q does not contain %q", err.Error(), want)
-	}
-}
-
-func TestSubscriptionsSetupRejectsUnsupportedReviewScreenshotBeforeAnyRequest(t *testing.T) {
+func TestSubscriptionsSetupRejectsMislabeledReviewScreenshotBeforeAnyRequest(t *testing.T) {
 	setupAuth(t)
 	t.Setenv("ASC_CONFIG_PATH", filepath.Join(t.TempDir(), "nonexistent.json"))
 	requests := failOnAnyRequest(t)
 
 	path := filepath.Join(t.TempDir(), "paywall.png")
-	writeOpaquePNG(t, path, 1024, 1024)
+	writeJPEGNamed(t, path, 1290, 2796)
 
 	stdout, stderr, err := runReviewScreenshotCommand(t, []string{
 		"subscriptions", "setup",
@@ -189,43 +198,127 @@ func TestSubscriptionsSetupRejectsUnsupportedReviewScreenshotBeforeAnyRequest(t 
 		"--product-id", "com.example.pro.monthly",
 		"--review-screenshot", path,
 	})
-	if !errors.Is(err, flag.ErrHelp) {
-		t.Fatalf("expected usage error, got %v", err)
-	}
-	if *requests != 0 {
-		t.Fatalf("expected no App Store Connect requests, got %d", *requests)
-	}
-	if stdout != "" {
-		t.Fatalf("expected empty stdout, got %q", stdout)
-	}
-	want := fmt.Sprintf("invalid --review-screenshot: review screenshot %q is 1024x1024 pixels", path)
-	if !strings.Contains(stderr, want) {
-		t.Fatalf("stderr %q does not contain %q", stderr, want)
-	}
+	assertReviewScreenshotUsageError(t, err, stdout, stderr, *requests, fmt.Sprintf("invalid --review-screenshot: review screenshot %q is JPEG data but has a .png extension", path))
 }
 
-func TestIAPImportRejectsUnsupportedReviewScreenshotBeforeAnyRequest(t *testing.T) {
+func TestIAPImportRejectsNonPNGReviewScreenshotBeforeAnyRequest(t *testing.T) {
 	setupAuth(t)
 	t.Setenv("ASC_CONFIG_PATH", filepath.Join(t.TempDir(), "nonexistent.json"))
 	requests := failOnAnyRequest(t)
 
 	dir := t.TempDir()
 	filePath := writeIAPImportFile(t, dir, `{"products":[{"type":"CONSUMABLE","referenceName":"Coins","productId":"com.example.coins","reviewScreenshot":"shots/coins.png"}]}`)
-	if err := os.MkdirAll(filepath.Join(dir, "shots"), 0o755); err != nil {
-		t.Fatalf("create screenshot dir: %v", err)
+	screenshotPath := writeIAPImportScreenshot(t, dir)
+	var buf bytes.Buffer
+	if err := gif.Encode(&buf, image.NewPaletted(image.Rect(0, 0, 640, 920), color.Palette{color.Black, color.White}), nil); err != nil {
+		t.Fatalf("encode gif: %v", err)
 	}
-	writeOpaquePNG(t, filepath.Join(dir, "shots", "coins.png"), 40, 40)
+	if err := os.WriteFile(screenshotPath, buf.Bytes(), 0o600); err != nil {
+		t.Fatalf("write gif: %v", err)
+	}
 
-	_, stderr, err := runIAPImport(t, []string{"iap", "import", "--app", "123456789", "--file", filePath, "--confirm", "--output", "json"})
-	if !errors.Is(err, flag.ErrHelp) {
-		t.Fatalf("expected usage error, got %v", err)
+	stdout, stderr, err := runIAPImport(t, []string{"iap", "import", "--app", "123456789", "--file", filePath, "--confirm", "--output", "json"})
+	assertReviewScreenshotUsageError(t, err, stdout, stderr, *requests, `review screenshot "shots/coins.png" is GIF data`)
+}
+
+// runIAPReviewScreenshotCreateWithMockUpload runs a successful create against
+// a mocked reservation, upload, commit, and delivery check.
+func runIAPReviewScreenshotCreateWithMockUpload(t *testing.T, path string) (string, bool) {
+	t.Helper()
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat fixture: %v", err)
 	}
-	if *requests != 0 {
-		t.Fatalf("expected no App Store Connect requests, got %d", *requests)
+	size := info.Size()
+
+	originalTransport := http.DefaultTransport
+	t.Cleanup(func() { http.DefaultTransport = originalTransport })
+	uploaded := false
+	http.DefaultTransport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		switch {
+		case req.Method == http.MethodPost && req.URL.Path == "/v1/inAppPurchaseAppStoreReviewScreenshots":
+			return jsonResponse(http.StatusCreated, fmt.Sprintf(`{"data":{"type":"inAppPurchaseAppStoreReviewScreenshots","id":"shot-1","attributes":{"fileName":%q,"fileSize":%d,"uploadOperations":[{"method":"PUT","url":"https://upload.example.com/upload/shot-1","length":%d,"offset":0}]}}}`, filepath.Base(path), size, size))
+		case req.Method == http.MethodPut && req.URL.Host == "upload.example.com":
+			uploaded = true
+			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader("")), Header: http.Header{}}, nil
+		case req.Method == http.MethodPatch && req.URL.Path == "/v1/inAppPurchaseAppStoreReviewScreenshots/shot-1":
+			return jsonResponse(http.StatusOK, `{"data":{"type":"inAppPurchaseAppStoreReviewScreenshots","id":"shot-1","attributes":{}}}`)
+		case req.Method == http.MethodGet && req.URL.Path == "/v1/inAppPurchaseAppStoreReviewScreenshots/shot-1":
+			return jsonResponse(http.StatusOK, `{"data":{"type":"inAppPurchaseAppStoreReviewScreenshots","id":"shot-1","attributes":{"assetDeliveryState":{"state":"COMPLETE"}}}}`)
+		default:
+			t.Fatalf("unexpected request: %s %s", req.Method, req.URL.String())
+			return nil, nil
+		}
+	})
+
+	_, stderr, runErr := runReviewScreenshotCommand(t, []string{"iap", "review-screenshots", "create", "--iap-id", "9000000001", "--file", path, "--output", "json"})
+	if runErr != nil {
+		t.Fatalf("expected success, got %v", runErr)
 	}
-	want := `review screenshot "shots/coins.png" is 40x40 pixels, which matches no App Store screenshot size`
-	if !strings.Contains(stderr, want) {
-		t.Fatalf("stderr %q does not contain %q", stderr, want)
+	return stderr, uploaded
+}
+
+func TestIAPReviewScreenshotsCreateWarnsAboutUndocumentedSizeAndUploads(t *testing.T) {
+	setupAuth(t)
+	t.Setenv("ASC_CONFIG_PATH", filepath.Join(t.TempDir(), "nonexistent.json"))
+
+	path := filepath.Join(t.TempDir(), "paywall.png")
+	writeOpaquePNG(t, path, 1179, 2560)
+
+	stderr, uploaded := runIAPReviewScreenshotCreateWithMockUpload(t, path)
+	if !uploaded {
+		t.Fatal("expected the screenshot to upload despite the size warning")
+	}
+	want := fmt.Sprintf("Warning: review screenshot %q is 1179x2560 pixels, which matches no documented App Store screenshot size (nearest documented size: 1179x2556)", path)
+	if strings.Count(stderr, want) != 1 {
+		t.Fatalf("stderr %q does not contain %q exactly once", stderr, want)
+	}
+}
+
+func TestSubscriptionsReviewScreenshotsCreateWarnsAboutUndocumentedSizeAndUploads(t *testing.T) {
+	setupAuth(t)
+	t.Setenv("ASC_CONFIG_PATH", filepath.Join(t.TempDir(), "nonexistent.json"))
+
+	path := filepath.Join(t.TempDir(), "paywall.png")
+	writeOpaquePNG(t, path, 1024, 1024)
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat fixture: %v", err)
+	}
+	checksum := reviewScreenshotFileMD5(t, path)
+
+	originalTransport := http.DefaultTransport
+	t.Cleanup(func() { http.DefaultTransport = originalTransport })
+	uploaded := false
+	http.DefaultTransport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		switch {
+		case req.Method == http.MethodGet && req.URL.Path == "/v1/subscriptions/8000000001/appStoreReviewScreenshot":
+			return jsonResponse(http.StatusOK, `{"data":null}`)
+		case req.Method == http.MethodPost && req.URL.Path == "/v1/subscriptionAppStoreReviewScreenshots":
+			return jsonResponse(http.StatusCreated, fmt.Sprintf(`{"data":{"type":"subscriptionAppStoreReviewScreenshots","id":"shot-1","attributes":{"fileName":"paywall.png","fileSize":%d,"uploadOperations":[{"method":"PUT","url":"https://upload.example.com/upload/shot-1","length":%d,"offset":0}]}}}`, info.Size(), info.Size()))
+		case req.Method == http.MethodPut && req.URL.Host == "upload.example.com":
+			uploaded = true
+			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader("")), Header: http.Header{}}, nil
+		case req.Method == http.MethodPatch && req.URL.Path == "/v1/subscriptionAppStoreReviewScreenshots/shot-1":
+			return jsonResponse(http.StatusOK, `{"data":{"type":"subscriptionAppStoreReviewScreenshots","id":"shot-1","attributes":{"fileName":"paywall.png"}}}`)
+		case req.Method == http.MethodGet && req.URL.Path == "/v1/subscriptionAppStoreReviewScreenshots/shot-1":
+			return jsonResponse(http.StatusOK, fmt.Sprintf(`{"data":{"type":"subscriptionAppStoreReviewScreenshots","id":"shot-1","attributes":{"fileName":"paywall.png","sourceFileChecksum":%q,"assetDeliveryState":{"state":"COMPLETE"}}}}`, checksum))
+		default:
+			t.Fatalf("unexpected request: %s %s", req.Method, req.URL.String())
+			return nil, nil
+		}
+	})
+
+	_, stderr, runErr := runReviewScreenshotCommand(t, []string{"subscriptions", "review", "screenshots", "create", "--subscription-id", "8000000001", "--file", path, "--output", "json"})
+	if runErr != nil {
+		t.Fatalf("expected success, got %v", runErr)
+	}
+	if !uploaded {
+		t.Fatal("expected the screenshot to upload despite the size warning")
+	}
+	want := fmt.Sprintf("Warning: review screenshot %q is 1024x1024 pixels, which matches no documented App Store screenshot size", path)
+	if strings.Count(stderr, want) != 1 {
+		t.Fatalf("stderr %q does not contain %q exactly once", stderr, want)
 	}
 }
 
@@ -243,32 +336,8 @@ func TestIAPReviewScreenshotsCreateWarnsAboutAlphaChannelAndUploads(t *testing.T
 	if err := os.WriteFile(path, buf.Bytes(), 0o600); err != nil {
 		t.Fatalf("write png: %v", err)
 	}
-	size := len(buf.Bytes())
 
-	originalTransport := http.DefaultTransport
-	t.Cleanup(func() { http.DefaultTransport = originalTransport })
-	uploaded := false
-	http.DefaultTransport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
-		switch {
-		case req.Method == http.MethodPost && req.URL.Path == "/v1/inAppPurchaseAppStoreReviewScreenshots":
-			return jsonResponse(http.StatusCreated, fmt.Sprintf(`{"data":{"type":"inAppPurchaseAppStoreReviewScreenshots","id":"shot-1","attributes":{"fileName":"review.png","fileSize":%d,"uploadOperations":[{"method":"PUT","url":"https://upload.example.com/upload/shot-1","length":%d,"offset":0}]}}}`, size, size))
-		case req.Method == http.MethodPut && req.URL.Host == "upload.example.com":
-			uploaded = true
-			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader("")), Header: http.Header{}}, nil
-		case req.Method == http.MethodPatch && req.URL.Path == "/v1/inAppPurchaseAppStoreReviewScreenshots/shot-1":
-			return jsonResponse(http.StatusOK, `{"data":{"type":"inAppPurchaseAppStoreReviewScreenshots","id":"shot-1","attributes":{"fileName":"review.png"}}}`)
-		case req.Method == http.MethodGet && req.URL.Path == "/v1/inAppPurchaseAppStoreReviewScreenshots/shot-1":
-			return jsonResponse(http.StatusOK, `{"data":{"type":"inAppPurchaseAppStoreReviewScreenshots","id":"shot-1","attributes":{"fileName":"review.png","assetDeliveryState":{"state":"COMPLETE"}}}}`)
-		default:
-			t.Fatalf("unexpected request: %s %s", req.Method, req.URL.String())
-			return nil, nil
-		}
-	})
-
-	_, stderr, err := runReviewScreenshotCommand(t, []string{"iap", "review-screenshots", "create", "--iap-id", "9000000001", "--file", path, "--output", "json"})
-	if err != nil {
-		t.Fatalf("expected success, got %v", err)
-	}
+	stderr, uploaded := runIAPReviewScreenshotCreateWithMockUpload(t, path)
 	if !uploaded {
 		t.Fatal("expected the screenshot to upload despite the warning")
 	}
@@ -292,7 +361,7 @@ func TestIAPImportRechecksReviewScreenshotReplacedAfterPlanning(t *testing.T) {
 	http.DefaultTransport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
 		switch {
 		case req.Method == http.MethodGet && req.URL.Path == "/v1/apps/123456789/inAppPurchasesV2":
-			writeOpaquePNG(t, screenshotPath, 40, 40)
+			writeJPEGNamed(t, screenshotPath, 640, 920)
 			return jsonResponse(http.StatusOK, `{"data":[]}`)
 		case req.Method == http.MethodPost && req.URL.Path == "/v2/inAppPurchases":
 			createdProduct = true
@@ -307,19 +376,19 @@ func TestIAPImportRechecksReviewScreenshotReplacedAfterPlanning(t *testing.T) {
 	if err == nil || !createdProduct {
 		t.Fatalf("run error = %v, product created = %t, stderr = %q; want rejection after product creation", err, createdProduct, stderr)
 	}
-	if want := `review screenshot "shots/coins.png" is 40x40 pixels`; !strings.Contains(err.Error(), want) {
+	if want := `review screenshot "shots/coins.png" is JPEG data but has a .png extension`; !strings.Contains(err.Error(), want) {
 		t.Fatalf("error %q does not contain %q", err.Error(), want)
 	}
 }
 
-func TestIAPImportWarnsAboutAlphaChannelOnceAtUpload(t *testing.T) {
+func TestIAPImportWarnsOnceAtUpload(t *testing.T) {
 	setupAuth(t)
 	t.Setenv("ASC_CONFIG_PATH", filepath.Join(t.TempDir(), "nonexistent.json"))
 
 	dir := t.TempDir()
 	filePath := writeIAPImportFile(t, dir, `{"products":[{"type":"CONSUMABLE","referenceName":"Coins","productId":"com.example.coins","reviewScreenshot":"shots/coins.png"}]}`)
 	screenshotPath := writeIAPImportScreenshot(t, dir)
-	img := image.NewNRGBA(image.Rect(0, 0, 640, 920))
+	img := image.NewNRGBA(image.Rect(0, 0, 1000, 1000))
 	img.SetNRGBA(0, 0, color.NRGBA{R: 255, A: 128})
 	var buf bytes.Buffer
 	if err := png.Encode(&buf, img); err != nil {
@@ -351,8 +420,13 @@ func TestIAPImportWarnsAboutAlphaChannelOnceAtUpload(t *testing.T) {
 	if !reserved {
 		t.Fatalf("expected the screenshot upload to proceed despite the warning; stderr = %q", stderr)
 	}
-	if got := strings.Count(stderr, `Warning: review screenshot "shots/coins.png" has an alpha channel`); got != 1 {
-		t.Fatalf("alpha warnings = %d, want exactly 1; stderr = %q", got, stderr)
+	for _, warning := range []string{
+		`Warning: review screenshot "shots/coins.png" is 1000x1000 pixels, which matches no documented App Store screenshot size`,
+		`Warning: review screenshot "shots/coins.png" has an alpha channel`,
+	} {
+		if got := strings.Count(stderr, warning); got != 1 {
+			t.Fatalf("%q appeared %d times, want exactly 1; stderr = %q", warning, got, stderr)
+		}
 	}
 }
 
@@ -372,7 +446,7 @@ func TestSubscriptionsSetupRechecksReviewScreenshotReplacedAfterValidation(t *te
 			return jsonResponse(http.StatusOK, `{"data":[],"links":{"next":""}}`)
 		case req.Method == http.MethodPost && req.URL.Path == "/v1/subscriptions":
 			createdSubscription = true
-			writeOpaquePNG(t, path, 1024, 1024)
+			writeJPEGNamed(t, path, 640, 920)
 			return jsonResponse(http.StatusCreated, `{"data":{"type":"subscriptions","id":"sub-1","attributes":{"name":"Pro Monthly","productId":"com.example.pro.monthly","subscriptionPeriod":"ONE_MONTH","state":"MISSING_METADATA"}}}`)
 		default:
 			t.Fatalf("unexpected request after the screenshot was replaced: %s %s", req.Method, req.URL.String())
@@ -392,7 +466,7 @@ func TestSubscriptionsSetupRechecksReviewScreenshotReplacedAfterValidation(t *te
 	if err == nil || !createdSubscription {
 		t.Fatalf("run error = %v, subscription created = %t, stderr = %q; want rejection after subscription creation", err, createdSubscription, stderr)
 	}
-	if want := fmt.Sprintf("review screenshot %q is 1024x1024 pixels", path); !strings.Contains(err.Error(), want) {
+	if want := fmt.Sprintf("review screenshot %q is JPEG data but has a .png extension", path); !strings.Contains(err.Error(), want) {
 		t.Fatalf("error %q does not contain %q", err.Error(), want)
 	}
 }

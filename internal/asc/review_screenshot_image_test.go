@@ -2,6 +2,7 @@ package asc
 
 import (
 	"bytes"
+	"fmt"
 	"image"
 	"image/color"
 	"image/gif"
@@ -80,34 +81,39 @@ func TestCheckReviewScreenshotImageAcceptsDocumentedScreenshotSizes(t *testing.T
 	}
 }
 
-func TestCheckReviewScreenshotImageRejectsUnsupportedDimensions(t *testing.T) {
-	_, err := CheckReviewScreenshotImage("./paywall.png", bytes.NewReader(encodeOpaquePNG(t, 1179, 2560)))
-	if err == nil {
-		t.Fatal("expected unsupported dimensions error")
+func TestCheckReviewScreenshotImageWarnsAboutUndocumentedDimensions(t *testing.T) {
+	tests := []struct {
+		name    string
+		path    string
+		width   int
+		height  int
+		nearest string
+	}{
+		{name: "portrait near iPhone 6.3", path: "./paywall.png", width: 1179, height: 2560, nearest: "1179x2556"},
+		{name: "landscape near iPhone 6.9", path: "wide.png", width: 2800, height: 1290, nearest: "2796x1290"},
+		{name: "square", path: "icon.png", width: 1024, height: 1024},
 	}
-	message := err.Error()
-	for _, want := range []string{
-		`review screenshot "./paywall.png" is 1179x2560 pixels`,
-		"matches no App Store screenshot size",
-		"nearest accepted size: 1179x2556",
-		"accepted sizes:",
-		"1290x2796",
-		"2064x2752",
-		"640x920",
-	} {
-		if !strings.Contains(message, want) {
-			t.Fatalf("error %q does not contain %q", message, want)
-		}
-	}
-}
-
-func TestCheckReviewScreenshotImageRejectsSquareImages(t *testing.T) {
-	_, err := CheckReviewScreenshotImage("icon.png", bytes.NewReader(encodeOpaquePNG(t, 1024, 1024)))
-	if err == nil {
-		t.Fatal("expected unsupported dimensions error")
-	}
-	if !strings.Contains(err.Error(), "is 1024x1024 pixels") {
-		t.Fatalf("unexpected error: %v", err)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			warnings, err := CheckReviewScreenshotImage(tt.path, bytes.NewReader(encodeOpaquePNG(t, tt.width, tt.height)))
+			if err != nil {
+				t.Fatalf("CheckReviewScreenshotImage() error = %v, want a warning only", err)
+			}
+			if len(warnings) != 1 {
+				t.Fatalf("warnings = %q, want one size warning", warnings)
+			}
+			for _, want := range []string{
+				fmt.Sprintf("review screenshot %q is %dx%d pixels, which matches no documented App Store screenshot size", tt.path, tt.width, tt.height),
+				"IMAGE_INCORRECT_DIMENSIONS",
+			} {
+				if !strings.Contains(warnings[0], want) {
+					t.Fatalf("warning %q does not contain %q", warnings[0], want)
+				}
+			}
+			if tt.nearest != "" && !strings.Contains(warnings[0], "nearest documented size: "+tt.nearest) {
+				t.Fatalf("warning %q does not name nearest size %s", warnings[0], tt.nearest)
+			}
+		})
 	}
 }
 

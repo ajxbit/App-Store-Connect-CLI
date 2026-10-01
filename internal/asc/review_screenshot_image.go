@@ -50,9 +50,9 @@ var reviewScreenshotLegacyDimensions = []ScreenshotDimension{
 	{Width: 1024, Height: 768},
 }
 
-// ReviewScreenshotDimensions returns every size accepted for an in-app
-// purchase or subscription App Review screenshot, sorted by width then height.
-func ReviewScreenshotDimensions() []ScreenshotDimension {
+// reviewScreenshotDimensions returns every documented screenshot size,
+// sorted by width then height.
+func reviewScreenshotDimensions() []ScreenshotDimension {
 	seen := make(map[ScreenshotDimension]struct{})
 	dims := make([]ScreenshotDimension, 0, 96)
 	add := func(dim ScreenshotDimension) {
@@ -83,9 +83,9 @@ func ReviewScreenshotDimensions() []ScreenshotDimension {
 // CheckReviewScreenshotImage reads the image header from source and reports
 // whether App Store Connect will accept it as an in-app purchase or
 // subscription App Review screenshot. path names the file in messages and
-// supplies the extension App Store Connect sees. Constraints App Store
-// Connect enforces at delivery are errors; documented constraints whose
-// enforcement is unconfirmed are returned as warnings.
+// supplies the extension App Store Connect sees. File format problems are
+// errors. Documented constraints that no live upload has confirmed for review
+// screenshots, the size list and the alpha rule, are returned as warnings.
 func CheckReviewScreenshotImage(path string, source io.Reader) ([]string, error) {
 	cfg, format, err := image.DecodeConfig(source)
 	if err != nil {
@@ -112,19 +112,17 @@ func CheckReviewScreenshotImage(path string, source io.Reader) ([]string, error)
 		return nil, fmt.Errorf("review screenshot %w", err)
 	}
 
+	var warnings []string
 	actual := ScreenshotDimension{Width: cfg.Width, Height: cfg.Height}
-	accepted := ReviewScreenshotDimensions()
-	if !acceptsScreenshotDimension(accepted, actual) {
-		return nil, fmt.Errorf(
-			"review screenshot %q is %s pixels, which matches no App Store screenshot size; App Store Connect requires an in-app purchase or subscription review screenshot to meet a screenshot specification the app supports (nearest accepted size: %s; accepted sizes: %s)",
+	documented := reviewScreenshotDimensions()
+	if !acceptsScreenshotDimension(documented, actual) {
+		warnings = append(warnings, fmt.Sprintf(
+			"review screenshot %q is %s pixels, which matches no documented App Store screenshot size (nearest documented size: %s). Apple asks for a review screenshot that meets a screenshot specification the app supports; if delivery fails with IMAGE_INCORRECT_DIMENSIONS, resize it to a documented size.",
 			path,
 			actual,
-			nearestScreenshotDimension(accepted, actual),
-			formatScreenshotDimensions(accepted),
-		)
+			nearestScreenshotDimension(documented, actual),
+		))
 	}
-
-	var warnings []string
 	if colorModelHasAlpha(cfg.ColorModel) {
 		warnings = append(warnings, fmt.Sprintf("review screenshot %q has an alpha channel or transparency; Apple's screenshot specifications say images can't include alpha channels or transparency. If delivery fails, re-export it without alpha.", path))
 	}
