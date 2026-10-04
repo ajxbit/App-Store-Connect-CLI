@@ -99,9 +99,16 @@ asc subscriptions groups versions localizations delete \
   --confirm
 ```
 
-There is no one-command sync for group localizations. Reconcile metadata with
-the group version-localization `list`, `create`, `update`, and `delete`
-commands.
+To create or update many locales at once, import a JSON file that maps each
+locale to `name` and `customAppName`. Missing locales are created, changed
+ones updated, and unchanged ones skipped:
+
+```bash  theme={null}
+asc subscriptions groups versions localizations import \
+  --version-id "GROUP_VERSION_ID" \
+  --file "./group-localizations.json" \
+  --confirm
+```
 
 ### Subscription Group Versions (API 4.4.1)
 
@@ -452,6 +459,29 @@ Those three encodings describe the OpenAPI contract and remain available in
 the CLI. They are not all accepted by the live service: do not send
 `--description ""` or `--clear-description` for subscription-version
 localizations.
+
+#### Import Localizations
+
+Create missing locales and update changed ones from one JSON file that maps
+each locale to `name` and `description`:
+
+```json
+{
+  "en-US": {"name": "Premium", "description": "Premium subscription access"},
+  "fr-FR": {"name": "Premium", "description": "Accès à l'abonnement Premium"}
+}
+```
+
+```bash  theme={null}
+asc subscriptions versions localizations import \
+  --version-id "VERSION_ID" \
+  --file "./localizations.json" \
+  --dry-run
+```
+
+Rerun with `--confirm` to write. Omitted fields stay unchanged and unchanged
+locales are skipped. A failed locale is reported in the receipt while the
+remaining locales still run, and the command exits non-zero when any failed.
 
 ### Version Images
 
