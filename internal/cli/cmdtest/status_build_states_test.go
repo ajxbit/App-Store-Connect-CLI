@@ -65,6 +65,9 @@ func installStatusBuildStateTransport(t *testing.T) *statusBuildStateRequestCoun
 			if got := req.URL.Query().Get("include"); got != "build" {
 				t.Fatalf("expected build beta details to include build relationships, got include=%q", got)
 			}
+			if got := req.URL.Query().Get("fields[builds]"); got != "version" {
+				t.Fatalf("expected sparse build fields so App Store Connect reports real beta states, got fields[builds]=%q", got)
+			}
 			return statusJSONResponse(`{
 				"data":[
 					{

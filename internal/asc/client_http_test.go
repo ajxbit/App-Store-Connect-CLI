@@ -10516,6 +10516,9 @@ func TestGetBuildBetaDetails_WithBuildFilterAndInclude(t *testing.T) {
 		if got := req.URL.Query().Get("include"); got != "build" {
 			t.Fatalf("expected include=build, got %q", got)
 		}
+		if got := req.URL.Query().Get("fields[builds]"); got != "version" {
+			t.Fatalf("expected fields[builds]=version, got %q", got)
+		}
 		values := req.URL.Query()
 		if values.Get("filter[build]") != "build-1" {
 			t.Fatalf("expected filter[build]=build-1, got %q", values.Get("filter[build]"))
