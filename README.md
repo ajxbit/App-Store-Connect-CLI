@@ -486,17 +486,23 @@ See [guides/apple-ads-playbooks.mdx](guides/apple-ads-playbooks.mdx) for
 operator playbooks covering credential safety, org inspection, read-only smoke
 tests, reporting, raw API usage, and guarded mutations.
 
-### StoreKit Retention Messaging
+### StoreKit server APIs
 
-Retention Messaging uses a dedicated In-App Purchase API key, separate from
-App Store Connect API credentials:
+The App Store Server API and Retention Messaging use a dedicated In-App
+Purchase API key, separate from App Store Connect API credentials:
 
 ```bash
 asc storekit auth login --name Production --key-id "KEY_ID" --issuer-id "ISSUER_ID" --private-key ./SubscriptionKey.p8 --bundle-id com.example.app
 asc storekit auth doctor --environment sandbox --network
+asc storekit transactions history --transaction-id "2000000000000001" --environment production --paginate
+asc storekit subscriptions status --transaction-id "2000000000000001" --environment production --output table
+asc storekit notifications history --start 2026-09-01 --end 2026-09-08 --only-failures --environment production
 asc storekit retention-messaging messages list --environment sandbox --output json
-asc storekit retention-messaging endpoint view --environment production
 ```
+
+JSON output prints Apple's response unmodified. `--decode` adds decoded JWS
+payloads without verifying Apple's signature, so don't grant entitlements from
+decoded output alone.
 
 See [docs/architecture/storekit-retention-messaging.md](docs/architecture/storekit-retention-messaging.md)
 for the endpoint map, message and image requirements, environment variables,
