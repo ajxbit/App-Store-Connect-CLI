@@ -15,21 +15,22 @@ import (
 type serverReadFlags struct {
 	common commonFlags
 	output shared.OutputFlags
-	decode *bool
+	decode *bool // nil for responses without signed JWS fields
 }
 
-func bindServerReadFlags(fs *flag.FlagSet) serverReadFlags {
-	return serverReadFlags{
-		common: bindCommonFlags(fs),
-		output: shared.BindOutputFlags(fs),
-		decode: fs.Bool("decode", false, "Add <field>Decoded siblings with signed JWS payloads decoded WITHOUT signature verification (JSON only)"),
+func bindServerReadFlags(fs *flag.FlagSet, signed bool) serverReadFlags {
+	flags := serverReadFlags{common: bindCommonFlags(fs), output: shared.BindOutputFlags(fs)}
+	if signed {
+		flags.decode = fs.Bool("decode", false, "Add <field>Decoded siblings with signed JWS payloads decoded WITHOUT signature verification (JSON only)")
 	}
+	return flags
 }
 
 type tableBuilder func(json.RawMessage) ([]string, [][]string, error)
 
 func printServerResponse(raw json.RawMessage, flags serverReadFlags, table tableBuilder) error {
-	if *flags.decode {
+	signed := flags.decode != nil
+	if signed && *flags.decode {
 		decoded, err := storekitapi.AddDecodedJWSPayloads(raw)
 		if err != nil {
 			return err
@@ -45,7 +46,7 @@ func printServerResponse(raw json.RawMessage, flags serverReadFlags, table table
 			return err
 		}
 	}
-	if *flags.decode || tableOutput {
+	if signed && (*flags.decode || tableOutput) {
 		fmt.Fprintln(os.Stderr, "Warning: decoded JWS payloads are not signature-verified")
 	}
 	return printOutput(raw, *flags.output.Output, *flags.output.Pretty, headers, rows)
@@ -55,17 +56,13 @@ func printServerPage(raw json.RawMessage, flags serverReadFlags, table tableBuil
 	if err := printServerResponse(raw, flags, table); err != nil {
 		return err
 	}
-	warnMoreServerPages(raw, paginate, cursor, tokenFlag)
-	return nil
-}
-
-func warnMoreServerPages(raw json.RawMessage, paginate bool, cursor storekitapi.PageCursor, tokenFlag string) {
 	if paginate {
-		return
+		return nil
 	}
 	if hasMore, token, err := cursor.HasMore(raw); err == nil && hasMore && token != "" {
 		fmt.Fprintf(os.Stderr, "Warning: more pages exist (use --paginate or %s %s)\n", tokenFlag, token)
 	}
+	return nil
 }
 
 type transactionClaims struct {
@@ -80,17 +77,6 @@ type transactionClaims struct {
 
 var transactionHeaders = []string{"Transaction ID", "Original Transaction ID", "Product ID", "Type", "Purchase Date", "Expires Date", "Revocation Date"}
 
-func transactionRow(token string) ([]string, error) {
-	var claims transactionClaims
-	if err := decodeClaims(token, &claims); err != nil {
-		return nil, err
-	}
-	return []string{
-		claims.TransactionID, claims.OriginalTransactionID, claims.ProductID, claims.Type,
-		formatMillis(claims.PurchaseDate), formatMillis(claims.ExpiresDate), formatMillis(claims.RevocationDate),
-	}, nil
-}
-
 func transactionInfoTable(raw json.RawMessage) ([]string, [][]string, error) {
 	var response struct {
 		SignedTransactionInfo string `json:"signedTransactionInfo"`
@@ -98,11 +84,8 @@ func transactionInfoTable(raw json.RawMessage) ([]string, [][]string, error) {
 	if err := json.Unmarshal(raw, &response); err != nil {
 		return nil, nil, fmt.Errorf("decode StoreKit response: %w", err)
 	}
-	row, err := transactionRow(response.SignedTransactionInfo)
-	if err != nil {
-		return nil, nil, err
-	}
-	return transactionHeaders, [][]string{row}, nil
+	rows, err := transactionRows([]string{response.SignedTransactionInfo})
+	return transactionHeaders, rows, err
 }
 
 func signedTransactionsTable(raw json.RawMessage) ([]string, [][]string, error) {
@@ -119,11 +102,14 @@ func signedTransactionsTable(raw json.RawMessage) ([]string, [][]string, error) 
 func transactionRows(tokens []string) ([][]string, error) {
 	rows := make([][]string, 0, len(tokens))
 	for _, token := range tokens {
-		row, err := transactionRow(token)
-		if err != nil {
+		var claims transactionClaims
+		if err := decodeClaims(token, &claims); err != nil {
 			return nil, err
 		}
-		rows = append(rows, row)
+		rows = append(rows, []string{
+			claims.TransactionID, claims.OriginalTransactionID, claims.ProductID, claims.Type,
+			formatMillis(claims.PurchaseDate), formatMillis(claims.ExpiresDate), formatMillis(claims.RevocationDate),
+		})
 	}
 	return rows, nil
 }
@@ -136,20 +122,18 @@ func orderLookupTable(raw json.RawMessage) ([]string, [][]string, error) {
 	if err := json.Unmarshal(raw, &response); err != nil {
 		return nil, nil, fmt.Errorf("decode StoreKit response: %w", err)
 	}
-	headers := append([]string{"Order Status"}, transactionHeaders...)
-	status := strconv.Itoa(response.Status)
 	transactions, err := transactionRows(response.SignedTransactions)
 	if err != nil {
 		return nil, nil, err
 	}
 	if len(transactions) == 0 {
-		return headers, [][]string{append([]string{status}, make([]string, len(transactionHeaders))...)}, nil
+		transactions = [][]string{make([]string, len(transactionHeaders))}
 	}
 	rows := make([][]string, 0, len(transactions))
 	for _, row := range transactions {
-		rows = append(rows, append([]string{status}, row...))
+		rows = append(rows, append([]string{strconv.Itoa(response.Status)}, row...))
 	}
-	return headers, rows, nil
+	return append([]string{"Order Status"}, transactionHeaders...), rows, nil
 }
 
 func subscriptionStatusTable(raw json.RawMessage) ([]string, [][]string, error) {
@@ -255,6 +239,16 @@ func testNotificationStatusTable(raw json.RawMessage) ([]string, [][]string, err
 		rows = append(rows, []string{payload.NotificationType, formatMillis(attempt.AttemptDate), attempt.SendAttemptResult})
 	}
 	return []string{"Notification Type", "Attempt Date", "Result"}, rows, nil
+}
+
+func testNotificationTable(raw json.RawMessage) ([]string, [][]string, error) {
+	var response struct {
+		Token string `json:"testNotificationToken"`
+	}
+	if err := json.Unmarshal(raw, &response); err != nil {
+		return nil, nil, fmt.Errorf("decode StoreKit response: %w", err)
+	}
+	return []string{"Test Notification Token"}, [][]string{{response.Token}}, nil
 }
 
 func customerGroupsTable(raw json.RawMessage) ([]string, [][]string, error) {

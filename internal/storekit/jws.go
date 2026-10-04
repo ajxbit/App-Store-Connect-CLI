@@ -31,10 +31,8 @@ func DecodeJWSPayloadUnverified(token string) (json.RawMessage, error) {
 // Signed fields inside decoded payloads are decoded too. Existing fields are
 // never changed.
 func AddDecodedJWSPayloads(raw json.RawMessage) (json.RawMessage, error) {
-	decoder := json.NewDecoder(bytes.NewReader(raw))
-	decoder.UseNumber()
-	var value any
-	if err := decoder.Decode(&value); err != nil {
+	value, err := decodeJSONNumbers(raw)
+	if err != nil {
 		return nil, fmt.Errorf("decode StoreKit response: %w", err)
 	}
 	decorated, err := addDecodedPayloads(value)
@@ -120,11 +118,18 @@ func decodeJWSValue(token string) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	decoder := json.NewDecoder(bytes.NewReader(payload))
-	decoder.UseNumber()
-	var value any
-	if err := decoder.Decode(&value); err != nil {
+	value, err := decodeJSONNumbers(payload)
+	if err != nil {
 		return nil, fmt.Errorf("decode JWS payload: %w", err)
 	}
 	return addDecodedPayloads(value)
+}
+
+// decodeJSONNumbers keeps large integers such as millisecond dates exact.
+func decodeJSONNumbers(raw []byte) (any, error) {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+	var value any
+	err := decoder.Decode(&value)
+	return value, err
 }

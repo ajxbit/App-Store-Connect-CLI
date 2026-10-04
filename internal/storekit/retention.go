@@ -11,7 +11,6 @@ import (
 	"github.com/google/uuid"
 )
 
-// messagingPath is the Retention Messaging API path prefix.
 const messagingPath = "inApps/v1/messaging/"
 
 func (c *Client) UploadImage(ctx context.Context, identifier string, size ImageSize, data []byte) error {

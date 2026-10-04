@@ -1,7 +1,6 @@
 package cmdtest
 
 import (
-	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -165,16 +164,10 @@ func TestStoreKitServerAPIUsageErrors(t *testing.T) {
 				t.Fatalf("unexpected request: %s %s", req.Method, req.URL.String())
 				return ""
 			})
-			root := RootCommand("1.2.3")
-			root.FlagSet.SetOutput(io.Discard)
-			stdout, stderr := captureOutput(t, func() {
-				if err := root.Parse(tt.args); err != nil {
-					t.Fatalf("parse error: %v", err)
-				}
-				if err := root.Run(context.Background()); !errors.Is(err, flag.ErrHelp) {
-					t.Fatalf("run error = %v, want flag.ErrHelp", err)
-				}
-			})
+			stdout, stderr, err := runRootCommand(t, tt.args)
+			if !errors.Is(err, flag.ErrHelp) {
+				t.Fatalf("run error = %v, want flag.ErrHelp", err)
+			}
 			if stdout != "" || !strings.Contains(stderr, tt.wantErr) {
 				t.Fatalf("stdout=%q stderr=%q, want %q", stdout, stderr, tt.wantErr)
 			}
@@ -200,16 +193,11 @@ func stubStoreKitTransport(t *testing.T, respond func(*http.Request) string) {
 
 func runStoreKitCommand(t *testing.T, args ...string) (string, string) {
 	t.Helper()
-	root := RootCommand("1.2.3")
-	root.FlagSet.SetOutput(io.Discard)
-	return captureOutput(t, func() {
-		if err := root.Parse(args); err != nil {
-			t.Fatalf("parse error: %v", err)
-		}
-		if err := root.Run(context.Background()); err != nil {
-			t.Fatalf("run error: %v", err)
-		}
-	})
+	stdout, stderr, err := runRootCommand(t, args)
+	if err != nil {
+		t.Fatalf("run error: %v", err)
+	}
+	return stdout, stderr
 }
 
 func storeKitTestJWS(payload string) string {
