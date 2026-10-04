@@ -532,10 +532,14 @@ func runTasks(tasks []sectionTask, limit int) error {
 }
 
 func fillBuildsAndTestFlight(ctx context.Context, client *asc.Client, appID string, platform string, includes includeSet, resp *dashboardResponse) error {
+	buildIncludes := []string{"preReleaseVersion"}
+	if includes.testflight {
+		buildIncludes = append(buildIncludes, "buildBetaDetail")
+	}
 	buildOpts := []asc.BuildsOption{
 		asc.WithBuildsSort("-uploadedDate"),
 		asc.WithBuildsLimit(50),
-		asc.WithBuildsInclude([]string{"preReleaseVersion"}),
+		asc.WithBuildsInclude(buildIncludes),
 	}
 	if platform != "" {
 		buildOpts = append(buildOpts, asc.WithBuildsPreReleaseVersionPlatforms([]string{platform}))
@@ -600,21 +604,7 @@ func fillBuildsAndTestFlight(ctx context.Context, client *asc.Client, appID stri
 		return nil
 	}
 
-	buildIDs := make([]string, 0, len(buildsResp.Data))
-	for _, build := range buildsResp.Data {
-		buildIDs = append(buildIDs, build.ID)
-	}
-
-	betaDetails, err := client.GetBuildBetaDetails(
-		ctx,
-		asc.WithBuildBetaDetailsBuildIDs(buildIDs),
-		asc.WithBuildBetaDetailsIncludeBuild(),
-		asc.WithBuildBetaDetailsLimit(200),
-	)
-	if err != nil {
-		return err
-	}
-	betaStatesByBuild := buildBetaStatesByBuildID(buildIDs, betaDetails)
+	betaStatesByBuild := buildBetaStatesByBuildID(buildsResp)
 
 	// The latest build carries the internal state operators need: it can still be
 	// PROCESSING for internal testers while processingState already reads VALID.
@@ -796,26 +786,28 @@ func fetchBetaReviewSubmissionsForStatus(
 	return result, nil
 }
 
-func buildBetaStatesByBuildID(buildIDs []string, betaDetails *asc.BuildBetaDetailsResponse) map[string]betaBuildStates {
-	// BuildBetaDetails can omit relationships.build in some real API responses.
-	// Use relationship mapping when available, otherwise fall back to positional mapping.
-	statesByBuild := make(map[string]betaBuildStates, len(buildIDs))
-	if betaDetails != nil {
-		usedRelationshipMapping := false
-		for _, detail := range betaDetails.Data {
-			buildID, ok := optionalRelationshipResourceID(detail.Relationships, "build")
-			if !ok {
-				continue
-			}
-			usedRelationshipMapping = true
-			statesByBuild[buildID] = betaBuildStatesFromAttributes(detail.Attributes)
-		}
+func buildBetaStatesByBuildID(builds *asc.BuildsResponse) map[string]betaBuildStates {
+	statesByBuild := make(map[string]betaBuildStates, len(builds.Data))
+	if len(builds.Included) == 0 {
+		return statesByBuild
+	}
 
-		// Without relationships, mapping by position is ambiguous for multiple
-		// builds because the API does not guarantee response order for filters.
-		// Keep a single-item fallback where positional mapping is unambiguous.
-		if !usedRelationshipMapping && len(buildIDs) == 1 && len(betaDetails.Data) == 1 {
-			statesByBuild[buildIDs[0]] = betaBuildStatesFromAttributes(betaDetails.Data[0].Attributes)
+	var included []asc.Resource[asc.BuildBetaDetailAttributes]
+	if err := json.Unmarshal(builds.Included, &included); err != nil {
+		return statesByBuild
+	}
+	statesByDetail := make(map[string]betaBuildStates, len(included))
+	for _, resource := range included {
+		if resource.Type == asc.ResourceTypeBuildBetaDetails {
+			statesByDetail[resource.ID] = betaBuildStatesFromAttributes(resource.Attributes)
+		}
+	}
+
+	for _, build := range builds.Data {
+		if detailID, ok := optionalRelationshipResourceID(build.Relationships, "buildBetaDetail"); ok {
+			if states, found := statesByDetail[detailID]; found {
+				statesByBuild[build.ID] = states
+			}
 		}
 	}
 
