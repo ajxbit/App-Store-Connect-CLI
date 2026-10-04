@@ -50,7 +50,17 @@ var conditionalSynonyms = map[string][]conditionalSynonym{
 	"path": {{target: "output", when: isPathValuedUsage}},
 	"dir":  {{target: "output", when: isPathValuedUsage}},
 	"file": {{target: "output", when: isPathValuedUsage}},
+	"ipa":  {{target: "path", when: ipaUsagePattern.MatchString}},
+	"pkg":  {{target: "path", when: pkgUsagePattern.MatchString}},
 }
+
+// ipaUsagePattern and pkgUsagePattern match help text that names the artifact
+// type, so `--ipa` and `--pkg` only point at a `--path` that reads that artifact,
+// such as `asc ipa-info --path`, and never at a metadata or output directory.
+var (
+	ipaUsagePattern = regexp.MustCompile(`(?i)\bipa\b`)
+	pkgUsagePattern = regexp.MustCompile(`(?i)\bpkg\b`)
+)
 
 // pathValuedUsagePattern matches help text that describes a filesystem
 // destination, such as "Output CSV file path", "Path for the newly re-signed
