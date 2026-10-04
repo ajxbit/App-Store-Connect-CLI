@@ -96,7 +96,7 @@ func evaluateUntil(until string, resp *dashboardResponse) untilCheck {
 
 func isApprovedAppStoreState(state string) bool {
 	switch state {
-	case "ACCEPTED", "PENDING_DEVELOPER_RELEASE", "PENDING_APPLE_RELEASE", "PROCESSING_FOR_DISTRIBUTION", "PROCESSING_FOR_APP_STORE", "PREORDER_READY_FOR_SALE":
+	case "ACCEPTED", "PENDING_DEVELOPER_RELEASE", "PENDING_APPLE_RELEASE", "PROCESSING_FOR_DISTRIBUTION", "PROCESSING_FOR_APP_STORE", "PREORDER_READY_FOR_SALE", "PENDING_CONTRACT":
 		return true
 	}
 	return shared.IsLiveAppStoreVersionState(state)
