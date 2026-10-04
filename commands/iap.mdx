@@ -285,6 +285,35 @@ Descriptions must remain non-empty in live App Store Connect. The CLI exposes
 schema-correct clear encoding, but Apple currently rejects an empty or null
 description for this v2 resource.
 
+### Import Localizations
+
+Create missing locales and update changed ones from one JSON file that maps
+each locale to `name` and `description`. Omitted fields stay unchanged, and
+unchanged locales are skipped, so rerunning the same file is safe.
+
+```json
+{
+  "en-US": {"name": "Premium Features", "description": "Unlock all premium features"},
+  "de-DE": {"name": "Premium-Funktionen", "description": "Alle Premium-Funktionen freischalten"}
+}
+```
+
+```bash  theme={null}
+asc iap versions localizations import \
+  --version-id "IAP_VERSION_ID" \
+  --file "./localizations.json" \
+  --dry-run
+
+asc iap versions localizations import \
+  --version-id "IAP_VERSION_ID" \
+  --file "./localizations.json" \
+  --confirm
+```
+
+The command validates the file and the whole plan before writing. With
+`--confirm`, a failed locale is reported in the receipt and the remaining
+locales still run; the command exits non-zero when any locale failed.
+
 ### Delete Localization
 
 ```bash  theme={null}
