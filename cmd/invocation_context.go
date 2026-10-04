@@ -770,7 +770,7 @@ func runtimeFailureContext(analysis invocationAnalysis, err error, exitCode int)
 	switch {
 	case errors.Is(err, shared.ErrMissingAuth):
 		eventContext.FailureStage = telemetry.FailureStageValidation
-	case shared.IsValidationError(err):
+	case shared.IsValidationError(err), errors.Is(err, shared.ErrPending):
 		eventContext.FailureStage = telemetry.FailureStageValidation
 	case errors.Is(err, context.DeadlineExceeded):
 		eventContext.FailureStage = telemetry.FailureStageRequest
@@ -801,7 +801,7 @@ func runtimeOutcomeKind(err error, exitCode int, eventContext telemetry.EventCon
 		return telemetry.OutcomeCancelled
 	case errors.Is(err, shared.ErrMissingAuth), errors.Is(err, webcore.ErrInvalidAppleAccountCredentials), exitCode == ExitAuth:
 		return telemetry.OutcomeAuthError
-	case shared.IsValidationError(err):
+	case shared.IsValidationError(err), errors.Is(err, shared.ErrPending):
 		return telemetry.OutcomeExpectedNegative
 	case eventContext.PublicStorefront && (eventContext.HTTPStatus == 401 || eventContext.HTTPStatus == 403):
 		return telemetry.OutcomeAPIClientError
