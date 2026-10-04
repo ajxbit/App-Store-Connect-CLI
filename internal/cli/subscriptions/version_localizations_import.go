@@ -19,13 +19,8 @@ func SubscriptionsVersionLocalizationsImportCommand() *ffcli.Command {
 		ResourceType:        "subscriptionLocalizations",
 		OptionalField:       "description",
 		ExampleValues:       `{"en-US": {"name": "Premium", "description": "All features"}, "de-DE": {"name": "Premium"}}`,
-		ClientFactory: func() (shared.VersionLocalizationImportOps, error) {
-			client, err := shared.GetASCClient()
-			if err != nil {
-				return shared.VersionLocalizationImportOps{}, err
-			}
-			return subscriptionVersionLocalizationImportOps(client), nil
-		},
+		NewClient:           shared.GetASCClient,
+		Ops:                 subscriptionVersionLocalizationImportOps,
 	})
 }
 
@@ -39,26 +34,19 @@ func SubscriptionsGroupsVersionLocalizationsImportCommand() *ffcli.Command {
 		ResourceType:        "subscriptionGroupLocalizations",
 		OptionalField:       "customAppName",
 		ExampleValues:       `{"en-US": {"name": "Premium", "customAppName": "Premium App"}, "de-DE": {"name": "Premium"}}`,
-		ClientFactory: func() (shared.VersionLocalizationImportOps, error) {
-			client, err := subscriptionGroupVersionClientFactory()
-			if err != nil {
-				return shared.VersionLocalizationImportOps{}, err
-			}
-			return subscriptionGroupVersionLocalizationImportOps(client), nil
-		},
+		NewClient:           func() (*asc.Client, error) { return subscriptionGroupVersionClientFactory() },
+		Ops:                 subscriptionGroupVersionLocalizationImportOps,
 	})
 }
 
 func subscriptionVersionLocalizationImportOps(client *asc.Client) shared.VersionLocalizationImportOps {
 	return shared.VersionLocalizationImportOps{
 		List: func(ctx context.Context, versionID string) ([]shared.VersionLocalization, error) {
-			requestCtx, cancel := shared.ContextWithTimeout(ctx)
-			defer cancel()
-			first, err := client.GetSubscriptionVersionLocalizations(requestCtx, versionID, asc.WithSubscriptionVersionLocalizationsLimit(200))
+			first, err := client.GetSubscriptionVersionLocalizations(ctx, versionID, asc.WithSubscriptionVersionLocalizationsLimit(200))
 			if err != nil {
 				return nil, err
 			}
-			all, err := asc.PaginateAll(requestCtx, first, func(ctx context.Context, nextURL string) (asc.PaginatedResponse, error) {
+			all, err := asc.PaginateAll(ctx, first, func(ctx context.Context, nextURL string) (asc.PaginatedResponse, error) {
 				return client.GetSubscriptionVersionLocalizations(ctx, versionID, asc.WithSubscriptionVersionLocalizationsNextURL(nextURL))
 			})
 			if err != nil {
@@ -99,13 +87,11 @@ func subscriptionVersionLocalizationImportOps(client *asc.Client) shared.Version
 func subscriptionGroupVersionLocalizationImportOps(client *asc.Client) shared.VersionLocalizationImportOps {
 	return shared.VersionLocalizationImportOps{
 		List: func(ctx context.Context, versionID string) ([]shared.VersionLocalization, error) {
-			requestCtx, cancel := shared.ContextWithTimeout(ctx)
-			defer cancel()
-			first, err := client.GetSubscriptionGroupVersionLocalizations(requestCtx, versionID, asc.WithSubscriptionGroupVersionLocalizationsLimit(200))
+			first, err := client.GetSubscriptionGroupVersionLocalizations(ctx, versionID, asc.WithSubscriptionGroupVersionLocalizationsLimit(200))
 			if err != nil {
 				return nil, err
 			}
-			all, err := asc.PaginateAll(requestCtx, first, func(ctx context.Context, nextURL string) (asc.PaginatedResponse, error) {
+			all, err := asc.PaginateAll(ctx, first, func(ctx context.Context, nextURL string) (asc.PaginatedResponse, error) {
 				return client.GetSubscriptionGroupVersionLocalizations(ctx, versionID, asc.WithSubscriptionGroupVersionLocalizationsNextURL(nextURL))
 			})
 			if err != nil {

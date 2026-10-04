@@ -19,26 +19,19 @@ func IAPVersionLocalizationsImportCommand() *ffcli.Command {
 		ResourceType:        "inAppPurchaseLocalizations",
 		OptionalField:       "description",
 		ExampleValues:       `{"en-US": {"name": "Pro", "description": "Remove limits"}, "de-DE": {"name": "Pro"}}`,
-		ClientFactory: func() (shared.VersionLocalizationImportOps, error) {
-			client, err := iapVersionClientFactory()
-			if err != nil {
-				return shared.VersionLocalizationImportOps{}, err
-			}
-			return iapVersionLocalizationImportOps(client), nil
-		},
+		NewClient:           func() (*asc.Client, error) { return iapVersionClientFactory() },
+		Ops:                 iapVersionLocalizationImportOps,
 	})
 }
 
 func iapVersionLocalizationImportOps(client *asc.Client) shared.VersionLocalizationImportOps {
 	return shared.VersionLocalizationImportOps{
 		List: func(ctx context.Context, versionID string) ([]shared.VersionLocalization, error) {
-			requestCtx, cancel := shared.ContextWithTimeout(ctx)
-			defer cancel()
-			first, err := client.GetInAppPurchaseVersionLocalizations(requestCtx, versionID, asc.WithIAPVersionLocalizationsLimit(200))
+			first, err := client.GetInAppPurchaseVersionLocalizations(ctx, versionID, asc.WithIAPVersionLocalizationsLimit(200))
 			if err != nil {
 				return nil, err
 			}
-			all, err := asc.PaginateAll(requestCtx, first, func(ctx context.Context, nextURL string) (asc.PaginatedResponse, error) {
+			all, err := asc.PaginateAll(ctx, first, func(ctx context.Context, nextURL string) (asc.PaginatedResponse, error) {
 				return client.GetInAppPurchaseVersionLocalizations(ctx, versionID, asc.WithIAPVersionLocalizationsNextURL(nextURL))
 			})
 			if err != nil {

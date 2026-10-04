@@ -50,7 +50,8 @@ type VersionLocalizationImportConfig struct {
 	// OptionalField is the import field besides "name", such as "description".
 	OptionalField string
 	ExampleValues string
-	ClientFactory func() (VersionLocalizationImportOps, error)
+	NewClient     func() (*asc.Client, error)
+	Ops           func(*asc.Client) VersionLocalizationImportOps
 }
 
 // NewVersionLocalizationImportCommand builds a command that creates missing
@@ -126,11 +127,14 @@ Examples:
 				return reportInputError(err)
 			}
 
-			ops, err := config.ClientFactory()
+			client, err := config.NewClient()
 			if err != nil {
 				return fmt.Errorf("%s: %w", config.CommandPath, err)
 			}
-			existing, err := ops.List(ctx, id)
+			ops := config.Ops(client)
+			listCtx, cancel := ContextWithTimeout(ctx)
+			existing, err := ops.List(listCtx, id)
+			cancel()
 			if err != nil {
 				return fmt.Errorf("%s: list existing localizations: %w", config.CommandPath, err)
 			}
@@ -162,12 +166,8 @@ Examples:
 }
 
 type versionLocalizationImportStep struct {
-	locale     string
-	action     string
-	existingID string
-	// values holds every field for create and only the changed fields for update.
+	asc.LocalizationImportLocaleResult
 	values map[string]string
-	fields []string
 }
 
 // readVersionLocalizationImportFile reads the file through a root anchored at
@@ -263,7 +263,7 @@ func planVersionLocalizationImport(desired, existing []VersionLocalization, fiel
 			if entry.Values["name"] == "" {
 				return nil, fmt.Errorf("locale %q does not exist on the version yet; creating it requires \"name\"", entry.Locale)
 			}
-			plan = append(plan, versionLocalizationImportStep{locale: entry.Locale, action: "create", values: entry.Values, fields: orderedFieldNames(fields, entry.Values)})
+			plan = append(plan, versionLocalizationImportStep{asc.LocalizationImportLocaleResult{Locale: entry.Locale, Action: "create", Fields: orderedFieldNames(fields, entry.Values)}, entry.Values})
 			continue
 		}
 		changed := make(map[string]string)
@@ -276,7 +276,7 @@ func planVersionLocalizationImport(desired, existing []VersionLocalization, fiel
 		if len(changed) == 0 {
 			action = "skip"
 		}
-		plan = append(plan, versionLocalizationImportStep{locale: entry.Locale, action: action, existingID: current.ID, values: changed, fields: orderedFieldNames(fields, changed)})
+		plan = append(plan, versionLocalizationImportStep{asc.LocalizationImportLocaleResult{Locale: entry.Locale, Action: action, Fields: orderedFieldNames(fields, changed), LocalizationID: current.ID}, changed})
 	}
 	return plan, nil
 }
@@ -285,14 +285,9 @@ func planVersionLocalizationImport(desired, existing []VersionLocalization, fiel
 // one rejected locale does not block the others; the receipt reports each one.
 func executeVersionLocalizationImport(ctx context.Context, ops VersionLocalizationImportOps, versionID string, plan []versionLocalizationImportStep, result *asc.LocalizationImportResult) {
 	for _, step := range plan {
-		entry := asc.LocalizationImportLocaleResult{
-			Locale:         step.locale,
-			Action:         step.action,
-			Fields:         step.fields,
-			LocalizationID: step.existingID,
-		}
+		entry := step.LocalizationImportLocaleResult
 		switch {
-		case step.action == "skip":
+		case entry.Action == "skip":
 			entry.Status = "skipped"
 			result.Skipped++
 		case result.DryRun:
@@ -301,10 +296,10 @@ func executeVersionLocalizationImport(ctx context.Context, ops VersionLocalizati
 		default:
 			requestCtx, cancel := ContextWithTimeout(ctx)
 			var err error
-			if step.action == "create" {
-				entry.LocalizationID, err = ops.Create(requestCtx, versionID, step.locale, step.values)
+			if entry.Action == "create" {
+				entry.LocalizationID, err = ops.Create(requestCtx, versionID, entry.Locale, step.values)
 			} else {
-				err = ops.Update(requestCtx, step.existingID, step.values)
+				err = ops.Update(requestCtx, entry.LocalizationID, step.values)
 			}
 			cancel()
 			if err != nil {

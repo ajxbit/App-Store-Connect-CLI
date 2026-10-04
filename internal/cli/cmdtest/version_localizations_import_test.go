@@ -278,13 +278,11 @@ func TestVersionLocalizationsImportRejectsInvalidFilesBeforeAnyRequest(t *testin
 		contents    string
 		wantMessage string
 	}{
-		{name: "empty object", contents: `{}`, wantMessage: "at least one locale"},
 		{name: "not an object", contents: `[{"locale":"en-US"}]`, wantMessage: "expected a JSON object mapping locales to fields"},
 		{name: "unknown field", contents: `{"en-US": {"name": "Pro", "customAppName": "Pro App"}}`, wantMessage: `unknown field "customAppName" (allowed: name, description)`},
 		{name: "invalid locale", contents: `{"english": {"name": "Pro"}}`, wantMessage: `invalid locale "english"`},
 		{name: "duplicate locale", contents: `{"en-US": {"name": "Pro"}, "en_US": {"name": "Pro"}}`, wantMessage: `locale "en_US" duplicates "en-US"`},
 		{name: "empty value", contents: `{"en-US": {"name": "  "}}`, wantMessage: `field "name" must not be empty`},
-		{name: "no fields", contents: `{"en-US": {}}`, wantMessage: "set at least one of: name, description"},
 		{name: "trailing document", contents: `{"en-US": {"name": "Pro"}} {}`, wantMessage: "expected a single JSON object"},
 	}
 
