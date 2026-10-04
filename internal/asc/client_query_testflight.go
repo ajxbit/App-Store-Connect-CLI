@@ -303,6 +303,9 @@ func buildBuildBetaDetailsQuery(query *buildBetaDetailsQuery) string {
 	addCSV(values, "filter[build]", query.buildIDs)
 	if query.includeBuild {
 		values.Set("include", "build")
+		// With full build fields included, App Store Connect reports every
+		// non-expired detail as PROCESSING; sparse build fields keep real states.
+		values.Set("fields[builds]", "version")
 	}
 	addLimit(values, query.limit)
 	return values.Encode()
