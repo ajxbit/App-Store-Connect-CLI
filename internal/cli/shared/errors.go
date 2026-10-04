@@ -207,6 +207,9 @@ type pendingError struct {
 func (e pendingError) Error() string        { return e.message }
 func (e pendingError) Is(target error) bool { return target == ErrPending }
 func (e pendingError) Reported() bool       { return true }
+func (e pendingError) Diagnostic() Diagnostic {
+	return Diagnostic{Code: DiagnosticStateNotReady}
+}
 
 // NewPendingError returns an already-reported ErrPending outcome. The root
 // renderer prints nothing for it; the command must have written its pending
