@@ -246,7 +246,7 @@ func waitForBuildDiscovery(
 ) (*asc.BuildResponse, error) {
 	started := buildsWaitNow()
 	return asc.PollUntilTolerant(ctx, pollInterval, func(ctx context.Context) (*asc.BuildResponse, bool, error) {
-		buildResp, err := resolveBuildForAppWait(ctx, client, selector)
+		buildResp, err := resolveBuildForAppWait(ctx, client, selector, true)
 		if err != nil {
 			return nil, false, err
 		}
@@ -282,6 +282,7 @@ func resolveBuildForAppWait(
 	ctx context.Context,
 	client *asc.Client,
 	selector appBuildWaitSelector,
+	allowEmpty bool,
 ) (*asc.BuildResponse, error) {
 	if selector.Latest {
 		buildResp, err := shared.ResolveLatestBuild(ctx, client, shared.LatestBuildSelectionOptions{
@@ -289,7 +290,7 @@ func resolveBuildForAppWait(
 			Version:               selector.Version,
 			Platform:              selector.Platform,
 			ProcessingStateValues: buildsWaitProcessingStates(),
-		}, true)
+		}, allowEmpty)
 		if err != nil {
 			return nil, err
 		}
@@ -303,7 +304,7 @@ func resolveBuildForAppWait(
 		Platform:              selector.Platform,
 		Since:                 selector.Since,
 		ProcessingStateValues: buildsWaitProcessingStates(),
-	}, true)
+	}, allowEmpty)
 	if err != nil {
 		return nil, err
 	}
