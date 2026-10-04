@@ -12,6 +12,7 @@ import (
 
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/asc"
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/cli/metadata"
+	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/cli/shared"
 	validatecli "github.com/rudrankriyam/App-Store-Connect-CLI/internal/cli/validate"
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/validation"
 )
@@ -141,6 +142,9 @@ func TestExecuteStageDryRunRejectsPlannedDeletesWithoutAllowDeletes(t *testing.T
 	}
 	if !strings.Contains(err.Error(), "--allow-deletes") {
 		t.Fatalf("expected error naming --allow-deletes, got %v", err)
+	}
+	if !shared.IsValidationError(err) {
+		t.Fatalf("expected the planned-deletes refusal to be a validation outcome, got %T", err)
 	}
 	if errors.Is(err, flag.ErrHelp) {
 		t.Fatalf("mid-pipeline plan failure was classified as invalid command usage: %v", err)
