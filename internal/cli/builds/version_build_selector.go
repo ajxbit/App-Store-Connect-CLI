@@ -92,7 +92,7 @@ func (s *VersionBuildSelector) NeedsScope() bool {
 }
 
 // Resolve returns the selected build ID. --build-id without --wait makes no
-// request, so that form behaves exactly as before.
+// request.
 func (s *VersionBuildSelector) Resolve(ctx context.Context, client *asc.Client, scope VersionBuildScope) (string, error) {
 	buildID := s.buildIDValue()
 	if buildID != "" && !*s.wait {
@@ -101,10 +101,10 @@ func (s *VersionBuildSelector) Resolve(ctx context.Context, client *asc.Client, 
 
 	selector := appBuildWaitSelector{
 		Latest:      *s.latest,
-		AppID:       strings.TrimSpace(scope.AppID),
-		Version:     strings.TrimSpace(scope.Version),
+		AppID:       scope.AppID,
+		Version:     scope.Version,
 		BuildNumber: s.buildNumberValue(),
-		Platform:    strings.TrimSpace(scope.Platform),
+		Platform:    scope.Platform,
 	}
 
 	if !*s.wait {

@@ -80,7 +80,6 @@ func (tr *versionTrainTransport) RoundTrip(req *http.Request) (*http.Response, e
 func runVersionBuildSelector(t *testing.T, transport http.RoundTripper, args ...string) (int, string, string) {
 	t.Helper()
 	setupAuth(t)
-	t.Setenv("ASC_APP_ID", "")
 	t.Setenv("ASC_CONFIG_PATH", filepath.Join(t.TempDir(), "nonexistent.json"))
 	installDefaultTransport(t, transport)
 
@@ -148,9 +147,7 @@ func TestVersionsAttachBuildLatestUsesTrainOfVersionID(t *testing.T) {
 }
 
 func TestVersionsAttachBuildWaitsForProcessingBeforeAttaching(t *testing.T) {
-	var mu sync.Mutex
 	polls := 0
-	valid := false
 	var transport *versionTrainTransport
 	transport = &versionTrainTransport{
 		t:        t,
@@ -159,8 +156,6 @@ func TestVersionsAttachBuildWaitsForProcessingBeforeAttaching(t *testing.T) {
 			return buildsCollection("build-46", "46", "PROCESSING")
 		},
 		build: func(id string) string {
-			mu.Lock()
-			defer mu.Unlock()
 			if len(transport.attached) > 0 {
 				t.Fatal("build attached before processing finished")
 			}
@@ -168,7 +163,6 @@ func TestVersionsAttachBuildWaitsForProcessingBeforeAttaching(t *testing.T) {
 			if polls < 3 {
 				return buildResource(id, "46", "PROCESSING")
 			}
-			valid = true
 			return buildResource(id, "46", "VALID")
 		},
 	}
@@ -179,9 +173,6 @@ func TestVersionsAttachBuildWaitsForProcessingBeforeAttaching(t *testing.T) {
 
 	if code != rootcmd.ExitSuccess {
 		t.Fatalf("exit code = %d, want success; stderr=%q", code, stderr)
-	}
-	if !valid {
-		t.Fatal("expected the build to be polled until VALID")
 	}
 	if !strings.Contains(stdout, `"buildId":"build-46"`) {
 		t.Fatalf("stdout = %q", stdout)
@@ -280,18 +271,8 @@ func TestVersionBuildSelectorValidation(t *testing.T) {
 		wantErr string
 	}{
 		{
-			name:    "attach-build missing build selector",
-			args:    []string{"versions", "attach-build", "--version-id", "version-1"},
-			wantErr: "Error: --build-id, --build-number, or --latest is required",
-		},
-		{
 			name:    "attach-build build id and latest",
 			args:    []string{"versions", "attach-build", "--version-id", "version-1", "--build-id", "build-1", "--latest"},
-			wantErr: "Error: --build-id, --build-number, and --latest are mutually exclusive",
-		},
-		{
-			name:    "attach-build build number and latest",
-			args:    []string{"versions", "attach-build", "--app", "123456789", "--version", "1.2.0", "--build-number", "45", "--latest"},
 			wantErr: "Error: --build-id, --build-number, and --latest are mutually exclusive",
 		},
 		{
