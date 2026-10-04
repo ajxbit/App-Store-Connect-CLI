@@ -342,6 +342,24 @@ func TestRuntimeFailureContextCarriesStructuredDiagnostic(t *testing.T) {
 	}
 }
 
+func TestPendingWaitEmitsExpectedNegativeStateNotReady(t *testing.T) {
+	err := shared.NewPendingError("builds wait: Build is still pending after 50s")
+	eventContext := runtimeFailureContext(
+		invocationAnalysis{shape: telemetry.InvocationShapeLeaf},
+		err,
+		ExitCodeFromError(err),
+	)
+
+	event, ok := telemetry.BuildEventWithContext("asc builds wait", "1.0.0", 0, ExitPending, eventContext)
+	if !ok {
+		t.Fatal("BuildEventWithContext() returned no event")
+	}
+	if event.OutcomeKind != telemetry.OutcomeExpectedNegative ||
+		event.DiagnosticCode == nil || *event.DiagnosticCode != string(shared.DiagnosticStateNotReady) {
+		t.Fatalf("event outcome=%q diagnostic=%v, want expected_negative with state_not_ready", event.OutcomeKind, event.DiagnosticCode)
+	}
+}
+
 func TestRuntimeFailureContextKeepsExplainedConflictAsAPIConflict(t *testing.T) {
 	// Apple's 409 for a past start date on POST /v1/appPriceSchedules, captured
 	// live on 2026-09-26. The pricing command explains it and adds a
