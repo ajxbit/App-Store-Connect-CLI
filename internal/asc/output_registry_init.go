@@ -235,6 +235,7 @@ func registerAllOutputRenderers() {
 	registerRows(artifactPKGInfoRows)
 	registerRows(buildWaitResultRows)
 	registerRows(buildWaitPendingResultRows)
+	registerRows(statusUntilResultRows)
 	registerRows(xcodeJUnitResultRows)
 	registerRows(xcodeTestDestinationsRows)
 	registerRowsWithSingleResourceAdapter(buildUploadFilesRows)
