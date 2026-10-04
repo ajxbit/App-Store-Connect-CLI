@@ -632,6 +632,9 @@ so commands continue to work even if the original .p8 file is removed.`,
 			trimmedKeyID := strings.TrimSpace(*keyID)
 			if trimmedKeyID == "" {
 				fmt.Fprintln(os.Stderr, "Error: --key-id is required")
+				if hint := keyIDHintFromKeyPath(*keyPath); hint != "" {
+					fmt.Fprintf(os.Stderr, "Hint: the key file name suggests --key-id %s\n", hint)
+				}
 				return shared.MissingRequiredUsageError("--key-id")
 			}
 			*keyID = trimmedKeyID
