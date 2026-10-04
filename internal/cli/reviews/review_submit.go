@@ -9,6 +9,7 @@ import (
 
 	"github.com/peterbourgon/ff/v3/ffcli"
 
+	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/cli/builds"
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/cli/shared"
 	submitcli "github.com/rudrankriyam/App-Store-Connect-CLI/internal/cli/submit"
 )
@@ -35,8 +36,8 @@ func ReviewSubmitCommand() *ffcli.Command {
 	appID := fs.String("app", "", "App Store Connect app ID (or ASC_APP_ID)")
 	version := fs.String("version", "", "App Store version string")
 	versionID := shared.BindResourceIDFlag(fs, "version-id", "appStoreVersions", "App Store version ID")
-	buildID := shared.BindResourceIDFlag(fs, "build-id", "builds", "Build ID to attach")
 	platform := fs.String("platform", "IOS", "Platform: IOS, MAC_OS, TV_OS, VISION_OS")
+	build := builds.BindVersionBuildSelector(fs)
 	confirm := fs.Bool("confirm", false, "Confirm submission (required unless --dry-run)")
 	dryRun := fs.Bool("dry-run", false, "Preview the review submission flow without mutating")
 	output := shared.BindOutputFlags(fs)
@@ -53,8 +54,14 @@ This is the easier modern wrapper around:
   - asc review items-add
   - asc review submissions-submit
 
+Select the build with --build-id, or with --build-number or --latest, which
+only match builds of the version's app, version string, and platform. A
+selected build must be VALID; --wait waits for processing first.
+
 Examples:
   asc review submit --app "123456789" --version "1.2.3" --build-id "BUILD_ID" --confirm
+  asc review submit --app "123456789" --version "1.2.3" --build-number "45" --confirm
+  asc review submit --app "123456789" --version "1.2.3" --build-number "46" --wait --confirm
   asc review submit --app "123456789" --version-id "VERSION_ID" --build-id "BUILD_ID" --dry-run`,
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
@@ -65,9 +72,8 @@ Examples:
 				return shared.MissingRequiredUsageError("--app")
 			}
 
-			if strings.TrimSpace(*buildID) == "" {
-				fmt.Fprintln(os.Stderr, "Error: --build-id is required")
-				return shared.MissingRequiredUsageError("--build-id")
+			if err := build.Validate(); err != nil {
+				return err
 			}
 			if strings.TrimSpace(*version) == "" && strings.TrimSpace(*versionID) == "" {
 				fmt.Fprintln(os.Stderr, "Error: --version or --version-id is required")
@@ -100,15 +106,15 @@ Examples:
 				return fmt.Errorf("review submit: %w", err)
 			}
 
-			requestCtx, cancel := shared.ContextWithTimeout(ctx)
-			defer cancel()
+			lookupCtx, lookupCancel := shared.ContextWithTimeout(ctx)
+			defer lookupCancel()
 
 			resolvedVersionID := strings.TrimSpace(*versionID)
 			effectivePlatform := requestedPlatform
 			versionString := strings.TrimSpace(*version)
 
 			if resolvedVersionID != "" {
-				versionData, err := shared.ResolveOwnedAppStoreVersionByID(requestCtx, client, resolvedAppID, resolvedVersionID, requestedPlatform)
+				versionData, err := shared.ResolveOwnedAppStoreVersionByID(lookupCtx, client, resolvedAppID, resolvedVersionID, requestedPlatform)
 				if err != nil {
 					return fmt.Errorf("review submit: fetch app store version %q: %w", resolvedVersionID, err)
 				}
@@ -123,11 +129,26 @@ Examples:
 				}
 				versionString = strings.TrimSpace(versionData.Attributes.VersionString)
 			} else {
-				resolvedVersionID, err = shared.ResolveAppStoreVersionID(requestCtx, client, resolvedAppID, versionString, effectivePlatform)
+				resolvedVersionID, err = shared.ResolveAppStoreVersionID(lookupCtx, client, resolvedAppID, versionString, effectivePlatform)
 				if err != nil {
 					return fmt.Errorf("review submit: %w", err)
 				}
 			}
+			lookupCancel()
+
+			// The build is resolved before the request budget starts, so
+			// --wait does not use it up.
+			buildID, err := build.Resolve(ctx, client, builds.VersionBuildScope{
+				AppID:    resolvedAppID,
+				Version:  versionString,
+				Platform: effectivePlatform,
+			})
+			if err != nil {
+				return fmt.Errorf("review submit: %w", err)
+			}
+
+			requestCtx, cancel := shared.ContextWithTimeout(ctx)
+			defer cancel()
 
 			existingSubmissionID, err := submitcli.LookupExistingSubmissionForVersion(requestCtx, client, resolvedVersionID, 0)
 			if err != nil {
@@ -138,7 +159,7 @@ Examples:
 					AppID:            resolvedAppID,
 					Version:          versionString,
 					VersionID:        resolvedVersionID,
-					BuildID:          strings.TrimSpace(*buildID),
+					BuildID:          buildID,
 					Platform:         effectivePlatform,
 					DryRun:           *dryRun,
 					SubmissionID:     existingSubmissionID,
@@ -155,7 +176,7 @@ Examples:
 			submitResult, err := submitcli.SubmitResolvedVersion(requestCtx, client, submitcli.SubmitResolvedVersionOptions{
 				AppID:                    resolvedAppID,
 				VersionID:                resolvedVersionID,
-				BuildID:                  strings.TrimSpace(*buildID),
+				BuildID:                  buildID,
 				Platform:                 effectivePlatform,
 				EnsureBuildAttached:      true,
 				LookupExistingSubmission: false,
@@ -172,7 +193,7 @@ Examples:
 				AppID:            resolvedAppID,
 				Version:          versionString,
 				VersionID:        resolvedVersionID,
-				BuildID:          strings.TrimSpace(*buildID),
+				BuildID:          buildID,
 				Platform:         effectivePlatform,
 				DryRun:           *dryRun,
 				SubmissionID:     submitResult.SubmissionID,

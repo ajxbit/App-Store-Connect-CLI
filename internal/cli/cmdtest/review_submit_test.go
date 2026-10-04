@@ -29,7 +29,7 @@ func TestReviewSubmitValidationErrors(t *testing.T) {
 		{
 			name:    "missing build",
 			args:    []string{"review", "submit", "--app", "app-1", "--version", "1.2.3", "--confirm"},
-			wantErr: "--build-id is required",
+			wantErr: "--build-id, --build-number, or --latest is required",
 		},
 		{
 			name:    "missing version selector",
