@@ -113,8 +113,7 @@ type betaAppReviewSubmissionsQuery struct {
 
 type buildBetaDetailsQuery struct {
 	listQuery
-	buildIDs     []string
-	includeBuild bool
+	buildIDs []string
 }
 
 type betaRecruitmentCriterionOptionsQuery struct {
@@ -301,12 +300,6 @@ func buildBetaAppReviewSubmissionsQuery(query *betaAppReviewSubmissionsQuery) st
 func buildBuildBetaDetailsQuery(query *buildBetaDetailsQuery) string {
 	values := url.Values{}
 	addCSV(values, "filter[build]", query.buildIDs)
-	if query.includeBuild {
-		values.Set("include", "build")
-		// With full build fields included, App Store Connect reports every
-		// non-expired detail as PROCESSING; sparse build fields keep real states.
-		values.Set("fields[builds]", "version")
-	}
 	addLimit(values, query.limit)
 	return values.Encode()
 }
@@ -989,13 +982,6 @@ func WithBuildBetaDetailsNextURL(next string) BuildBetaDetailsOption {
 func WithBuildBetaDetailsBuildIDs(ids []string) BuildBetaDetailsOption {
 	return func(q *buildBetaDetailsQuery) {
 		q.buildIDs = normalizeList(ids)
-	}
-}
-
-// WithBuildBetaDetailsIncludeBuild includes each detail's related build.
-func WithBuildBetaDetailsIncludeBuild() BuildBetaDetailsOption {
-	return func(q *buildBetaDetailsQuery) {
-		q.includeBuild = true
 	}
 }
 
