@@ -20,7 +20,7 @@ const (
 	ExitNotFound = 4 // Resource not found
 	ExitConflict = 5 // Conflict / resource already exists
 	ExitReadOnly = 6 // Read-only mode refused a mutating request
-	ExitPending  = 7 // An opted-in bounded wait ended before its target finished (builds wait --report-pending)
+	ExitPending  = 7 // An opted-in bounded wait ended before its target finished (builds wait --report-pending, status --until)
 
 	// HTTP 4xx range: 10 + (status - 400)
 	// Note: 404 and 409 are mapped to ExitNotFound and ExitConflict above.
