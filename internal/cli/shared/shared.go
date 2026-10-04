@@ -69,11 +69,16 @@ var (
 )
 
 type missingAuthError struct {
-	msg string
+	msg   string
+	cause error
 }
 
 func (e missingAuthError) Error() string {
 	return e.msg
+}
+
+func (e missingAuthError) Unwrap() error {
+	return e.cause
 }
 
 func (e missingAuthError) Is(target error) bool {
@@ -930,16 +935,52 @@ func getASCClientWithTimeout(timeout time.Duration) (*asc.Client, error) {
 
 func newASCClientFromResolvedCredentials(resolved resolvedCredentials, timeout time.Duration) (*asc.Client, error) {
 	ApplyRootLoggingOverrides()
-	if strings.TrimSpace(resolved.keyPEM) != "" {
-		if timeout > 0 {
-			return asc.NewClientFromPEMWithTimeout(resolved.keyID, resolved.issuerID, resolved.keyPEM, timeout)
-		}
-		return asc.NewClientFromPEM(resolved.keyID, resolved.issuerID, resolved.keyPEM)
+	var (
+		client *asc.Client
+		err    error
+	)
+	switch {
+	case strings.TrimSpace(resolved.keyPEM) != "" && timeout > 0:
+		client, err = asc.NewClientFromPEMWithTimeout(resolved.keyID, resolved.issuerID, resolved.keyPEM, timeout)
+	case strings.TrimSpace(resolved.keyPEM) != "":
+		client, err = asc.NewClientFromPEM(resolved.keyID, resolved.issuerID, resolved.keyPEM)
+	case timeout > 0:
+		client, err = asc.NewClientWithTimeout(resolved.keyID, resolved.issuerID, resolved.keyPath, timeout)
+	default:
+		client, err = asc.NewClient(resolved.keyID, resolved.issuerID, resolved.keyPath)
 	}
-	if timeout > 0 {
-		return asc.NewClientWithTimeout(resolved.keyID, resolved.issuerID, resolved.keyPath, timeout)
+	if _, ok := auth.PrivateKeyErrorKindOf(err); ok {
+		// An unusable private key leaves the command without working
+		// credentials, so report it like missing authentication.
+		return nil, WithPrivateKeyDiagnostic(missingAuthError{msg: err.Error(), cause: err}, err)
 	}
-	return asc.NewClient(resolved.keyID, resolved.issuerID, resolved.keyPath)
+	return client, err
+}
+
+// WithPrivateKeyDiagnostic attaches the --private-key diagnostic that matches
+// cause's private key failure reason. Other errors are returned unchanged.
+func WithPrivateKeyDiagnostic(rendered, cause error) error {
+	kind, ok := auth.PrivateKeyErrorKindOf(cause)
+	if !ok {
+		return rendered
+	}
+
+	code := DiagnosticRequestFailed
+	switch kind {
+	case auth.PrivateKeyNotFound:
+		code = DiagnosticFileNotFound
+	case auth.PrivateKeyPermissionDenied:
+		code = DiagnosticFilePermissionDenied
+	case auth.PrivateKeyPermissionsInsecure:
+		code = DiagnosticFilePermissionsInsecure
+	case auth.PrivateKeyInvalidFormat:
+		code = DiagnosticFileInvalidFormat
+	case auth.PrivateKeyUnsupportedAlgorithm:
+		code = DiagnosticKeyAlgorithmUnsupported
+	case auth.PrivateKeyAccessFailed:
+		code = DiagnosticRequestFailed
+	}
+	return WithDiagnostic(rendered, code, "--private-key")
 }
 
 // ApplyRootLoggingOverrides applies root-level logging flag overrides

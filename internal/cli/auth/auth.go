@@ -360,23 +360,23 @@ func validateStoredCredential(ctx context.Context, cred authsvc.Credential) erro
 	if pemValue := strings.TrimSpace(cred.PrivateKeyPEM); pemValue != "" {
 		privateKey, err = authsvc.LoadPrivateKeyFromPEM([]byte(pemValue))
 		if err != nil {
-			return withPrivateKeyDiagnostic(fmt.Errorf("invalid private key: %w", err), err)
+			return shared.WithPrivateKeyDiagnostic(fmt.Errorf("invalid private key: %w", err), err)
 		}
 		client, err = asc.NewClientFromPEM(cred.KeyID, signingIssuerID, pemValue)
 		if err != nil {
-			return withPrivateKeyDiagnostic(err, err)
+			return shared.WithPrivateKeyDiagnostic(err, err)
 		}
 	} else {
 		if err := authsvc.ValidateKeyFile(cred.PrivateKeyPath); err != nil {
-			return withPrivateKeyDiagnostic(fmt.Errorf("invalid private key: %w", err), err)
+			return shared.WithPrivateKeyDiagnostic(fmt.Errorf("invalid private key: %w", err), err)
 		}
 		privateKey, err = authsvc.LoadPrivateKey(cred.PrivateKeyPath)
 		if err != nil {
-			return withPrivateKeyDiagnostic(fmt.Errorf("failed to load private key: %w", err), err)
+			return shared.WithPrivateKeyDiagnostic(fmt.Errorf("failed to load private key: %w", err), err)
 		}
 		client, err = asc.NewClient(cred.KeyID, signingIssuerID, cred.PrivateKeyPath)
 		if err != nil {
-			return withPrivateKeyDiagnostic(err, err)
+			return shared.WithPrivateKeyDiagnostic(err, err)
 		}
 	}
 	if _, err := asc.GenerateJWT(cred.KeyID, signingIssuerID, privateKey); err != nil {
@@ -401,7 +401,7 @@ func credentialSigningIssuerID(cred authsvc.Credential) string {
 func validateLoginCredentials(ctx context.Context, keyID, issuerID, keyPath string, network bool) error {
 	privateKey, err := authsvc.LoadPrivateKey(keyPath)
 	if err != nil {
-		return withPrivateKeyDiagnostic(fmt.Errorf("failed to load private key: %w", err), err)
+		return shared.WithPrivateKeyDiagnostic(fmt.Errorf("failed to load private key: %w", err), err)
 	}
 	if _, err := loginJWTGenerator(keyID, issuerID, privateKey); err != nil {
 		return shared.WithDiagnostic(fmt.Errorf("failed to generate JWT: %w", err), shared.DiagnosticInternalError, "--private-key")
@@ -439,30 +439,6 @@ func printPrivateKeyPermissionRemediation(cause error, keyPath string) {
 		return
 	}
 	fmt.Fprintln(os.Stderr, "Re-run with --fix-permissions to let asc change the file to 0600.")
-}
-
-func withPrivateKeyDiagnostic(rendered, cause error) error {
-	kind, ok := authsvc.PrivateKeyErrorKindOf(cause)
-	if !ok {
-		return rendered
-	}
-
-	code := shared.DiagnosticRequestFailed
-	switch kind {
-	case authsvc.PrivateKeyNotFound:
-		code = shared.DiagnosticFileNotFound
-	case authsvc.PrivateKeyPermissionDenied:
-		code = shared.DiagnosticFilePermissionDenied
-	case authsvc.PrivateKeyPermissionsInsecure:
-		code = shared.DiagnosticFilePermissionsInsecure
-	case authsvc.PrivateKeyInvalidFormat:
-		code = shared.DiagnosticFileInvalidFormat
-	case authsvc.PrivateKeyUnsupportedAlgorithm:
-		code = shared.DiagnosticKeyAlgorithmUnsupported
-	case authsvc.PrivateKeyAccessFailed:
-		code = shared.DiagnosticRequestFailed
-	}
-	return shared.WithDiagnostic(rendered, code, "--private-key")
 }
 
 func validateLoginNetwork(ctx context.Context, keyID, issuerID, keyPath string) error {
@@ -656,6 +632,9 @@ so commands continue to work even if the original .p8 file is removed.`,
 			trimmedKeyID := strings.TrimSpace(*keyID)
 			if trimmedKeyID == "" {
 				fmt.Fprintln(os.Stderr, "Error: --key-id is required")
+				if hint := keyIDHintFromKeyPath(*keyPath); hint != "" {
+					fmt.Fprintf(os.Stderr, "Hint: the key file name suggests --key-id %s\n", hint)
+				}
 				return shared.MissingRequiredUsageError("--key-id")
 			}
 			*keyID = trimmedKeyID
@@ -687,7 +666,7 @@ so commands continue to work even if the original .p8 file is removed.`,
 				changed, err := authsvc.FixPrivateKeyFilePermissions(*keyPath)
 				if err != nil {
 					rendered := errors.New(shared.SanitizeTerminal(fmt.Sprintf("auth login: failed to fix private key permissions: %v", err)))
-					return withPrivateKeyDiagnostic(shared.NewErrorWithCause(rendered, err), err)
+					return shared.WithPrivateKeyDiagnostic(shared.NewErrorWithCause(rendered, err), err)
 				}
 				if changed {
 					fmt.Fprintf(os.Stderr, "Changed private key file permissions to 0600: %s\n", shared.SanitizeTerminal(*keyPath))
@@ -695,7 +674,7 @@ so commands continue to work even if the original .p8 file is removed.`,
 			}
 
 			if err := authsvc.ValidateKeyFile(*keyPath); err != nil {
-				rendered := withPrivateKeyDiagnostic(shared.UsageErrorf("auth login: invalid private key: %v", err), err)
+				rendered := shared.WithPrivateKeyDiagnostic(shared.UsageErrorf("auth login: invalid private key: %v", err), err)
 				printPrivateKeyPermissionRemediation(err, *keyPath)
 				return rendered
 			}
@@ -1598,16 +1577,16 @@ func loadCredentialKey(cred shared.ResolvedAuthCredentials) (*ecdsa.PrivateKey, 
 	if pemValue := strings.TrimSpace(cred.KeyPEM); pemValue != "" {
 		privateKey, err := authsvc.LoadPrivateKeyFromPEM([]byte(pemValue))
 		if err != nil {
-			return nil, withPrivateKeyDiagnostic(err, err)
+			return nil, shared.WithPrivateKeyDiagnostic(err, err)
 		}
 		return privateKey, nil
 	}
 	if err := authsvc.ValidateKeyFile(cred.KeyPath); err != nil {
-		return nil, withPrivateKeyDiagnostic(fmt.Errorf("invalid private key: %w", err), err)
+		return nil, shared.WithPrivateKeyDiagnostic(fmt.Errorf("invalid private key: %w", err), err)
 	}
 	privateKey, err := authsvc.LoadPrivateKey(cred.KeyPath)
 	if err != nil {
-		return nil, withPrivateKeyDiagnostic(err, err)
+		return nil, shared.WithPrivateKeyDiagnostic(err, err)
 	}
 	return privateKey, nil
 }

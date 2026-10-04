@@ -388,12 +388,39 @@ func fetchAgeRatingDeclaration(ctx context.Context, client *asc.Client, appID, a
 	case versionID != "":
 		return client.GetAgeRatingDeclarationForAppStoreVersion(ctx, versionID, opts...)
 	default:
-		appInfoID, err := client.ResolveCurrentAppInfoIDForApp(ctx, appID)
+		appInfoID, err := resolveAppInfoIDForApp(ctx, client, appID)
 		if err != nil {
 			return nil, fmt.Errorf("failed to resolve current app info: %w", err)
 		}
 		return client.GetAgeRatingDeclarationForAppInfo(ctx, appInfoID, opts...)
 	}
+}
+
+// While a new version is being prepared, an app has a live and an editable app
+// info; like shared.ResolveAppInfoIDWithFlag, select the editable one. Unlike it,
+// read every page and skip historical app infos.
+func resolveAppInfoIDForApp(ctx context.Context, client *asc.Client, appID string) (string, error) {
+	candidates, err := client.ListAppInfoCandidatesForApp(ctx, appID)
+	if err != nil {
+		return "", err
+	}
+	current := asc.CurrentAppInfoCandidates(candidates)
+	if len(current) == 0 {
+		return "", fmt.Errorf(
+			"no current app info found for app %q (%s); run `asc apps info list --app %q` to inspect candidates",
+			appID,
+			asc.FormatAppInfoCandidates(candidates),
+			appID,
+		)
+	}
+	if len(current) == 1 && current[0].ID != "" {
+		return current[0].ID, nil
+	}
+	if editableID, ok := asc.AutoResolveAppInfoIDByVersionState(current, "PREPARE_FOR_SUBMISSION"); ok {
+		fmt.Fprintf(os.Stderr, "Multiple app infos found for app %s, auto-selected %s (PREPARE_FOR_SUBMISSION).\n", appID, editableID)
+		return editableID, nil
+	}
+	return "", shared.AmbiguousAppInfoError(appID, "--app-info-id", current)
 }
 
 func resolveAgeRatingDeclarationID(ctx context.Context, client *asc.Client, appID, appInfoID, versionID string) (string, error) {
