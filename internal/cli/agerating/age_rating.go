@@ -396,16 +396,13 @@ func fetchAgeRatingDeclaration(ctx context.Context, client *asc.Client, appID, a
 	}
 }
 
-// resolveAppInfoIDForApp ignores historical app infos. While a new version is
-// being prepared, an app has a live and an editable app info; like
-// shared.ResolveAppInfoIDWithFlag, this selects the editable one.
+// While a new version is being prepared, an app has a live and an editable app
+// info; like shared.ResolveAppInfoIDWithFlag, select the editable one. Unlike it,
+// read every page and skip historical app infos.
 func resolveAppInfoIDForApp(ctx context.Context, client *asc.Client, appID string) (string, error) {
 	candidates, err := client.ListAppInfoCandidatesForApp(ctx, appID)
 	if err != nil {
 		return "", err
-	}
-	if len(candidates) == 0 {
-		return "", fmt.Errorf("no app info found for app %q", appID)
 	}
 	current := asc.CurrentAppInfoCandidates(candidates)
 	if len(current) == 0 {

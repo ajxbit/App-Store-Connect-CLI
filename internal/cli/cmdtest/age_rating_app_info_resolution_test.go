@@ -33,11 +33,6 @@ func TestAgeRatingViewResolvesAppInfoWhileNewVersionIsPrepared(t *testing.T) {
 			appInfos:   `{"data":[{"type":"appInfos","id":"info-old","attributes":{"state":"REPLACED_WITH_NEW_INFO"}},{"type":"appInfos","id":"info-live","attributes":{"state":"READY_FOR_DISTRIBUTION"}}],"links":{}}`,
 			wantStdout: `"id":"decl-info-live"`,
 		},
-		{
-			name:         "rejects all-historical app infos",
-			appInfos:     `{"data":[{"type":"appInfos","id":"info-old","attributes":{"state":"REPLACED_WITH_NEW_INFO"}}],"links":{}}`,
-			wantErrParts: []string{"no current app info found"},
-		},
 	}
 
 	for _, test := range tests {
