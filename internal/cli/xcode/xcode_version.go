@@ -253,6 +253,7 @@ fail without launching xcodebuild.
 Examples:
   asc xcode version edit --version "1.3.0"
   asc xcode version edit --build-number "42"
+  asc xcode version edit --build-number "42" --project ./ios/App.xcodeproj
   asc xcode version edit --target Widget --configuration Release --build-number "42"
   asc xcode version edit --next-build-number --app "com.example.app"`,
 		FlagSet:   fs,
