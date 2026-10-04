@@ -290,8 +290,8 @@ asc release stage --app "123456789" --version "1.2.3" --build-id "BUILD_ID" --co
 # Canonical upload + attach + submit command
 asc publish appstore --app "123456789" --ipa "/path/to/MyApp.ipa" --version "1.2.3" --submit --confirm
 
-# Monitor status after submission
-asc status --app "123456789" --watch
+# Wait for the App Review decision (exit 0 approved, 1 rejected, 7 still pending at --timeout)
+asc status --app "123456789" --until review-done --timeout 2h
 ```
 
 Lower-level submission lifecycle commands (for debugging or partial workflows):

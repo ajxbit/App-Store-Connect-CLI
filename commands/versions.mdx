@@ -274,18 +274,50 @@ asc versions delete --version-id "VERSION_ID" --confirm
 
 Attach a build to an app store version.
 
-<ParamField path="--version-id" type="string" required>
+Select the version with `--version-id`, or with `--app` and `--version`. Select
+the build with `--build-id`, `--build-number`, or `--latest`. `--build-number`
+and `--latest` only match builds of the version's app, version string, and
+platform, and the selected build must be `VALID` unless `--wait` waits for
+processing first.
+
+<ParamField path="--version-id" type="string">
   App Store version ID
 </ParamField>
 
-<ParamField path="--build-id" type="string" required>
+<ParamField path="--app" type="string">
+  App Store Connect app ID, bundle ID, or exact app name. Required with `--version`, `--platform`, `--build-number`, or `--latest`
+</ParamField>
+
+<ParamField path="--version" type="string">
+  App Store version string, resolved with `--app` and `--platform`
+</ParamField>
+
+<ParamField path="--platform" type="string" default="IOS">
+  Platform: `IOS`, `MAC_OS`, `TV_OS`, `VISION_OS`
+</ParamField>
+
+<ParamField path="--build-id" type="string">
   Build ID to attach
+</ParamField>
+
+<ParamField path="--build-number" type="string">
+  Build number (CFBundleVersion) to attach from the version's train
+</ParamField>
+
+<ParamField path="--latest" type="boolean">
+  Attach the most recently uploaded build of the version's train. Right after an upload, prefer `--build-number`
+</ParamField>
+
+<ParamField path="--wait" type="boolean">
+  Wait for the selected build to finish processing before attaching. Use `--timeout` and `--poll-interval` to tune it
 </ParamField>
 
 **Examples:**
 
 ```bash  theme={null}
 asc versions attach-build --version-id "VERSION_ID" --build-id "BUILD_ID"
+asc versions attach-build --app "123456789" --version "1.2.0" --build-number "45"
+asc versions attach-build --app "123456789" --version "1.2.0" --build-number "46" --wait --timeout 30m
 ```
 
 **Response:**
@@ -389,7 +421,7 @@ The delete command returns:
 
 ```bash  theme={null}
 asc versions create --app "123456789" --version "2.0.0" --platform IOS
-asc versions attach-build --version-id "VERSION_ID" --build-id "BUILD_ID"
+asc versions attach-build --app "123456789" --version "2.0.0" --build-number "45"
 ```
 
 ### List versions in a specific state

@@ -167,6 +167,12 @@ var removedFlagRules = []removedFlagRule{
 	{
 		flag:        "build",
 		commands:    buildIDAliasCommands,
+		requireFlag: "build-number",
+		replacement: "`--build-id` or `--build-number`",
+	},
+	{
+		flag:        "build",
+		commands:    buildIDAliasCommands,
 		replacement: "`--build-id`",
 	},
 	{

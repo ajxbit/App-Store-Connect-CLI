@@ -4071,12 +4071,12 @@ func TestVersionsValidationErrors(t *testing.T) {
 		{
 			name:    "attach missing version id",
 			args:    []string{"versions", "attach-build", "--build-id", "BUILD_123"},
-			wantErr: "Error: --version-id is required",
+			wantErr: "Error: --version-id or --version is required",
 		},
 		{
 			name:    "attach missing build",
 			args:    []string{"versions", "attach-build", "--version-id", "VERSION_123"},
-			wantErr: "Error: --build-id is required",
+			wantErr: "Error: --build-id, --build-number, or --latest is required",
 		},
 		{
 			name:    "release missing version id",
