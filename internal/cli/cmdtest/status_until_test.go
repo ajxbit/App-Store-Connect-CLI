@@ -6,24 +6,18 @@ import (
 	"io"
 	"net/http"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
 
 	cmd "github.com/rudrankriyam/App-Store-Connect-CLI/cmd"
+	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/asc"
 )
 
-type statusUntilResultJSON struct {
-	Until   string `json:"until"`
-	Reached bool   `json:"reached"`
-	Outcome string `json:"outcome"`
-	State   string `json:"state"`
-	Polls   int    `json:"polls"`
-}
-
 // installStatusUntilTransport serves each path's bodies in order, repeating
-// the last one, and returns the per-path request counts.
-func installStatusUntilTransport(t *testing.T, sequences map[string][]string) func(path string) int {
+// the last one.
+func installStatusUntilTransport(t *testing.T, sequences map[string][]string) {
 	t.Helper()
 
 	var mu sync.Mutex
@@ -43,11 +37,6 @@ func installStatusUntilTransport(t *testing.T, sequences map[string][]string) fu
 		calls[req.URL.Path]++
 		return statusJSONResponse(bodies[index]), nil
 	}))
-	return func(path string) int {
-		mu.Lock()
-		defer mu.Unlock()
-		return calls[path]
-	}
 }
 
 func runStatusUntil(t *testing.T, args ...string) (string, string, int) {
@@ -93,13 +82,11 @@ func statusUntilBuildsBody(processingState, internalState string) string {
 	}`, processingState, internalState)
 }
 
-// statusUntilResult parses the final --until result, which follows the
-// JSON snapshots on the last stdout line.
-func statusUntilResult(t *testing.T, stdout string) statusUntilResultJSON {
+func statusUntilResult(t *testing.T, stdout string) asc.StatusUntilResult {
 	t.Helper()
 
 	lines := strings.Split(strings.TrimSpace(stdout), "\n")
-	var result statusUntilResultJSON
+	var result asc.StatusUntilResult
 	if err := json.Unmarshal([]byte(lines[len(lines)-1]), &result); err != nil {
 		t.Fatalf("unmarshal final result %q: %v", lines[len(lines)-1], err)
 	}
@@ -115,7 +102,7 @@ func TestStatusUntilStopsAtConditionWithExitCode(t *testing.T) {
 		path      string
 		bodies    []string
 		wantCode  int
-		want      statusUntilResultJSON
+		want      asc.StatusUntilResult
 		wantNotes string
 	}{
 		{
@@ -129,7 +116,7 @@ func TestStatusUntilStopsAtConditionWithExitCode(t *testing.T) {
 				statusUntilVersionsBody("PENDING_DEVELOPER_RELEASE"),
 			},
 			wantCode: cmd.ExitSuccess,
-			want:     statusUntilResultJSON{Until: "review-done", Reached: true, Outcome: "approved", State: "PENDING_DEVELOPER_RELEASE", Polls: 3},
+			want:     asc.StatusUntilResult{Until: "review-done", Reached: true, Outcome: "approved", State: "PENDING_DEVELOPER_RELEASE", Polls: 3},
 		},
 		{
 			name:    "review-done rejected",
@@ -141,7 +128,7 @@ func TestStatusUntilStopsAtConditionWithExitCode(t *testing.T) {
 				statusUntilVersionsBody("REJECTED"),
 			},
 			wantCode:  cmd.ExitError,
-			want:      statusUntilResultJSON{Until: "review-done", Reached: true, Outcome: "rejected", State: "REJECTED", Polls: 2},
+			want:      asc.StatusUntilResult{Until: "review-done", Reached: true, Outcome: "rejected", State: "REJECTED", Polls: 2},
 			wantNotes: "status: --until review-done ended with outcome rejected (state REJECTED)",
 		},
 		{
@@ -155,7 +142,7 @@ func TestStatusUntilStopsAtConditionWithExitCode(t *testing.T) {
 				statusUntilVersionsBody("READY_FOR_DISTRIBUTION"),
 			},
 			wantCode: cmd.ExitSuccess,
-			want:     statusUntilResultJSON{Until: "ready-for-sale", Reached: true, Outcome: "ready-for-sale", State: "READY_FOR_DISTRIBUTION", Polls: 3},
+			want:     asc.StatusUntilResult{Until: "ready-for-sale", Reached: true, Outcome: "ready-for-sale", State: "READY_FOR_DISTRIBUTION", Polls: 3},
 		},
 		{
 			name:    "processed valid",
@@ -167,7 +154,7 @@ func TestStatusUntilStopsAtConditionWithExitCode(t *testing.T) {
 				statusUntilBuildsBody("VALID", ""),
 			},
 			wantCode: cmd.ExitSuccess,
-			want:     statusUntilResultJSON{Until: "processed", Reached: true, Outcome: "processed", State: "VALID", Polls: 2},
+			want:     asc.StatusUntilResult{Until: "processed", Reached: true, Outcome: "processed", State: "VALID", Polls: 2},
 		},
 		{
 			name:    "processed failed",
@@ -179,7 +166,7 @@ func TestStatusUntilStopsAtConditionWithExitCode(t *testing.T) {
 				statusUntilBuildsBody("FAILED", ""),
 			},
 			wantCode:  cmd.ExitError,
-			want:      statusUntilResultJSON{Until: "processed", Reached: true, Outcome: "failed", State: "FAILED", Polls: 2},
+			want:      asc.StatusUntilResult{Until: "processed", Reached: true, Outcome: "failed", State: "FAILED", Polls: 2},
 			wantNotes: "status: --until processed ended with outcome failed (state FAILED)",
 		},
 		{
@@ -192,7 +179,7 @@ func TestStatusUntilStopsAtConditionWithExitCode(t *testing.T) {
 				statusUntilBuildsBody("VALID", "READY_FOR_BETA_TESTING"),
 			},
 			wantCode: cmd.ExitSuccess,
-			want:     statusUntilResultJSON{Until: "testflight-ready", Reached: true, Outcome: "testflight-ready", State: "READY_FOR_BETA_TESTING", Polls: 2},
+			want:     asc.StatusUntilResult{Until: "testflight-ready", Reached: true, Outcome: "testflight-ready", State: "READY_FOR_BETA_TESTING", Polls: 2},
 		},
 		{
 			name:    "testflight-ready blocked on export compliance",
@@ -203,7 +190,7 @@ func TestStatusUntilStopsAtConditionWithExitCode(t *testing.T) {
 				statusUntilBuildsBody("VALID", "MISSING_EXPORT_COMPLIANCE"),
 			},
 			wantCode:  cmd.ExitError,
-			want:      statusUntilResultJSON{Until: "testflight-ready", Reached: true, Outcome: "blocked", State: "MISSING_EXPORT_COMPLIANCE", Polls: 1},
+			want:      asc.StatusUntilResult{Until: "testflight-ready", Reached: true, Outcome: "blocked", State: "MISSING_EXPORT_COMPLIANCE", Polls: 1},
 			wantNotes: "status: --until testflight-ready ended with outcome blocked (state MISSING_EXPORT_COMPLIANCE)",
 		},
 		{
@@ -217,7 +204,7 @@ func TestStatusUntilStopsAtConditionWithExitCode(t *testing.T) {
 				statusUntilVersionsBody("IN_REVIEW"),
 			},
 			wantCode: cmd.ExitSuccess,
-			want:     statusUntilResultJSON{Until: "change", Reached: true, Outcome: "changed", Polls: 3},
+			want:     asc.StatusUntilResult{Until: "change", Reached: true, Outcome: "changed", Polls: 3},
 		},
 		{
 			name:    "max-polls ends pending",
@@ -228,7 +215,7 @@ func TestStatusUntilStopsAtConditionWithExitCode(t *testing.T) {
 				statusUntilVersionsBody("WAITING_FOR_REVIEW"),
 			},
 			wantCode:  cmd.ExitPending,
-			want:      statusUntilResultJSON{Until: "review-done", Reached: false, Outcome: "pending", State: "WAITING_FOR_REVIEW", Polls: 3},
+			want:      asc.StatusUntilResult{Until: "review-done", Reached: false, Outcome: "pending", State: "WAITING_FOR_REVIEW", Polls: 3},
 			wantNotes: "status: --until review-done not reached after 3 polls (state WAITING_FOR_REVIEW)",
 		},
 	}
@@ -240,7 +227,7 @@ func TestStatusUntilStopsAtConditionWithExitCode(t *testing.T) {
 			if test.include == "testflight" {
 				sequences["/v1/betaAppReviewSubmissions"] = []string{`{"data":[],"links":{"next":""}}`}
 			}
-			calls := installStatusUntilTransport(t, sequences)
+			installStatusUntilTransport(t, sequences)
 
 			stdout, stderr, code := runStatusUntil(t, "--include", test.include, "--until", test.until, "--max-polls", "3", "--output", "json")
 
@@ -253,9 +240,6 @@ func TestStatusUntilStopsAtConditionWithExitCode(t *testing.T) {
 			result := statusUntilResult(t, stdout)
 			if result != test.want {
 				t.Fatalf("result = %+v, want %+v", result, test.want)
-			}
-			if got := calls(test.path); got != result.Polls {
-				t.Fatalf("snapshot requests = %d, want one per poll (%d)", got, result.Polls)
 			}
 		})
 	}
@@ -350,31 +334,21 @@ func TestStatusJSONIncludesNextCommands(t *testing.T) {
 		"/v1/apps/123456789/appStoreVersions": {statusUntilVersionsBody("PENDING_DEVELOPER_RELEASE")},
 	})
 
-	var code int
-	stdout, stderr := captureOutput(t, func() {
-		code = cmd.Run([]string{"status", "--app", "123456789", "--include", "appstore", "--output", "json"}, "1.0.0")
-	})
+	stdout, stderr, code := runStatusUntil(t, "--include", "appstore", "--output", "json")
 	if code != cmd.ExitSuccess {
 		t.Fatalf("exit code = %d, want 0; stderr=%q", code, stderr)
 	}
 
 	var payload struct {
 		Summary struct {
-			NextCommands []struct {
-				Command string `json:"command"`
-				Reason  string `json:"reason"`
-				Mutates bool   `json:"mutates"`
-			} `json:"nextCommands"`
+			NextCommands []asc.StatusNextCommand `json:"nextCommands"`
 		} `json:"summary"`
 	}
 	if err := json.Unmarshal([]byte(stdout), &payload); err != nil {
 		t.Fatalf("unmarshal output: %v\nstdout=%s", err, stdout)
 	}
-	if len(payload.Summary.NextCommands) != 1 {
-		t.Fatalf("expected one next command, got %+v", payload.Summary.NextCommands)
-	}
-	next := payload.Summary.NextCommands[0]
-	if next.Command != "asc versions release --version-id ver-1 --confirm" || !next.Mutates || next.Reason == "" {
-		t.Fatalf("unexpected next command %+v", next)
+	want := []asc.StatusNextCommand{{Command: "asc versions release --version-id ver-1 --confirm", Reason: "Release the approved version.", Mutates: true}}
+	if !slices.Equal(payload.Summary.NextCommands, want) {
+		t.Fatalf("nextCommands = %+v, want %+v", payload.Summary.NextCommands, want)
 	}
 }

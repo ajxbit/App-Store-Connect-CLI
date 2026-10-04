@@ -338,13 +338,7 @@ func watchDashboard(ctx context.Context, client *asc.Client, appID string, platf
 			seen = current
 		}
 
-		switch {
-		case until == untilChange && changed:
-			check = untilCheck{outcome: "changed", positive: true}
-		case until != "" && until != untilChange:
-			check = evaluateUntil(until, resp)
-		}
-		if check.outcome != "" {
+		if check = evaluateUntil(until, resp, changed); check.outcome != "" {
 			return finish()
 		}
 

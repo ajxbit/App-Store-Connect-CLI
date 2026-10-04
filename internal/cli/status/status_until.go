@@ -48,8 +48,12 @@ type untilCheck struct {
 	positive bool
 }
 
-func evaluateUntil(until string, resp *dashboardResponse) untilCheck {
+func evaluateUntil(until string, resp *dashboardResponse, changed bool) untilCheck {
 	switch until {
+	case untilChange:
+		if changed {
+			return untilCheck{outcome: "changed", positive: true}
+		}
 	case untilReviewDone, untilReadyForSale:
 		state := ""
 		if resp.AppStore != nil {
@@ -102,9 +106,6 @@ func isApprovedAppStoreState(state string) bool {
 	return shared.IsLiveAppStoreVersionState(state)
 }
 
-// finishUntil prints the final --until result and maps it to the exit
-// contract: 0 for a positive outcome, 1 for a negative one, and the pending
-// code 7 when the wait ended first.
 func finishUntil(until string, check untilCheck, polls int, output string, pretty bool) error {
 	result := &asc.StatusUntilResult{
 		Until:   until,
@@ -145,9 +146,8 @@ func finishUntil(until string, check untilCheck, polls int, output string, prett
 	return shared.NewPendingError(message)
 }
 
-// resolveNextCommands suggests runnable commands for common release states.
-// Every value is shell-quoted; a command whose values cannot be quoted is
-// omitted rather than approximated. Read-only mode omits mutating commands.
+// resolveNextCommands omits a command whose values cannot be shell-quoted
+// rather than print an approximation.
 func resolveNextCommands(resp *dashboardResponse, appID string, platform string) []asc.StatusNextCommand {
 	commands := []asc.StatusNextCommand{}
 	rootFlags, ok := shared.RootFlagsForReinvocation()

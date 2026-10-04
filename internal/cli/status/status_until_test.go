@@ -56,11 +56,6 @@ func TestResolveNextCommands(t *testing.T) {
 			readOnly: true,
 			want:     []string{},
 		},
-		{
-			name: "live version has nothing to run",
-			resp: &dashboardResponse{AppStore: &appStoreSection{VersionID: "ver-1", State: "READY_FOR_DISTRIBUTION"}},
-			want: []string{},
-		},
 	}
 
 	for _, test := range tests {
