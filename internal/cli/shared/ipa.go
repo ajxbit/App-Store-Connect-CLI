@@ -59,11 +59,17 @@ func OpenValidatedPKGPath(pkgPath string) (*os.File, os.FileInfo, error) {
 
 func openValidatedArtifactPath(artifactPath, artifactName, flagName string) (*os.File, os.FileInfo, error) {
 	file, fileInfo, err := secureopen.OpenExistingRegularFileNoFollow(artifactPath, artifactName, flagName)
-	if errors.Is(err, os.ErrNotExist) {
+	switch {
+	case err == nil:
+		return file, fileInfo, nil
+	case errors.Is(err, os.ErrNotExist):
 		notFound := NewErrorWithCause(fmt.Errorf("%s file not found: %q", flagName, artifactPath), err)
 		return nil, nil, WithDiagnostic(NewValidationError(notFound), DiagnosticFileNotFound, flagName)
+	case errors.Is(err, os.ErrPermission):
+		return nil, nil, WithDiagnostic(NewValidationError(err), DiagnosticFilePermissionDenied, flagName)
+	default:
+		return nil, nil, WithDiagnostic(NewValidationError(err), DiagnosticInvalidInput, flagName)
 	}
-	return file, fileInfo, err
 }
 
 // ExtractBundleInfoFromIPA reads the top-level app's bundle identifier and

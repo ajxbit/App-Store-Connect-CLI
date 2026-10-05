@@ -837,9 +837,15 @@ func runtimeOutcomeKind(err error, exitCode int, eventContext telemetry.EventCon
 	}
 }
 
+// isPublicStorefrontError reports an HTTP status from an endpoint that does not
+// use App Store Connect credentials, so a 401 or 403 is not an auth failure.
 func isPublicStorefrontError(err error) bool {
 	var storefrontError interface{ PublicStorefrontError() bool }
-	return errors.As(err, &storefrontError) && storefrontError.PublicStorefrontError()
+	if errors.As(err, &storefrontError) && storefrontError.PublicStorefrontError() {
+		return true
+	}
+	var uploadError interface{ PresignedUploadError() bool }
+	return errors.As(err, &uploadError) && uploadError.PresignedUploadError()
 }
 
 func httpStatusFromError(err error) int {
