@@ -178,7 +178,7 @@ asc builds list --app APP_ID --paginate
 NEXT=""
 while true; do
   if [ -n "$NEXT" ]; then
-    RESPONSE=$(asc apps list --limit 50 --next "$NEXT" --output json)
+    RESPONSE=$(asc apps list --next "$NEXT" --output json)
   else
     RESPONSE=$(asc apps list --limit 50 --output json)
   fi

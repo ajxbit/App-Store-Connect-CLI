@@ -1320,11 +1320,15 @@ func RemoveAllCredentials() error {
 }
 
 // RemoveAllCredentialsWithOptions removes all stored credentials from the
-// keychain and the config files that opts selects.
+// keychain and the config files that opts selects. ASC_BYPASS_KEYCHAIN leaves
+// the keychain untouched.
 func RemoveAllCredentialsWithOptions(opts RemoveOptions) error {
 	// Always attempt to clear config credentials first, regardless of keychain state
 	// This ensures config is cleaned even if keychain has issues (e.g., locked, read-only)
 	configErr := clearConfigCredentials(opts.IncludeGlobalConfig)
+	if shouldBypassKeychain() {
+		return configErr
+	}
 
 	// Try to clear keychain as well, but don't fail if keychain has issues
 	keychainErr := removeAllFromKeychain()
