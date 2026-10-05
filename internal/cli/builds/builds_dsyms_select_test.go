@@ -1,6 +1,8 @@
 package builds
 
 import (
+	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -118,5 +120,85 @@ func TestSaveSingleDSYMVerifiesExistingFileContent(t *testing.T) {
 				t.Fatalf("existing file changed to %q", data)
 			}
 		})
+	}
+}
+
+func TestResolveLiveDSYMTargetAttachmentValidation(t *testing.T) {
+	for _, test := range []struct {
+		name, link, attributes, wantError string
+		exclude                           bool
+	}{
+		{"missing", `null`, ``, "no attached build", false},
+		{"expired excluded", `{"type":"builds","id":"attached"}`, `,"expired":true`, "expired attached build", true},
+		{"expired allowed", `{"type":"builds","id":"attached"}`, `,"expired":true`, "", false},
+		{"unknown expiration", `{"type":"builds","id":"attached"}`, ``, "", true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			client := newBuildsWaitTestClient(t, func(req *http.Request) (*http.Response, error) {
+				switch req.URL.Path {
+				case "/v1/appStoreVersions/live/relationships/build":
+					return buildsWaitJSONResponse(200, `{"data":`+test.link+`}`)
+				case "/v1/builds/attached":
+					return buildsWaitJSONResponse(200, `{"data":{"type":"builds","id":"attached","attributes":{"version":"20","uploadedDate":"2026-01-01T00:00:00Z"`+test.attributes+`}}}`)
+				default:
+					t.Fatalf("unexpected request: %s", req.URL.Path)
+					return nil, nil
+				}
+			})
+			targets, err := resolveLiveDSYMTarget(t.Context(), client, liveAppVersion{ID: "live", Version: "2.0"}, test.exclude)
+			if test.wantError != "" {
+				if err == nil || !strings.Contains(err.Error(), test.wantError) {
+					t.Fatalf("targets=%v err=%v", targets, err)
+				}
+			} else if err != nil || len(targets) != 1 || targets[0].ID != "attached" || targets[0].AppVersion != "2.0" || targets[0].BuildNumber != "20" {
+				t.Fatalf("targets=%v err=%v", targets, err)
+			}
+		})
+	}
+}
+
+func TestResolveLiveDSYMTargetPreservesCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	client := newBuildsWaitTestClient(t, func(req *http.Request) (*http.Response, error) { return nil, req.Context().Err() })
+	_, err := resolveLiveDSYMTarget(ctx, client, liveAppVersion{ID: "live"}, false)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestResolveSelectedDSYMLiveRangesStillListBuilds(t *testing.T) {
+	for _, after := range []*time.Time{nil, func() *time.Time { value := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC); return &value }()} {
+		client := newBuildsWaitTestClient(t, func(req *http.Request) (*http.Response, error) {
+			switch req.URL.Path {
+			case "/v1/apps/123/appStoreVersions":
+				return buildsWaitJSONResponse(200, `{"data":[{"type":"appStoreVersions","id":"live","attributes":{"platform":"IOS","versionString":"2.0","appStoreState":"READY_FOR_SALE","createdDate":"2026-01-01T00:00:00Z"}}]}`)
+			case "/v1/builds":
+				return buildsWaitJSONResponse(200, `{"data":[{"type":"builds","id":"newer","attributes":{"version":"21","uploadedDate":"2026-02-01T00:00:00Z"},"relationships":{"preReleaseVersion":{"data":{"id":"prv"}}}}],"included":[{"type":"preReleaseVersions","id":"prv","attributes":{"version":"2.0","platform":"IOS"}}]}`)
+			default:
+				t.Fatalf("range requested attachment: %s", req.URL.Path)
+				return nil, nil
+			}
+		})
+		targets, err := resolveSelectedDSYMTargets(t.Context(), client, dsymSelection{Live: true, All: true, After: after, Resolve: ResolveBuildOptions{AppID: "123"}})
+		if err != nil || len(targets) != 1 || targets[0].ID != "newer" {
+			t.Fatalf("targets=%v err=%v", targets, err)
+		}
+	}
+}
+
+func TestResolveLiveDSYMTargetPreservesAPIErrors(t *testing.T) {
+	failure := errors.New("provider sentinel")
+	for _, failBuild := range []bool{false, true} {
+		client := newBuildsWaitTestClient(t, func(req *http.Request) (*http.Response, error) {
+			if failBuild && strings.HasSuffix(req.URL.Path, "/relationships/build") {
+				return buildsWaitJSONResponse(200, `{"data":{"type":"builds","id":"attached"}}`)
+			}
+			return nil, failure
+		})
+		_, err := resolveLiveDSYMTarget(t.Context(), client, liveAppVersion{ID: "live"}, false)
+		if !errors.Is(err, failure) {
+			t.Fatalf("err=%v", err)
+		}
 	}
 }
