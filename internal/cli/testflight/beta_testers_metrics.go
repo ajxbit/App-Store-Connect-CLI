@@ -51,6 +51,9 @@ Examples:
 			if err := shared.ValidateNextURL(*next); err != nil {
 				return shared.UsageErrorfCtx(ctx, "testflight beta-testers metrics: %v", err)
 			}
+			if err := shared.RejectNextFlagConflicts(fs, *next, "testflight testers metrics", "period"); err != nil {
+				return err
+			}
 
 			testerValue := strings.TrimSpace(*testerID)
 			aliasValue := strings.TrimSpace(*aliasID)
