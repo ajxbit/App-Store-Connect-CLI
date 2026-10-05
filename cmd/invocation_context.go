@@ -14,6 +14,7 @@ import (
 
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/cli/registry"
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/cli/shared"
+	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/cli/shared/errfmt"
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/cli/shared/suggest"
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/telemetry"
 	webcore "github.com/rudrankriyam/App-Store-Connect-CLI/internal/web"
@@ -783,7 +784,7 @@ func runtimeFailureContext(analysis invocationAnalysis, err error, exitCode int)
 		eventContext.FailureStage = telemetry.FailureStageValidation
 	case shared.IsValidationError(err), errors.Is(err, shared.ErrPending):
 		eventContext.FailureStage = telemetry.FailureStageValidation
-	case errors.Is(err, context.DeadlineExceeded):
+	case errors.Is(err, context.DeadlineExceeded), errfmt.IsNetworkFailure(err):
 		eventContext.FailureStage = telemetry.FailureStageRequest
 	case eventContext.HTTPStatus == 409:
 		eventContext.ErrorKind = telemetry.ErrorKindAPIConflict
@@ -837,9 +838,15 @@ func runtimeOutcomeKind(err error, exitCode int, eventContext telemetry.EventCon
 	}
 }
 
+// isPublicStorefrontError reports an HTTP status from an endpoint that does not
+// use App Store Connect credentials, so a 401 or 403 is not an auth failure.
 func isPublicStorefrontError(err error) bool {
 	var storefrontError interface{ PublicStorefrontError() bool }
-	return errors.As(err, &storefrontError) && storefrontError.PublicStorefrontError()
+	if errors.As(err, &storefrontError) && storefrontError.PublicStorefrontError() {
+		return true
+	}
+	var uploadError interface{ PresignedUploadError() bool }
+	return errors.As(err, &uploadError) && uploadError.PresignedUploadError()
 }
 
 func httpStatusFromError(err error) int {
