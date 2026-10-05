@@ -2,6 +2,7 @@ package validate
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -290,6 +291,12 @@ func runValidate(ctx context.Context, opts validateOptions) error {
 			CheckURLs: opts.CheckURLs,
 			IPA:       localIPA,
 		})
+		if ambiguous, ok := errors.AsType[*shared.AmbiguousSelectionError](err); ok {
+			message := "validate: " + err.Error()
+			fmt.Fprintf(os.Stderr, "Error: %s\n", message)
+			reported := shared.WithDiagnostic(shared.NewReportedUsageError(shared.UsageErrorInvalidValue, message), shared.DiagnosticInvalidInput, ambiguous.Flag)
+			return shared.NewErrorWithCause(reported, err)
+		}
 	}
 	if err != nil {
 		if !opts.Deep || !asc.IsRequiredAgreementError(err) {
@@ -382,7 +389,8 @@ func resolveVersionID(ctx context.Context, client *asc.Client, appID, version, p
 		if strings.TrimSpace(platform) != "" {
 			notFound = fmt.Errorf("app store version not found for version %q and platform %q", version, platform)
 		}
-		return "", shared.WithAppStoreVersionNotFoundDiagnostics(ctx, client, appID, version, platform, notFound)
+		notFound = shared.WithAppStoreVersionNotFoundDiagnostics(ctx, client, appID, version, platform, notFound)
+		return "", shared.WithDiagnostic(shared.NewValidationError(notFound), shared.DiagnosticResourceNotFound, "--version")
 	}
 	if len(resp.Data) > 1 || pageHasNext {
 		ambiguous := shared.AmbiguousAppStoreVersionError(version, platform, resp.Data, "--platform", "--version-id")

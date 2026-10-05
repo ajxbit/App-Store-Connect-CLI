@@ -60,11 +60,13 @@ func ResolveOwnedAppStoreVersionByID(ctx context.Context, client *asc.Client, ap
 		return asc.Resource[asc.AppStoreVersionAttributes]{}, err
 	}
 	if !strings.EqualFold(strings.TrimSpace(relatedAppID), strings.TrimSpace(appID)) {
-		return asc.Resource[asc.AppStoreVersionAttributes]{}, fmt.Errorf("version %q belongs to app %q, not %q", trimmedVersionID, relatedAppID, appID)
+		mismatch := fmt.Errorf("version %q belongs to app %q, not %q", trimmedVersionID, relatedAppID, appID)
+		return asc.Resource[asc.AppStoreVersionAttributes]{}, WithDiagnostic(NewValidationError(mismatch), DiagnosticInvalidInput, "--version-id")
 	}
 	resolvedPlatform := strings.TrimSpace(string(resp.Data.Attributes.Platform))
 	if strings.TrimSpace(platform) != "" && !strings.EqualFold(resolvedPlatform, strings.TrimSpace(platform)) {
-		return asc.Resource[asc.AppStoreVersionAttributes]{}, fmt.Errorf("version %q is on platform %q, not %q", strings.TrimSpace(resp.Data.ID), resolvedPlatform, strings.TrimSpace(platform))
+		mismatch := fmt.Errorf("version %q is on platform %q, not %q", strings.TrimSpace(resp.Data.ID), resolvedPlatform, strings.TrimSpace(platform))
+		return asc.Resource[asc.AppStoreVersionAttributes]{}, WithDiagnostic(NewValidationError(mismatch), DiagnosticInvalidInput, "--version-id")
 	}
 	return resp.Data, nil
 }
