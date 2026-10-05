@@ -4,13 +4,16 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
+	"net/url"
 	"regexp"
 	"strings"
 
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/asc"
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/cli/shared"
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/readonly"
+	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/urlsanitize"
 )
 
 type ClassifiedError struct {
@@ -22,6 +25,7 @@ const (
 	requestTimeoutHint = "Increase the request timeout (e.g. set `ASC_TIMEOUT=90s`)."
 	uploadTimeoutHint  = "Increase the upload timeout (e.g. set `ASC_UPLOAD_TIMEOUT=600s`)."
 	systemStatusHint   = "Check Apple's service health with `asc system-status --service \"App Store Connect\"`."
+	networkHint        = "Check your network connection and proxy settings (HTTPS_PROXY), then retry."
 )
 
 func Classify(err error) ClassifiedError {
@@ -51,6 +55,11 @@ func Classify(err error) ClassifiedError {
 	}
 
 	if errors.Is(err, context.DeadlineExceeded) {
+		// A wait that already names its --timeout flag needs no second,
+		// conflicting knob.
+		if strings.Contains(err.Error(), "--timeout") {
+			return ClassifiedError{Message: err.Error()}
+		}
 		hint := requestTimeoutHint
 		if isUploadTimeoutError(err) {
 			hint = uploadTimeoutHint
@@ -59,6 +68,10 @@ func Classify(err error) ClassifiedError {
 			Message: err.Error(),
 			Hint:    hint,
 		}
+	}
+
+	if IsNetworkFailure(err) {
+		return ClassifiedError{Message: err.Error(), Hint: networkHint}
 	}
 
 	var apiErr *asc.APIError
@@ -109,6 +122,20 @@ func Classify(err error) ClassifiedError {
 		Message: err.Error(),
 		Hint:    "",
 	}
+}
+
+// IsNetworkFailure reports whether err is a failure to reach a server (dial,
+// DNS, TLS, proxy, or a dropped connection) rather than a server response or
+// local work. It matches the transport error types, never a bare io.EOF, so a
+// truncated local file is not mistaken for a network problem.
+func IsNetworkFailure(err error) bool {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	_, isURLError := errors.AsType[*url.Error](err)
+	_, isTransportError := errors.AsType[*urlsanitize.TransportError](err)
+	_, isOpError := errors.AsType[*net.OpError](err)
+	return isURLError || isTransportError || isOpError
 }
 
 // appNotFoundIDPattern matches Apple's 404 detail for an unknown app, such as
