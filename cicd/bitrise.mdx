@@ -445,7 +445,7 @@ workflows:
       - git::https://github.com/rudrankriyam/steps-setup-asc.git@main:
           inputs:
             - mode: run
-            - command: asc apps info edit --app "$APP_ID" --locale en-US
+            - command: asc apps info edit --app "$APP_ID" --locale en-US --description "$(cat metadata/en-US/description.txt)"
 ```
 
 ## Debugging

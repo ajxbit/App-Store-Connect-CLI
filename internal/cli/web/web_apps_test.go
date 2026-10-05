@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/cookiejar"
+	"net/http/httptest"
 	"os"
 	"strings"
 	"testing"
@@ -1656,5 +1657,79 @@ func TestWebAppsDeleteRequiresConfirmBeforeResolvingSession(t *testing.T) {
 	}
 	if resolveCalled {
 		t.Fatal("did not expect session resolution before confirm validation")
+	}
+}
+
+func serveBundleIDPrefixMatches(t *testing.T, pages map[string]string) *[]string {
+	t.Helper()
+	var writes []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case req.Method == http.MethodGet && req.URL.Path == "/v1/bundleIds":
+			_, _ = io.WriteString(w, pages[req.URL.Query().Get("cursor")])
+		case req.Method == http.MethodPost && req.URL.Path == "/v1/bundleIds":
+			body, _ := io.ReadAll(req.Body)
+			writes = append(writes, "POST "+string(body))
+			w.WriteHeader(http.StatusCreated)
+			_, _ = io.WriteString(w, `{"data":{"type":"bundleIds","id":"id-new","attributes":{"identifier":"com.acme.app"}}}`)
+		case req.Method == http.MethodDelete:
+			writes = append(writes, "DELETE "+req.URL.Path)
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			t.Errorf("unexpected request: %s %s", req.Method, req.URL.String())
+			w.WriteHeader(http.StatusInternalServerError)
+		}
+	}))
+	t.Cleanup(server.Close)
+	setAppCreateASCClient(t, server)
+	return &writes
+}
+
+func TestEnsureBundleIDExistsCreatesWhenOnlyPrefixSiblingsMatch(t *testing.T) {
+	writes := serveBundleIDPrefixMatches(t, map[string]string{
+		"": `{"data":[{"type":"bundleIds","id":"id-widget","attributes":{"identifier":"com.acme.app.widget"}}],"links":{}}`,
+	})
+
+	created, err := ensureBundleIDExists(context.Background(), "com.acme.app", "Acme", "IOS")
+	if err != nil {
+		t.Fatalf("ensureBundleIDExists: %v", err)
+	}
+	if !created || len(*writes) != 1 || !strings.Contains((*writes)[0], `"identifier":"com.acme.app"`) {
+		t.Fatalf("created=%v writes=%v, want com.acme.app created", created, *writes)
+	}
+}
+
+func TestDeleteBundleIDByIdentifierNeverTargetsPrefixSibling(t *testing.T) {
+	tests := []struct {
+		name  string
+		pages map[string]string
+		want  []string
+	}{
+		{
+			name: "exact match on a later page",
+			pages: map[string]string{
+				"":  `{"data":[{"type":"bundleIds","id":"id-widget","attributes":{"identifier":"com.acme.app.widget"}}],"links":{"next":"https://api.appstoreconnect.apple.com/v1/bundleIds?cursor=2"}}`,
+				"2": `{"data":[{"type":"bundleIds","id":"id-app","attributes":{"identifier":"com.acme.app"}}],"links":{}}`,
+			},
+			want: []string{"DELETE /v1/bundleIds/id-app"},
+		},
+		{
+			name: "only prefix siblings",
+			pages: map[string]string{
+				"": `{"data":[{"type":"bundleIds","id":"id-widget","attributes":{"identifier":"com.acme.app.widget"}}],"links":{}}`,
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			writes := serveBundleIDPrefixMatches(t, test.pages)
+			if err := deleteBundleIDByIdentifier(context.Background(), "com.acme.app"); err != nil {
+				t.Fatalf("deleteBundleIDByIdentifier: %v", err)
+			}
+			if strings.Join(*writes, ",") != strings.Join(test.want, ",") {
+				t.Fatalf("writes = %v, want %v", *writes, test.want)
+			}
+		})
 	}
 }

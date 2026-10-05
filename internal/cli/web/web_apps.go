@@ -122,12 +122,8 @@ func ensureBundleIDExists(ctx context.Context, bundleID, appName, platform strin
 		return false, err
 	}
 
-	existing, err := client.GetBundleIDs(ctx, asc.WithBundleIDsFilterIdentifier(bundleID), asc.WithBundleIDsLimit(1))
-	if err != nil {
+	if _, err := shared.FindBundleID(ctx, client, bundleID); !errors.Is(err, shared.ErrBundleIDNotFound) {
 		return false, err
-	}
-	if existing != nil && len(existing.Data) > 0 {
-		return false, nil
 	}
 
 	_, err = client.CreateBundleID(ctx, asc.BundleIDCreateAttributes{
@@ -137,8 +133,7 @@ func ensureBundleIDExists(ctx context.Context, bundleID, appName, platform strin
 	})
 	if err != nil {
 		if isDuplicateBundleIDError(err) {
-			existing, findErr := client.GetBundleIDs(ctx, asc.WithBundleIDsFilterIdentifier(bundleID), asc.WithBundleIDsLimit(1))
-			if findErr == nil && existing != nil && len(existing.Data) > 0 {
+			if _, findErr := shared.FindBundleID(ctx, client, bundleID); findErr == nil {
 				return false, nil
 			}
 		}
@@ -159,15 +154,15 @@ func deleteBundleIDByIdentifier(ctx context.Context, bundleID string) error {
 		return err
 	}
 
-	existing, err := client.GetBundleIDs(ctx, asc.WithBundleIDsFilterIdentifier(bundleID), asc.WithBundleIDsLimit(1))
+	existing, err := shared.FindBundleID(ctx, client, bundleID)
+	if errors.Is(err, shared.ErrBundleIDNotFound) {
+		return nil
+	}
 	if err != nil {
 		return err
 	}
-	if existing == nil || len(existing.Data) == 0 {
-		return nil
-	}
 
-	return client.DeleteBundleID(ctx, strings.TrimSpace(existing.Data[0].ID))
+	return client.DeleteBundleID(ctx, strings.TrimSpace(existing.Data.ID))
 }
 
 func bundleIDNameSuffix(bundleID string) string {

@@ -146,7 +146,7 @@ func (s *VersionBuildSelector) Resolve(ctx context.Context, client *asc.Client, 
 
 func (s *VersionBuildSelector) waitError(waitCtx context.Context, err error, target string) error {
 	if waitCtx.Err() != nil && errors.Is(err, context.DeadlineExceeded) {
-		return fmt.Errorf("timed out after %s waiting for %s; rerun with a longer --timeout", *s.timeout, target)
+		return fmt.Errorf("timed out after %s waiting for %s; rerun with a longer --timeout: %w", *s.timeout, target, err)
 	}
 	return err
 }
