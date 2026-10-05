@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
+	"regexp"
 	"strings"
 
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/asc"
@@ -67,6 +69,13 @@ func Classify(err error) ClassifiedError {
 		}
 	}
 
+	if bundleID := appNotFoundBundleID(apiErr); bundleID != "" {
+		return ClassifiedError{
+			Message: err.Error(),
+			Hint:    fmt.Sprintf("App IDs are numeric. Find this app's ID with `asc apps list --bundle-id %q` and pass that instead.", bundleID),
+		}
+	}
+
 	if containsPrivacyError(err) {
 		return ClassifiedError{
 			Message: err.Error(),
@@ -100,6 +109,26 @@ func Classify(err error) ClassifiedError {
 		Message: err.Error(),
 		Hint:    "",
 	}
+}
+
+// appNotFoundIDPattern matches Apple's 404 detail for an unknown app, such as
+// "There is no resource of type 'apps' with id 'com.example.app'". Many
+// commands put --app straight into /v1/apps/{id}, so a bundle ID there ends
+// in this error instead of a lookup.
+var (
+	appNotFoundIDPattern = regexp.MustCompile(`no resource of type 'apps' with id '([^']*)'`)
+	bundleIDPattern      = regexp.MustCompile(`^[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+$`)
+)
+
+func appNotFoundBundleID(apiErr *asc.APIError) string {
+	if apiErr == nil || apiErr.HTTPStatusCode() != http.StatusNotFound {
+		return ""
+	}
+	match := appNotFoundIDPattern.FindStringSubmatch(apiErr.Detail)
+	if match == nil || !bundleIDPattern.MatchString(match[1]) {
+		return ""
+	}
+	return match[1]
 }
 
 func isUploadTimeoutError(err error) bool {
