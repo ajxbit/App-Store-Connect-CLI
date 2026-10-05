@@ -100,15 +100,18 @@ func ResolveAppInfoIDWithFlag(ctx context.Context, client *asc.Client, appID, ap
 	if len(resp.Data) == 0 {
 		return "", fmt.Errorf("no app info found for app %q", appID)
 	}
-	if len(resp.Data) > 1 {
-		selected, reason := autoSelectEditableAppInfoID(resp)
-		if selected == "" {
-			return "", AmbiguousAppInfoError(appID, appInfoFlag, asc.AppInfoCandidates(resp.Data))
-		}
-		fmt.Fprintf(os.Stderr, "Multiple app infos found for app %s, auto-selected %s (%s).\n", appID, selected, reason)
+	candidates := asc.AppInfoCandidates(resp.Data)
+	if current := asc.CurrentAppInfoCandidates(candidates); len(current) > 0 {
+		candidates = current
+	}
+	if len(candidates) == 1 {
+		return candidates[0].ID, nil
+	}
+	if selected, ok := asc.AutoResolveAppInfoIDByVersionState(candidates, "PREPARE_FOR_SUBMISSION"); ok {
+		fmt.Fprintf(os.Stderr, "Multiple app infos found for app %s, auto-selected %s (PREPARE_FOR_SUBMISSION).\n", appID, selected)
 		return selected, nil
 	}
-	return resp.Data[0].ID, nil
+	return "", AmbiguousAppInfoError(appID, appInfoFlag, candidates)
 }
 
 // ResolveOwnedAppInfoID resolves the app info ID and verifies that an explicit
@@ -134,30 +137,4 @@ func ResolveOwnedAppInfoID(ctx context.Context, client *asc.Client, appID, appIn
 		return "", fmt.Errorf("app info %q belongs to app %q, not %q", resolvedAppInfoID, ownerAppID, strings.TrimSpace(appID))
 	}
 	return resolvedAppInfoID, nil
-}
-
-func autoSelectEditableAppInfoID(appInfos *asc.AppInfosResponse) (string, string) {
-	if appInfos == nil {
-		return "", ""
-	}
-
-	const targetState = "PREPARE_FOR_SUBMISSION"
-
-	matches := make([]string, 0, 1)
-	for _, info := range appInfos.Data {
-		state := strings.ToUpper(appInfoAttrString(info.Attributes, "state"))
-		appStoreState := strings.ToUpper(appInfoAttrString(info.Attributes, "appStoreState"))
-		if state != targetState && appStoreState != targetState {
-			continue
-		}
-		if trimmedID := strings.TrimSpace(info.ID); trimmedID != "" {
-			matches = append(matches, trimmedID)
-		}
-	}
-
-	if len(matches) != 1 {
-		return "", ""
-	}
-
-	return matches[0], targetState
 }
