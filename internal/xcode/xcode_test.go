@@ -71,6 +71,19 @@ func TestArchiveMissingXcodebuild(t *testing.T) {
 	}
 }
 
+func TestValidateExistingPathReportsMissingInputPath(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "Missing.xcarchive")
+	for _, err := range []error{
+		validateExistingPath(missing, ".xcarchive", "--archive-path"),
+		validateExistingFile(missing, "--archive-path"),
+	} {
+		var notFound *InputPathNotFoundError
+		if !errors.As(err, &notFound) || notFound.Flag != "--archive-path" {
+			t.Fatalf("expected InputPathNotFoundError for --archive-path, got %v", err)
+		}
+	}
+}
+
 func TestValidateExistingPathAllowsTrailingSeparator(t *testing.T) {
 	workspacePath := filepath.Join(t.TempDir(), "Demo.xcworkspace")
 	if err := os.MkdirAll(workspacePath, 0o755); err != nil {
@@ -391,6 +404,10 @@ func TestValidateRunsAltoolWithAuthFlags(t *testing.T) {
 		t.Fatalf("writeTestIPA() error: %v", err)
 	}
 	logPath := filepath.Join(tempDir, "commands.log")
+	p8Path := filepath.Join(tempDir, "AuthKey_KEY123ABC.p8")
+	if err := os.WriteFile(p8Path, []byte("key"), 0o600); err != nil {
+		t.Fatalf("WriteFile() error: %v", err)
+	}
 
 	restore := overrideTestEnvironment(t)
 	runtimeGOOS = "darwin"
@@ -408,9 +425,10 @@ func TestValidateRunsAltoolWithAuthFlags(t *testing.T) {
 	t.Cleanup(restore)
 
 	result, err := Validate(context.Background(), ValidateOptions{
-		IPAPath:   ipaPath,
-		APIKey:    "KEY123ABC",
-		APIIssuer: "issuer-123",
+		IPAPath:    ipaPath,
+		APIKey:     "KEY123ABC",
+		APIIssuer:  "issuer-123",
+		P8FilePath: p8Path,
 	})
 	if err != nil {
 		t.Fatalf("Validate() error: %v", err)
@@ -434,7 +452,7 @@ func TestValidateRunsAltoolWithAuthFlags(t *testing.T) {
 		t.Fatalf("expected version probe, got %q", lines[0])
 	}
 	if !strings.Contains(lines[1], "xcrun|altool|--validate-app|--file|") ||
-		!strings.Contains(lines[1], ".ipa|--type|ios|--apiKey|KEY123ABC|--apiIssuer|issuer-123") {
+		!strings.Contains(lines[1], ".ipa|--type|ios|--apiKey|KEY123ABC|--apiIssuer|issuer-123|--p8-file-path|"+p8Path) {
 		t.Fatalf("expected validate invocation with auth flags, got %q", lines[1])
 	}
 	commandArgs := strings.Split(lines[1], "|")
