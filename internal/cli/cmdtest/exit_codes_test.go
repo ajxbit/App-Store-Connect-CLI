@@ -135,8 +135,8 @@ func TestRun_IntroductoryOffersImportPartialFailureReturnsExitError(t *testing.T
 		}
 	})
 
-	if stderr != "" {
-		t.Fatalf("expected empty stderr, got %q", stderr)
+	if want := "Error: subscriptions offers introductory import: 1 row(s) failed\n"; stderr != want {
+		t.Fatalf("stderr = %q, want %q", stderr, want)
 	}
 	if !strings.Contains(stdout, `"failed":1`) {
 		t.Fatalf("expected failure summary in stdout, got %q", stdout)

@@ -124,7 +124,7 @@ func reviewSubscriptionAttachPreflight(appID string, subscription webcore.Review
 		fmt.Fprintln(os.Stderr, "Hint: Complete the outstanding App Store Connect action for this subscription, then retry once it reaches READY_TO_SUBMIT.")
 	}
 
-	return shared.NewReportedError(
+	return shared.NewStderrReportedError(
 		fmt.Errorf(
 			"web review subscriptions attach: subscription %q is %s; Apple only allows attach once it reaches READY_TO_SUBMIT",
 			subscriptionID,
@@ -502,7 +502,7 @@ func reviewSubscriptionGroupAttachPreflight(appID, groupID string, subscriptions
 	fmt.Fprintln(os.Stderr, "Hint: Apple only allows attach after the relevant subscriptions reach READY_TO_SUBMIT.")
 	fmt.Fprintln(os.Stderr, "Hint: In live testing, a subscription promotional image also mattered in addition to localization, pricing coverage, and the App Store review screenshot.")
 
-	return shared.NewReportedError(
+	return shared.NewStderrReportedError(
 		fmt.Errorf(
 			"web review subscriptions attach-group: group %q has no READY_TO_SUBMIT subscriptions to attach",
 			groupID,

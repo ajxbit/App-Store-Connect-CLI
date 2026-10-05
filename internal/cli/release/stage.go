@@ -172,6 +172,7 @@ Examples:
 			if runErr != nil {
 				if blocked, ok := errors.AsType[readinessBlockedError](runErr); ok {
 					printReadinessBlockers(os.Stderr, blocked.report, resolvedAppID, trimmedVersion, normalizedPlatform)
+					return shared.NewStderrReportedError(runErr)
 				}
 				return shared.NewReportedError(runErr)
 			}
