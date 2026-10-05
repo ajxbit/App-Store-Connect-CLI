@@ -1213,6 +1213,9 @@ already holds as a skip receipt ("action":"skipped") and exits 0. The conflict
 is only forgiven when a read-back confirms every requested tester is in the
 group; every other conflict still fails.
 
+--email only resolves people who are already testers of the group's app;
+invite new people with: asc testflight testers add --app "APP_ID" --email "EMAIL" --group "GROUP_ID"
+
 Examples:
   asc testflight beta-groups add-testers --group "GROUP_ID" --tester "TESTER_ID"
   asc testflight beta-groups add-testers --group "GROUP_ID" --tester "TESTER_ID1,TESTER_ID2"
@@ -1266,19 +1269,20 @@ Examples:
 					}
 					pageHasNext := strings.TrimSpace(resp.Links.Next) != ""
 					if len(resp.Data) == 0 && !pageHasNext {
-						return fmt.Errorf("beta-groups add-testers: tester email %q not found for app %q", testerEmail, appID)
+						notFound := fmt.Errorf(
+							"beta-groups add-testers: tester email %q not found for app %q\nHint: invite them first with: asc testflight testers add --app %q --email %q --group %q",
+							testerEmail, appID, appID, testerEmail, groupID,
+						)
+						return shared.WithDiagnostic(shared.NewValidationError(notFound), shared.DiagnosticResourceNotFound, "--email")
 					}
 					if len(resp.Data) > 1 || pageHasNext {
-						ambiguous := &shared.AmbiguousSelectionError{
-							Kind:        "beta tester",
-							Description: fmt.Sprintf("email %q", testerEmail),
-							Flag:        "--tester",
-							Candidates:  shared.BetaTesterCandidates(resp.Data),
-						}
-						if pageHasNext {
-							return fmt.Errorf("beta-groups add-testers: %w", shared.MarkAmbiguousSelectionSample(ambiguous))
-						}
-						return fmt.Errorf("beta-groups add-testers: %w", ambiguous)
+						return shared.AmbiguousUsageError(fmt.Errorf("%s: %w", shared.RewriteUsageMessage(ctx, "beta-groups add-testers"), &shared.AmbiguousSelectionError{
+							Kind:                "tester",
+							Description:         fmt.Sprintf("email %q", testerEmail),
+							Flag:                "--tester",
+							Candidates:          shared.BetaTesterCandidates(resp.Data),
+							CandidatesAreSample: pageHasNext,
+						}))
 					}
 					testerIDs = append(testerIDs, resp.Data[0].ID)
 				}

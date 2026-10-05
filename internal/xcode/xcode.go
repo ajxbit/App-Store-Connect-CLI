@@ -115,11 +115,12 @@ type ExportResult struct {
 }
 
 type ValidateOptions struct {
-	IPAPath   string
-	PKGPath   string
-	APIKey    string
-	APIIssuer string
-	LogWriter io.Writer
+	IPAPath    string
+	PKGPath    string
+	APIKey     string
+	APIIssuer  string
+	P8FilePath string
+	LogWriter  io.Writer
 }
 
 type ValidateResult struct {
@@ -424,6 +425,11 @@ func Validate(ctx context.Context, opts ValidateOptions) (*ValidateResult, error
 		}
 		return nil, fmt.Errorf("locate xcrun: %w", err)
 	}
+	if opts.P8FilePath != "" {
+		if err := validateExistingFile(opts.P8FilePath, "--p8-file-path"); err != nil {
+			return nil, err
+		}
+	}
 	artifactPath := opts.IPAPath
 	artifactFlag := "--ipa"
 	artifactName := "IPA"
@@ -693,6 +699,7 @@ func normalizeValidateOptions(opts ValidateOptions) ValidateOptions {
 	opts.PKGPath = strings.TrimSpace(opts.PKGPath)
 	opts.APIKey = strings.TrimSpace(opts.APIKey)
 	opts.APIIssuer = strings.TrimSpace(opts.APIIssuer)
+	opts.P8FilePath = strings.TrimSpace(opts.P8FilePath)
 	return opts
 }
 
@@ -716,6 +723,31 @@ func normalizeDirectoryPath(pathValue string) string {
 	return filepath.Clean(trimmed)
 }
 
+// InputPathNotFoundError reports that an input path named by Flag does not exist.
+type InputPathNotFoundError struct {
+	Flag string
+	Err  error
+}
+
+func (e *InputPathNotFoundError) Error() string {
+	return fmt.Sprintf("%s: %v", e.Flag, e.Err)
+}
+
+func (e *InputPathNotFoundError) Unwrap() error {
+	return e.Err
+}
+
+func statInputPath(pathValue, flagName string) (os.FileInfo, error) {
+	info, err := os.Stat(pathValue)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, &InputPathNotFoundError{Flag: flagName, Err: err}
+	}
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", flagName, err)
+	}
+	return info, nil
+}
+
 func validateExistingPath(pathValue, suffix, flagName string) error {
 	trimmed := strings.TrimSpace(pathValue)
 	if trimmed == "" {
@@ -725,9 +757,9 @@ func validateExistingPath(pathValue, suffix, flagName string) error {
 	if !strings.EqualFold(filepath.Ext(normalized), suffix) {
 		return fmt.Errorf("%s must end with %s", flagName, suffix)
 	}
-	info, err := os.Stat(normalized)
+	info, err := statInputPath(normalized, flagName)
 	if err != nil {
-		return fmt.Errorf("%s: %w", flagName, err)
+		return err
 	}
 	if !info.IsDir() {
 		return fmt.Errorf("%s must point to a directory", flagName)
@@ -740,9 +772,9 @@ func validateExistingFile(pathValue, flagName string) error {
 	if trimmed == "" {
 		return fmt.Errorf("%s is required", flagName)
 	}
-	info, err := os.Stat(trimmed)
+	info, err := statInputPath(trimmed, flagName)
 	if err != nil {
-		return fmt.Errorf("%s: %w", flagName, err)
+		return err
 	}
 	if info.IsDir() {
 		return fmt.Errorf("%s must point to a file", flagName)
@@ -879,6 +911,9 @@ func buildValidateCommand(opts ValidateOptions, platform, artifactPath string) [
 	}
 	if opts.APIIssuer != "" {
 		args = append(args, "--apiIssuer", opts.APIIssuer)
+	}
+	if opts.P8FilePath != "" {
+		args = append(args, "--p8-file-path", opts.P8FilePath)
 	}
 	return args
 }
