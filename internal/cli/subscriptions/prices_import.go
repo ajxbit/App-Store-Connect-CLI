@@ -42,6 +42,8 @@ type subscriptionPriceImportSummary struct {
 	FailureArtifact      string                                `json:"failureArtifactPath,omitempty"`
 	FailureArtifactError string                                `json:"failureArtifactError,omitempty"`
 	Results              []subscriptionPriceImportResultItem   `json:"results,omitempty"`
+
+	refused error
 }
 
 type subscriptionPriceImportSummaryError struct {
@@ -353,7 +355,7 @@ Examples:
 				if summary.FailureArtifactError != "" {
 					rowErr = errors.Join(rowErr, fmt.Errorf("write failure artifact: %s", summary.FailureArtifactError))
 				}
-				return shared.NewReportedError(rowErr)
+				return shared.NewReportedError(shared.NewErrorWithCause(rowErr, summary.refused))
 			}
 			return nil
 		},
@@ -407,6 +409,7 @@ func appendSubscriptionPriceImportFailure(summary *subscriptionPriceImportSummar
 		return
 	}
 	summary.Failed++
+	summary.refused = shared.KeepReadOnlyRefusal(summary.refused, err)
 	summary.Failures = append(summary.Failures, subscriptionPriceImportSummaryError{
 		Row:       row.row,
 		Territory: row.territoryID,

@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"os"
 	"strings"
+
+	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/readonly"
 )
 
 // ReportedError marks an error as already reported to the user.
@@ -259,6 +261,16 @@ func NewErrorWithCause(err, cause error) error {
 		return err
 	}
 	return errorWithCause{err: err, cause: cause}
+}
+
+// KeepReadOnlyRefusal returns kept, or err when kept is nil and err is a
+// read-only refusal. Batch commands that summarize per-item failures pass the
+// result to NewErrorWithCause so the summary keeps the read-only exit code.
+func KeepReadOnlyRefusal(kept, err error) error {
+	if kept == nil && errors.Is(err, readonly.ErrRefused) {
+		return err
+	}
+	return kept
 }
 
 func IsValidationError(err error) bool {
