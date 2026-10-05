@@ -190,3 +190,27 @@ func TestInferSigningPlanSelectsSuppliedTeamWithoutProfileSelector(t *testing.T)
 		t.Fatalf("team-only override could not replay: %v", err)
 	}
 }
+
+func TestInferSigningPlanRejectsInvalidProfileDates(t *testing.T) {
+	requireStrictSigningPlatform(t)
+	cases := []struct {
+		name, want string
+		mutate     func(map[string]any)
+	}{
+		{name: "missing expiry", want: "missing expiration date", mutate: func(p map[string]any) { delete(p, "ExpirationDate") }},
+		{name: "zero expiry", want: "expiration date", mutate: func(p map[string]any) { p["ExpirationDate"] = time.Time{} }},
+		{name: "future creation", want: "creation date is in the future", mutate: func(p map[string]any) { p["CreationDate"] = time.Now().Add(24 * time.Hour) }},
+		{name: "invalid creation", want: "invalid creation date", mutate: func(p map[string]any) { p["CreationDate"] = "not-a-date" }},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			project := writeInferredSigningProject(t)
+			root := t.TempDir()
+			profile := writeSigningTestProfileWith(t, filepath.Join(root, "A.mobileprovision"), "A", "11111111-1111-1111-1111-111111111111", "ABCDE12345.com.example.demo", time.Now().Add(time.Hour), tt.mutate)
+			_, err := BuildSigningPlan(SigningPlanOptions{ProjectPath: project, ProfilePaths: []string{profile}, Configuration: "Release", SkipTargets: []string{"Widget", "Watch"}, StateDir: filepath.Join(root, "state")})
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("error=%v, want %s", err, tt.want)
+			}
+		})
+	}
+}

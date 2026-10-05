@@ -832,7 +832,8 @@ func parseSigningProfile(path string) (signingProfile, error) {
 		Name                        string         `plist:"Name"`
 		TeamIdentifier              []string       `plist:"TeamIdentifier"`
 		ApplicationIdentifierPrefix []string       `plist:"ApplicationIdentifierPrefix"`
-		ExpirationDate              time.Time      `plist:"ExpirationDate"`
+		ExpirationDate              any            `plist:"ExpirationDate"`
+		CreationDate                any            `plist:"CreationDate"`
 		Entitlements                map[string]any `plist:"Entitlements"`
 		DeveloperCertificates       [][]byte       `plist:"DeveloperCertificates"`
 		ProvisionsAllDevices        bool           `plist:"ProvisionsAllDevices"`
@@ -841,6 +842,22 @@ func parseSigningProfile(path string) (signingProfile, error) {
 	}
 	if _, err := plist.Unmarshal(signed.Content, &payload); err != nil {
 		return signingProfile{}, fmt.Errorf("decode profile %s: %w", path, err)
+	}
+	expiration, validExpiration := payload.ExpirationDate.(time.Time)
+	if !validExpiration || expiration.IsZero() {
+		if payload.ExpirationDate == nil {
+			return signingProfile{}, fmt.Errorf("profile %s is missing expiration date", path)
+		}
+		return signingProfile{}, fmt.Errorf("profile %s has invalid expiration date", path)
+	}
+	if payload.CreationDate != nil {
+		creation, validCreation := payload.CreationDate.(time.Time)
+		if !validCreation {
+			return signingProfile{}, fmt.Errorf("profile %s has invalid creation date", path)
+		}
+		if !creation.IsZero() && creation.After(signingProfileNow()) {
+			return signingProfile{}, fmt.Errorf("profile %s creation date is in the future", path)
+		}
 	}
 	teamID := firstSigningProfileString(payload.TeamIdentifier)
 	prefix := firstSigningProfileString(payload.ApplicationIdentifierPrefix)
@@ -874,7 +891,7 @@ func parseSigningProfile(path string) (signingProfile, error) {
 		teamID:      strings.ToUpper(teamID),
 		pattern:     pattern,
 		wildcard:    wildcard,
-		expires:     earliestSigningExpiry(payload.ExpirationDate, certExpires),
+		expires:     earliestSigningExpiry(expiration, certExpires),
 		noValidCert: !certValid,
 		identity:    identity,
 		certSHA256:  certSHA,
