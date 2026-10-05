@@ -192,6 +192,16 @@ func Run(args []string, versionInfo string) int {
 		return ExitUsage
 	}
 
+	if err := groupFlagsBeforeSubcommandError(root); err != nil {
+		fmt.Fprint(os.Stderr, errfmt.FormatStderr(err))
+		if reportErr := writeUsageJUnitReport(commandName, err); reportErr != nil {
+			printUsageJUnitReportFailure(commandName, versionInfo, analysis, reportErr)
+			return ExitError
+		}
+		emitImmediateTelemetry(args, root, versionInfo, validationFailureContext(analysis, err))
+		return ExitUsage
+	}
+
 	runUsageOutput := &bytes.Buffer{}
 	restoreRunUsageOutput := redirectCommandFlagOutput(analysis.command, runUsageOutput)
 	start := time.Now()

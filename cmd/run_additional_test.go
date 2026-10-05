@@ -2972,7 +2972,7 @@ func TestRun_InvalidParentOutputReturnsUsageBeforeLeafExec(t *testing.T) {
 		}
 	})
 
-	if !strings.Contains(stderr, `(got "yaml")`) {
+	if !strings.Contains(stderr, "--output must be passed after the subcommand name") {
 		t.Fatalf("expected output validation error, got %q", stderr)
 	}
 	if strings.Contains(stderr, "missing authentication") {
@@ -3008,7 +3008,7 @@ func TestRun_InvalidParentPrettyReturnsUsageBeforeLeafExec(t *testing.T) {
 		}
 	})
 
-	if !strings.Contains(stderr, "--pretty is only valid with JSON output") {
+	if !strings.Contains(stderr, "--output, --pretty must be passed after the subcommand name") {
 		t.Fatalf("expected pretty/output validation error, got %q", stderr)
 	}
 	if strings.Contains(stderr, "missing authentication") {
