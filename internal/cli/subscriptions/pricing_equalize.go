@@ -57,7 +57,7 @@ importing a CSV.
 
 Examples:
   asc subscriptions pricing equalize --subscription-id "SUB_ID" --base-price "3.49" --confirm
-  asc subscriptions pricing equalize --subscription-id "SUB_ID" --base-price "3.49" --start-date "2026-04-01" --confirm
+  asc subscriptions pricing equalize --subscription-id "SUB_ID" --base-price "3.49" --start-date "YYYY-MM-DD" --confirm
   asc subscriptions pricing equalize --subscription-id "SUB_ID" --base-price "38.49" --base-territory "United States" --confirm
   asc subscriptions pricing equalize --subscription-id "SUB_ID" --base-price "3.49" --dry-run
   asc subscriptions pricing equalize --subscription-id "SUB_ID" --base-price "3.49" --confirm --workers 16`,

@@ -73,7 +73,7 @@ Examples:
   asc nominations list --status DRAFT
   asc nominations list --status DRAFT --type APP_LAUNCH
   asc nominations list --app "APP_ID" --status SUBMITTED --output table
-  asc nominations list --include relatedApps --related-apps-limit 10`,
+  asc nominations list --status DRAFT --include relatedApps --related-apps-limit 10`,
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {

@@ -36,7 +36,7 @@ func ReleaseStageCommand() *ffcli.Command {
 
 	return &ffcli.Command{
 		Name:       "stage",
-		ShortUsage: "asc release stage --app \"APP_ID\" --version \"2.4.0\" --build-id \"BUILD_ID\" (--metadata-dir \"./metadata/version/2.4.0\" | --copy-metadata-from \"2.3.2\") [--routing-coverage-file \"./coverage.geojson\"] [flags]",
+		ShortUsage: "asc release stage --app \"APP_ID\" --version \"2.4.0\" --build-id \"BUILD_ID\" (--metadata-dir \"./metadata\" | --copy-metadata-from \"2.3.2\") [--routing-coverage-file \"./coverage.geojson\"] [flags]",
 		ShortHelp:  "Run version + metadata + attach + validate.",
 		LongHelp: `Run a deterministic pre-submit App Store staging pipeline:
 1. Verify --build-id exists, belongs to --app, and matches --platform
@@ -52,7 +52,7 @@ Supports dry-run planning, step-level structured output, and checkpointed resume
 Examples:
   asc release stage --app "APP_ID" --version "2.4.0" --build-id "BUILD_ID" --copy-metadata-from "2.3.2" --dry-run
   asc release stage --app "APP_ID" --version "2.4.0" --build-id "BUILD_ID" --copy-metadata-from "2.3.2" --confirm
-  asc release stage --app "APP_ID" --version "2.4.0" --build-id "BUILD_ID" --metadata-dir "./metadata/version/2.4.0" --confirm
+  asc release stage --app "APP_ID" --version "2.4.0" --build-id "BUILD_ID" --metadata-dir "./metadata" --confirm
   asc release stage --app "APP_ID" --version "2.4.0" --build-id "BUILD_ID" --copy-metadata-from "2.3.2" --routing-coverage-file "./coverage.geojson" --confirm`,
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
