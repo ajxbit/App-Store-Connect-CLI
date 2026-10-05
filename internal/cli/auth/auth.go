@@ -1014,7 +1014,8 @@ file. When ASC_CONFIG_PATH is set, that file is the only config file changed;
 ~/.asc/config.json is left alone, and a warning names it if it still holds
 matching credentials. Pass --include-global to remove them from
 ~/.asc/config.json as well. Without ASC_CONFIG_PATH, logout also cleans
-~/.asc/config.json.
+~/.asc/config.json. When ASC_BYPASS_KEYCHAIN is set, logout changes config
+files only and leaves keychain entries untouched.
 
 Examples:
   asc auth logout --all --confirm
@@ -1044,6 +1045,10 @@ Examples:
 			}
 			if !*confirm {
 				return shared.UsageError("--confirm is required to remove stored credentials")
+			}
+
+			if authsvc.ShouldBypassKeychain() {
+				fmt.Fprintln(os.Stderr, "Note: ASC_BYPASS_KEYCHAIN is set, so auth logout changes config files only and leaves keychain entries untouched.")
 			}
 
 			opts := authsvc.RemoveOptions{IncludeGlobalConfig: *includeGlobal}

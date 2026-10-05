@@ -174,6 +174,17 @@ func printConciseUnknownFlag(root *ffcli.Command, analysis invocationAnalysis, c
 		)
 		return
 	}
+	if name, ok := flagLookupName(flagName); ok {
+		var accepting []string
+		for _, sub := range analysis.command.Subcommands {
+			if sub != nil && sub.FlagSet != nil && sub.FlagSet.Lookup(name) != nil && !isDeprecatedCommandHelp(sub.ShortHelp) {
+				accepting = append(accepting, sub.Name)
+			}
+		}
+		if len(accepting) > 0 {
+			fmt.Fprintf(os.Stderr, "Did you mean a subcommand? These accept `--%s`: %s\n", name, strings.Join(accepting, ", "))
+		}
+	}
 
 	printFlagSuggestions(os.Stderr, unknownFlagSuggestions(
 		analysis.command.FlagSet,
@@ -827,9 +838,15 @@ func runtimeOutcomeKind(err error, exitCode int, eventContext telemetry.EventCon
 	}
 }
 
+// isPublicStorefrontError reports an HTTP status from an endpoint that does not
+// use App Store Connect credentials, so a 401 or 403 is not an auth failure.
 func isPublicStorefrontError(err error) bool {
 	var storefrontError interface{ PublicStorefrontError() bool }
-	return errors.As(err, &storefrontError) && storefrontError.PublicStorefrontError()
+	if errors.As(err, &storefrontError) && storefrontError.PublicStorefrontError() {
+		return true
+	}
+	var uploadError interface{ PresignedUploadError() bool }
+	return errors.As(err, &uploadError) && uploadError.PresignedUploadError()
 }
 
 func httpStatusFromError(err error) int {

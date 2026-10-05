@@ -423,18 +423,20 @@ func BuildUploadFailureError(upload *asc.BuildUploadResponse) error {
 		return nil
 	}
 
-	details := buildUploadStateDetails(upload.Data.Attributes.State.Errors)
-	recovery := buildUploadRecoveryGuidance(upload.Data.Attributes.State.Errors)
-	if details == "" {
-		if recovery != "" {
-			return fmt.Errorf("build upload %q failed with state %s; recovery: %s", upload.Data.ID, state, recovery)
-		}
-		return fmt.Errorf("build upload %q failed with state %s", upload.Data.ID, state)
+	message := fmt.Sprintf("build upload %q failed with state %s", upload.Data.ID, state)
+	if details := buildUploadStateDetails(upload.Data.Attributes.State.Errors); details != "" {
+		message += ": " + details
 	}
-	if recovery != "" {
-		return fmt.Errorf("build upload %q failed with state %s: %s; recovery: %s", upload.Data.ID, state, details, recovery)
+	if recovery := buildUploadRecoveryGuidance(upload.Data.Attributes.State.Errors); recovery != "" {
+		message += "; recovery: " + recovery
 	}
-	return fmt.Errorf("build upload %q failed with state %s: %s", upload.Data.ID, state, details)
+	return buildStateFailure(errors.New(message))
+}
+
+// buildStateFailure classifies App Store Connect rejecting an uploaded build
+// as an expected negative instead of a CLI defect.
+func buildStateFailure(err error) error {
+	return WithDiagnostic(NewValidationError(err), DiagnosticStateNotReady, "")
 }
 
 var usageDescriptionKeyPattern = regexp.MustCompile(`\b[A-Za-z0-9_]+UsageDescription\b`)
@@ -573,7 +575,7 @@ func WaitForBuildProcessingWithDetails(ctx context.Context, client *asc.Client, 
 	if build != nil {
 		failure.BundleVersion = build.Data.Attributes.Version
 	}
-	return build, EnrichBuildProcessingFailure(ctx, client, failure, err)
+	return build, buildStateFailure(EnrichBuildProcessingFailure(ctx, client, failure, err))
 }
 
 // EnrichBuildProcessingFailure appends the App Store Connect processing
@@ -758,7 +760,7 @@ func diagnoseBuildUploadFailure(ctx context.Context, client *asc.Client, appID s
 	if err != nil {
 		return "", err
 	}
-	keyPath, err := buildStatusPrivateKeyPath(creds)
+	keyPath, err := AltoolPrivateKeyPath(creds)
 	if err != nil {
 		return "", err
 	}
@@ -797,7 +799,10 @@ func resolveBuildStatusBundleID(ctx context.Context, client *asc.Client, appID s
 	return strings.TrimSpace(app.Data.Attributes.BundleID)
 }
 
-func buildStatusPrivateKeyPath(creds ResolvedAuthCredentials) (string, error) {
+// AltoolPrivateKeyPath returns a .p8 path for altool's --p8-file-path, writing
+// PEM material loaded from the keychain or environment to a private temp file.
+// It returns "" when creds carry no usable key.
+func AltoolPrivateKeyPath(creds ResolvedAuthCredentials) (string, error) {
 	if pem := strings.TrimSpace(creds.KeyPEM); pem != "" {
 		if decoded, cacheKey, ok := decodeBuildStatusPrivateKeyPEMBase64(pem); ok {
 			if path := cachedTempPrivateKeyPath(cacheKey); path != "" {

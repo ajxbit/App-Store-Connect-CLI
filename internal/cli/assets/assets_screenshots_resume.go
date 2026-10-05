@@ -13,6 +13,7 @@ import (
 
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/asc"
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/cli/shared"
+	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/cli/shared/errfmt"
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/rootfs"
 )
 
@@ -134,24 +135,37 @@ func appendScreenshotUploadFailure(result *asc.AppScreenshotUploadResult, progre
 	})
 }
 
-func screenshotUploadRetryError(progress screenshotUploadProgress) error {
-	var retryErr error
-	if len(progress.CleanupFailures) > 0 {
-		retryErr = fmt.Errorf("screenshots upload: %d remote asset(s) pending cleanup", len(progress.CleanupFailures))
-	} else if len(progress.PendingFiles) > 0 {
-		retryErr = fmt.Errorf("screenshots upload: %d file(s) pending retry", len(progress.PendingFiles))
-	} else {
-		retryErr = fmt.Errorf("screenshots upload: retry needed to sync screenshot ordering")
+func screenshotUploadRetryError(result asc.AppScreenshotUploadResult, progress screenshotUploadProgress, cause error) error {
+	var summary string
+	switch {
+	case len(progress.PendingFiles) > 0:
+		summary = fmt.Sprintf("screenshots upload: %d of %d file(s) not uploaded", result.Pending, result.Total)
+	case len(progress.CleanupFailures) > 0:
+		summary = fmt.Sprintf("screenshots upload: %d remote asset(s) pending cleanup", len(progress.CleanupFailures))
+	default:
+		summary = "screenshots upload: retry needed to sync screenshot ordering"
 	}
-	if progress.CleanupError != nil {
-		errList := []error{progress.CleanupError}
-		if progress.UploadError != nil {
-			errList = append(errList, progress.UploadError)
+	err := fmt.Errorf("%s: %w", summary, cause)
+	fmt.Fprint(os.Stderr, errfmt.FormatStderr(err))
+	fmt.Fprintf(os.Stderr, "Hint: resume with `asc screenshots upload --resume \"%s\"`\n", result.FailureArtifactPath)
+	return shared.NewReportedError(err)
+}
+
+func warnScreenshotFileNamesAlreadyInSet(files []string, existing []asc.Resource[asc.AppScreenshotAttributes]) {
+	existingNames := make(map[string]struct{}, len(existing))
+	for _, screenshot := range existing {
+		existingNames[screenshot.Attributes.FileName] = struct{}{}
+	}
+	var duplicates []string
+	for _, file := range files {
+		if _, ok := existingNames[filepath.Base(file)]; ok {
+			duplicates = append(duplicates, filepath.Base(file))
 		}
-		errList = append(errList, shared.NewReportedError(retryErr))
-		return errors.Join(errList...)
 	}
-	return shared.NewReportedError(retryErr)
+	if len(duplicates) == 0 {
+		return
+	}
+	fmt.Fprintf(os.Stderr, "Warning: screenshots upload: %d file(s) already in the target screenshot set (%s); uploading them again creates duplicates. Use --skip-existing to upload only missing files, --replace --confirm to replace the set, or --resume with the failure artifact to finish a failed upload.\n", len(duplicates), strings.Join(duplicates, ", "))
 }
 
 func prepareAppScreenshotUpload(ctx context.Context, cfg screenshotUploadConfig[asc.AppScreenshotUploadResult]) (screenshotUploadPreparedState, error) {
@@ -191,6 +205,9 @@ func prepareAppScreenshotUpload(ctx context.Context, cfg screenshotUploadConfig[
 			return screenshotUploadPreparedState{}, err
 		}
 		existingScreenshots = existingResp.Data
+	}
+	if !cfg.SkipExisting && !cfg.Replace {
+		warnScreenshotFileNamesAlreadyInSet(cfg.Files, existingScreenshots)
 	}
 	if cfg.SkipExisting && len(existingScreenshots) > 0 {
 		settleCtx, settleCancel := cfg.RequestContext(ctx)
@@ -350,7 +367,7 @@ func executeAppScreenshotUpload(ctx context.Context, cfg screenshotUploadConfig[
 		return result, screenshotUploadArtifactWriteError(uploadErr, artifactErr)
 	}
 	result.FailureArtifactPath = writtenPath
-	return result, screenshotUploadRetryError(progress)
+	return result, screenshotUploadRetryError(result, progress, uploadErr)
 }
 
 // screenshotUploadArtifactWriteError reports that the upload failed and that no
@@ -383,7 +400,6 @@ func resumeAppScreenshotUpload(ctx context.Context, client *asc.Client, artifact
 			progress := screenshotUploadProgress{
 				OrderedIDs:      append([]string(nil), artifact.OrderedIDs...),
 				CleanupFailures: remainingCleanup,
-				CleanupError:    cleanupErr,
 			}
 			result := asc.AppScreenshotUploadResult{
 				VersionLocalizationID: artifact.VersionLocalizationID,
@@ -406,7 +422,7 @@ func resumeAppScreenshotUpload(ctx context.Context, client *asc.Client, artifact
 				return result, screenshotUploadArtifactWriteError(cleanupErr, artifactErr)
 			}
 			result.FailureArtifactPath = writtenPath
-			return result, screenshotUploadRetryError(progress)
+			return result, screenshotUploadRetryError(result, progress, cleanupErr)
 		}
 		artifact.CleanupFailures = nil
 	}
@@ -485,7 +501,7 @@ func resumeAppScreenshotUpload(ctx context.Context, client *asc.Client, artifact
 		return result, screenshotUploadArtifactWriteError(uploadErr, artifactErr)
 	}
 	result.FailureArtifactPath = writtenPath
-	return result, screenshotUploadRetryError(progress)
+	return result, screenshotUploadRetryError(result, progress, uploadErr)
 }
 
 func splitSkippedScreenshotResults(results []asc.AssetUploadResultItem) ([]asc.AssetUploadResultItem, []asc.AssetUploadResultItem) {
