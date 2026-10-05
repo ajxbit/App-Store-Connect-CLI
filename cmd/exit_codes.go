@@ -5,9 +5,11 @@ import (
 	"flag"
 	"net/http"
 
+	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/appleads"
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/asc"
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/cli/shared"
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/readonly"
+	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/storekit"
 	webcore "github.com/rudrankriyam/App-Store-Connect-CLI/internal/web"
 )
 
@@ -68,6 +70,9 @@ func ExitCodeFromError(err error) int {
 		errors.Is(err, webcore.ErrInvalidAppleAccountCredentials) {
 		return ExitAuth
 	}
+	if errors.Is(err, appleads.ErrOAuthCredentialsRejected) {
+		return ExitAuth
+	}
 	if errors.Is(err, asc.ErrNotFound) {
 		return ExitNotFound
 	}
@@ -84,8 +89,12 @@ func ExitCodeFromError(err error) int {
 		// Fall back to API error code mapping
 		return APIErrorCodeToExitCode(apiErr.Code)
 	}
-	if webErr, ok := errors.AsType[*webcore.APIError](err); ok {
-		return HTTPStatusToExitCode(webErr.HTTPStatusCode())
+	// StoreKit keeps the generic exit code it has always had. Public storefront
+	// endpoints take no credentials, so their 401 and 403 are not auth failures.
+	if _, ok := errors.AsType[*storekit.APIError](err); !ok && !isPublicStorefrontError(err) {
+		if status := httpStatusFromError(err); status > 0 {
+			return HTTPStatusToExitCode(status)
+		}
 	}
 
 	// Generic error
