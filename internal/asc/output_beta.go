@@ -29,7 +29,7 @@ type BetaTesterGroupsUpdateResult struct {
 	Action   string   `json:"action"`
 }
 
-// Actions reported by the beta group tester add receipt.
+// Actions reported by the beta group tester add and remove receipts.
 const (
 	// BetaGroupTestersActionAdded reports that App Store Connect created the
 	// requested memberships.
@@ -37,12 +37,15 @@ const (
 	// BetaGroupTestersActionSkipped reports that a post-conflict read-back
 	// confirmed every requested tester in the group.
 	BetaGroupTestersActionSkipped = "skipped"
+	// BetaGroupTestersActionRemoved reports that App Store Connect removed the
+	// requested memberships.
+	BetaGroupTestersActionRemoved = "removed"
 )
 
 // BetaGroupTestersUpdateResult represents CLI output for beta group tester
-// additions. AlreadyPresent is set when App Store Connect rejected the add
-// with a conflict and a membership read-back confirmed every requested tester
-// is already in the group.
+// additions and removals. AlreadyPresent is set when App Store Connect
+// rejected the add with a conflict and a membership read-back confirmed every
+// requested tester is already in the group.
 type BetaGroupTestersUpdateResult struct {
 	GroupID        string   `json:"groupId"`
 	TesterIDs      []string `json:"testerIds"`
@@ -99,6 +102,12 @@ type BuildBetaGroupMembershipFailure struct {
 	GroupID   string `json:"groupId"`
 	GroupName string `json:"groupName,omitempty"`
 	Error     string `json:"error"`
+}
+
+// BetaGroupDeleteResult represents CLI output for beta group deletions.
+type BetaGroupDeleteResult struct {
+	ID      string `json:"id"`
+	Deleted bool   `json:"deleted"`
 }
 
 // BetaFeedbackSubmissionDeleteResult represents CLI output for beta feedback deletions.
@@ -229,6 +238,12 @@ func betaTestersRows(resp *BetaTestersResponse) ([]string, [][]string) {
 func betaTesterDeleteResultRows(result *BetaTesterDeleteResult) ([]string, [][]string) {
 	headers := []string{"ID", "Email", "Deleted"}
 	rows := [][]string{{result.ID, result.Email, fmt.Sprintf("%t", result.Deleted)}}
+	return headers, rows
+}
+
+func betaGroupDeleteResultRows(result *BetaGroupDeleteResult) ([]string, [][]string) {
+	headers := []string{"ID", "Deleted"}
+	rows := [][]string{{result.ID, fmt.Sprintf("%t", result.Deleted)}}
 	return headers, rows
 }
 
