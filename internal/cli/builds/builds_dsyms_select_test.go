@@ -11,6 +11,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/asc"
 )
 
 func TestParseDSYMSelectionExactVersionDoesNotRequireLatest(t *testing.T) {
@@ -200,5 +202,74 @@ func TestResolveLiveDSYMTargetPreservesAPIErrors(t *testing.T) {
 		if !errors.Is(err, failure) {
 			t.Fatalf("err=%v", err)
 		}
+	}
+}
+
+func TestListDSYMTargetsDetectsRepeatedNextURL(t *testing.T) {
+	for _, links := range [][2]string{
+		{"https://api.appstoreconnect.apple.com/v1/builds?cursor=loop", "https://api.appstoreconnect.apple.com/v1/builds?cursor=loop"},
+		{"https://api.appstoreconnect.apple.com/v1/builds?cursor=loop&limit=200", "/v1/builds?limit=200&cursor=loop"},
+	} {
+		t.Run(links[1], func(t *testing.T) {
+			requests := 0
+			client := newBuildsWaitTestClient(t, func(req *http.Request) (*http.Response, error) {
+				requests++
+				if requests == 2 && req.URL.RawQuery != strings.SplitN(links[0], "?", 2)[1] {
+					t.Fatalf("raw next link changed: %s", req.URL.RawQuery)
+				}
+				if requests <= 2 {
+					return buildsWaitJSONResponse(200, `{"data":[],"links":{"next":"`+links[requests-1]+`"}}`)
+				}
+				return buildsWaitJSONResponse(200, `{"data":[],"links":{}}`)
+			})
+			_, err := listDSYMTargets(t.Context(), client, "123", "IOS", "", "", nil, false)
+			if !errors.Is(err, asc.ErrRepeatedPaginationURL) || requests != 2 {
+				t.Fatalf("requests=%d err=%v", requests, err)
+			}
+		})
+	}
+}
+
+func TestListDSYMTargetsPaginationControls(t *testing.T) {
+	for _, cutoff := range []bool{false, true} {
+		requests := 0
+		client := newBuildsWaitTestClient(t, func(req *http.Request) (*http.Response, error) {
+			requests++
+			if requests == 1 {
+				return buildsWaitJSONResponse(200, `{"data":[{"type":"builds","id":"first","attributes":{"version":"20","uploadedDate":"2026-01-01T00:00:00Z"}}],"links":{"next":"/v1/builds?cursor=next"}}`)
+			}
+			if req.URL.RawQuery != "cursor=next" {
+				t.Fatalf("query=%s", req.URL.RawQuery)
+			}
+			return buildsWaitJSONResponse(200, `{"data":[{"type":"builds","id":"second","attributes":{"version":"19","uploadedDate":"2025-01-01T00:00:00Z"}}]}`)
+		})
+		var after *time.Time
+		if cutoff {
+			value := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+			after = &value
+		}
+		targets, err := listDSYMTargets(t.Context(), client, "123", "", "", "", after, false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cutoff {
+			if requests != 1 || len(targets) != 0 {
+				t.Fatalf("requests=%d targets=%v", requests, targets)
+			}
+		} else if requests != 2 || len(targets) != 2 || targets[0].ID != "first" || targets[1].ID != "second" {
+			t.Fatalf("requests=%d targets=%v", requests, targets)
+		}
+	}
+}
+
+func TestListDSYMTargetsRejectsUntrustedNextURL(t *testing.T) {
+	requests := 0
+	client := newBuildsWaitTestClient(t, func(req *http.Request) (*http.Response, error) {
+		requests++
+		return buildsWaitJSONResponse(200, `{"data":[],"links":{"next":"https://untrusted.example/v1/builds?cursor=next"}}`)
+	})
+	_, err := listDSYMTargets(t.Context(), client, "123", "", "", "", nil, false)
+	if err == nil || requests != 1 {
+		t.Fatalf("requests=%d err=%v", requests, err)
 	}
 }

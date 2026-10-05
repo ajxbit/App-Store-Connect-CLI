@@ -373,6 +373,7 @@ func listDSYMTargets(ctx context.Context, client *asc.Client, appID, platform, e
 
 	var targets []dsymTarget
 	page := first
+	seenNext := make(map[string]struct{})
 	for page != nil {
 		pageTargets, stop, err := dsymTargetsFromPage(page, exactVersion, minVersion, after, excludeExpired)
 		if err != nil {
@@ -382,6 +383,11 @@ func listDSYMTargets(ctx context.Context, client *asc.Client, appID, platform, e
 		if stop || strings.TrimSpace(page.Links.Next) == "" {
 			break
 		}
+		identity := asc.PaginationURLIdentity(page.Links.Next)
+		if _, repeated := seenNext[identity]; repeated {
+			return nil, fmt.Errorf("builds dsyms: failed to list builds: %w", asc.ErrRepeatedPaginationURL)
+		}
+		seenNext[identity] = struct{}{}
 		nextCtx, nextCancel := shared.ContextWithTimeout(ctx)
 		page, err = client.GetBuilds(nextCtx, appID, asc.WithBuildsNextURL(page.Links.Next))
 		nextCancel()
