@@ -760,7 +760,7 @@ func diagnoseBuildUploadFailure(ctx context.Context, client *asc.Client, appID s
 	if err != nil {
 		return "", err
 	}
-	keyPath, err := buildStatusPrivateKeyPath(creds)
+	keyPath, err := AltoolPrivateKeyPath(creds)
 	if err != nil {
 		return "", err
 	}
@@ -799,7 +799,10 @@ func resolveBuildStatusBundleID(ctx context.Context, client *asc.Client, appID s
 	return strings.TrimSpace(app.Data.Attributes.BundleID)
 }
 
-func buildStatusPrivateKeyPath(creds ResolvedAuthCredentials) (string, error) {
+// AltoolPrivateKeyPath returns a .p8 path for altool's --p8-file-path, writing
+// PEM material loaded from the keychain or environment to a private temp file.
+// It returns "" when creds carry no usable key.
+func AltoolPrivateKeyPath(creds ResolvedAuthCredentials) (string, error) {
 	if pem := strings.TrimSpace(creds.KeyPEM); pem != "" {
 		if decoded, cacheKey, ok := decodeBuildStatusPrivateKeyPEMBase64(pem); ok {
 			if path := cachedTempPrivateKeyPath(cacheKey); path != "" {
