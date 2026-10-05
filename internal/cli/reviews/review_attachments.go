@@ -2,6 +2,7 @@ package reviews
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -18,52 +19,61 @@ import (
 func ReviewDetailsAttachmentsListCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("attachments-list", flag.ExitOnError)
 
-	reviewDetailID := fs.String("review-detail", "", "App Store review detail ID (required)")
+	reviewDetailID := shared.BindResourceIDFlag(fs, "review-detail", "appStoreReviewDetails", "App Store review detail ID (required unless --next is provided)")
 	fields := fs.String("fields", "", "Fields to include: "+strings.Join(reviewAttachmentFieldList(), ", "))
 	detailFields := fs.String("detail-fields", "", "Review detail fields to include: "+strings.Join(reviewDetailFieldList(), ", "))
 	include := fs.String("include", "", "Include relationships: "+strings.Join(reviewAttachmentIncludeList(), ", "))
 	limit := fs.Int("limit", 0, "Maximum results per page (1-200)")
 	next := fs.String("next", "", "Fetch next page using a links.next URL")
 	paginate := fs.Bool("paginate", false, "Automatically fetch all pages (aggregate results)")
+	includeSensitive := shared.BindIncludeSensitiveFlag(fs)
 	output := shared.BindOutputFlags(fs)
 
 	return &ffcli.Command{
 		Name:       "attachments-list",
-		ShortUsage: "asc review attachments-list --review-detail \"REVIEW_DETAIL_ID\"",
+		ShortUsage: "asc review attachments-list (--review-detail REVIEW_DETAIL_ID | --next URL) [flags]",
 		ShortHelp:  "List review attachments for a review detail.",
 		LongHelp: `List review attachments for a review detail.
 
 Examples:
   asc review attachments-list --review-detail "REVIEW_DETAIL_ID"
   asc review attachments-list --review-detail "REVIEW_DETAIL_ID" --fields "fileName,fileSize" --limit 50
-  asc review attachments-list --review-detail "REVIEW_DETAIL_ID" --paginate`,
+  asc review attachments-list --review-detail "REVIEW_DETAIL_ID" --paginate
+  asc review attachments-list --next "<links.next>"`,
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
-			if *limit != 0 && (*limit < 1 || *limit > 200) {
-				return fmt.Errorf("review attachments-list: --limit must be between 1 and 200")
-			}
+			nextValue := strings.TrimSpace(*next)
 			if err := shared.ValidateNextURL(*next); err != nil {
-				return fmt.Errorf("review attachments-list: %w", err)
+				return shared.WithDiagnostic(shared.NewValidationError(shared.UsageErrorf("review attachments-list: %v", err)), shared.DiagnosticInvalidInput, "--next")
+			}
+			if err := rejectReviewNextFlagConflicts(
+				fs, *next, "review attachments-list",
+				"review-detail", "fields", "detail-fields", "include", "limit",
+			); err != nil {
+				return err
+			}
+			if *limit != 0 && (*limit < 1 || *limit > 200) {
+				return shared.WithDiagnostic(shared.NewValidationError(shared.UsageError("review attachments-list: --limit must be between 1 and 200")), shared.DiagnosticInvalidInput, "--limit")
 			}
 
 			fieldsValue, err := normalizeReviewAttachmentFields(*fields)
 			if err != nil {
-				return fmt.Errorf("review attachments-list: %w", err)
+				return shared.WithDiagnostic(shared.NewValidationError(fmt.Errorf("review attachments-list: %w", err)), shared.DiagnosticInvalidInput, "--fields")
 			}
 			detailFieldsValue, err := normalizeReviewDetailFields(*detailFields)
 			if err != nil {
-				return fmt.Errorf("review attachments-list: %w", err)
+				return shared.WithDiagnostic(shared.NewValidationError(fmt.Errorf("review attachments-list: %w", err)), shared.DiagnosticInvalidInput, "--detail-fields")
 			}
 			includeValue, err := normalizeReviewAttachmentInclude(*include)
 			if err != nil {
-				return fmt.Errorf("review attachments-list: %w", err)
+				return shared.WithDiagnostic(shared.NewValidationError(fmt.Errorf("review attachments-list: %w", err)), shared.DiagnosticInvalidInput, "--include")
 			}
 
 			reviewDetailValue := strings.TrimSpace(*reviewDetailID)
-			if reviewDetailValue == "" && strings.TrimSpace(*next) == "" {
+			if reviewDetailValue == "" && nextValue == "" {
 				fmt.Fprintln(os.Stderr, "Error: --review-detail is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--review-detail")
 			}
 
 			client, err := shared.GetASCClient()
@@ -83,19 +93,32 @@ Examples:
 			}
 
 			if *paginate {
-				paginateOpts := append(opts, asc.WithAppStoreReviewAttachmentsLimit(200))
-				pages, err := shared.PaginateWithSpinner(requestCtx,
+				paginateOpts := opts
+				if nextValue == "" {
+					paginateOpts = append(paginateOpts, asc.WithAppStoreReviewAttachmentsLimit(200))
+				}
+				pages, err := shared.PaginateWithSpinner(
+					requestCtx,
 					func(ctx context.Context) (asc.PaginatedResponse, error) {
-						return client.GetAppStoreReviewAttachmentsForReviewDetail(ctx, reviewDetailValue, paginateOpts...)
+						resp, err := client.GetAppStoreReviewAttachmentsForReviewDetail(ctx, reviewDetailValue, paginateOpts...)
+						if err != nil || *includeSensitive {
+							return resp, err
+						}
+						return asc.RedactAppStoreReviewDetailIncludesInListResponse(resp)
 					},
 					func(ctx context.Context, nextURL string) (asc.PaginatedResponse, error) {
-						return client.GetAppStoreReviewAttachmentsForReviewDetail(ctx, reviewDetailValue, asc.WithAppStoreReviewAttachmentsNextURL(nextURL))
+						resp, err := client.GetAppStoreReviewAttachmentsForReviewDetail(ctx, "", asc.WithAppStoreReviewAttachmentsNextURL(nextURL))
+						if err != nil || *includeSensitive {
+							return resp, err
+						}
+						return asc.RedactAppStoreReviewDetailIncludesInListResponse(resp)
 					},
 				)
 				if err != nil {
 					return fmt.Errorf("review attachments-list: %w", err)
 				}
 
+				shared.WarnIncludeSensitive(os.Stderr, *includeSensitive)
 				return shared.PrintOutput(pages, *output.Output, *output.Pretty)
 			}
 
@@ -104,7 +127,15 @@ Examples:
 				return fmt.Errorf("review attachments-list: failed to fetch: %w", err)
 			}
 
-			return shared.PrintOutput(resp, *output.Output, *output.Pretty)
+			shared.WarnIncludeSensitive(os.Stderr, *includeSensitive)
+			if *includeSensitive {
+				return shared.PrintOutput(resp, *output.Output, *output.Pretty)
+			}
+			safe, err := asc.RedactAppStoreReviewDetailIncludesInListResponse(resp)
+			if err != nil {
+				return fmt.Errorf("review attachments-list: %w", err)
+			}
+			return shared.PrintOutput(safe, *output.Output, *output.Pretty)
 		},
 	}
 }
@@ -113,10 +144,11 @@ Examples:
 func ReviewDetailsAttachmentsGetCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("attachments-get", flag.ExitOnError)
 
-	attachmentID := fs.String("id", "", "Review attachment ID (required)")
+	attachmentID := shared.BindResourceIDFlag(fs, "id", "appStoreReviewAttachments", "Review attachment ID (required)")
 	fields := fs.String("fields", "", "Fields to include: "+strings.Join(reviewAttachmentFieldList(), ", "))
 	detailFields := fs.String("detail-fields", "", "Review detail fields to include: "+strings.Join(reviewDetailFieldList(), ", "))
 	include := fs.String("include", "", "Include relationships: "+strings.Join(reviewAttachmentIncludeList(), ", "))
+	includeSensitive := shared.BindIncludeSensitiveFlag(fs)
 	output := shared.BindOutputFlags(fs)
 
 	return &ffcli.Command{
@@ -134,20 +166,20 @@ Examples:
 			attachmentValue := strings.TrimSpace(*attachmentID)
 			if attachmentValue == "" {
 				fmt.Fprintln(os.Stderr, "Error: --id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--id")
 			}
 
 			fieldsValue, err := normalizeReviewAttachmentFields(*fields)
 			if err != nil {
-				return fmt.Errorf("review attachments-get: %w", err)
+				return shared.WithDiagnostic(shared.NewValidationError(fmt.Errorf("review attachments-get: %w", err)), shared.DiagnosticInvalidInput, "--fields")
 			}
 			detailFieldsValue, err := normalizeReviewDetailFields(*detailFields)
 			if err != nil {
-				return fmt.Errorf("review attachments-get: %w", err)
+				return shared.WithDiagnostic(shared.NewValidationError(fmt.Errorf("review attachments-get: %w", err)), shared.DiagnosticInvalidInput, "--detail-fields")
 			}
 			includeValue, err := normalizeReviewAttachmentInclude(*include)
 			if err != nil {
-				return fmt.Errorf("review attachments-get: %w", err)
+				return shared.WithDiagnostic(shared.NewValidationError(fmt.Errorf("review attachments-get: %w", err)), shared.DiagnosticInvalidInput, "--include")
 			}
 
 			client, err := shared.GetASCClient()
@@ -158,7 +190,8 @@ Examples:
 			requestCtx, cancel := shared.ContextWithTimeout(ctx)
 			defer cancel()
 
-			resp, err := client.GetAppStoreReviewAttachment(requestCtx, attachmentValue,
+			resp, err := client.GetAppStoreReviewAttachment(
+				requestCtx, attachmentValue,
 				asc.WithAppStoreReviewAttachmentsFields(fieldsValue),
 				asc.WithAppStoreReviewAttachmentReviewDetailFields(detailFieldsValue),
 				asc.WithAppStoreReviewAttachmentsInclude(includeValue),
@@ -167,7 +200,15 @@ Examples:
 				return fmt.Errorf("review attachments-get: failed to fetch: %w", err)
 			}
 
-			return shared.PrintOutput(resp, *output.Output, *output.Pretty)
+			shared.WarnIncludeSensitive(os.Stderr, *includeSensitive)
+			if *includeSensitive {
+				return shared.PrintOutput(resp, *output.Output, *output.Pretty)
+			}
+			safe, err := asc.RedactAppStoreReviewDetailIncludesInSingleResponse(resp)
+			if err != nil {
+				return fmt.Errorf("review attachments-get: %w", err)
+			}
+			return shared.PrintOutput(safe, *output.Output, *output.Pretty)
 		},
 	}
 }
@@ -176,7 +217,7 @@ Examples:
 func ReviewDetailsAttachmentsUploadCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("attachments-upload", flag.ExitOnError)
 
-	reviewDetailID := fs.String("review-detail", "", "App Store review detail ID (required)")
+	reviewDetailID := shared.BindResourceIDFlag(fs, "review-detail", "appStoreReviewDetails", "App Store review detail ID (required)")
 	filePath := fs.String("file", "", "Path to attachment file (required)")
 	output := shared.BindOutputFlags(fs)
 
@@ -194,28 +235,47 @@ Examples:
 			reviewDetailValue := strings.TrimSpace(*reviewDetailID)
 			if reviewDetailValue == "" {
 				fmt.Fprintln(os.Stderr, "Error: --review-detail is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--review-detail")
 			}
 
 			pathValue := strings.TrimSpace(*filePath)
 			if pathValue == "" {
 				fmt.Fprintln(os.Stderr, "Error: --file is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--file")
 			}
 
 			info, err := os.Lstat(pathValue)
 			if err != nil {
-				return fmt.Errorf("review attachments-upload: %w", err)
+				code := shared.DiagnosticFileInvalidFormat
+				switch {
+				case errors.Is(err, os.ErrNotExist):
+					code = shared.DiagnosticFileNotFound
+				case errors.Is(err, os.ErrPermission):
+					code = shared.DiagnosticFilePermissionDenied
+				}
+				return shared.WithDiagnostic(shared.NewValidationError(fmt.Errorf("review attachments-upload: %w", err)), code, "--file")
 			}
 			if info.Mode()&os.ModeSymlink != 0 {
-				return fmt.Errorf("review attachments-upload: refusing to read symlink %q", pathValue)
+				return shared.WithDiagnostic(shared.NewValidationError(fmt.Errorf("review attachments-upload: refusing to read symlink %q", pathValue)), shared.DiagnosticFileInvalidFormat, "--file")
 			}
 			if info.IsDir() {
-				return fmt.Errorf("review attachments-upload: %q is a directory", pathValue)
+				return shared.WithDiagnostic(shared.NewValidationError(fmt.Errorf("review attachments-upload: %q is a directory", pathValue)), shared.DiagnosticFileInvalidFormat, "--file")
 			}
 			if info.Size() <= 0 {
-				return fmt.Errorf("review attachments-upload: file size must be greater than 0")
+				return shared.WithDiagnostic(shared.NewValidationError(fmt.Errorf("review attachments-upload: file size must be greater than 0")), shared.DiagnosticFileInvalidFormat, "--file")
 			}
+			source, err := os.Open(pathValue)
+			if err != nil {
+				code := shared.DiagnosticFileInvalidFormat
+				switch {
+				case errors.Is(err, os.ErrNotExist):
+					code = shared.DiagnosticFileNotFound
+				case errors.Is(err, os.ErrPermission):
+					code = shared.DiagnosticFilePermissionDenied
+				}
+				return shared.WithDiagnostic(shared.NewValidationError(fmt.Errorf("review attachments-upload: upload failed: %w", err)), code, "--file")
+			}
+			_ = source.Close()
 
 			client, err := shared.GetASCClient()
 			if err != nil {
@@ -267,7 +327,7 @@ Examples:
 func ReviewDetailsAttachmentsDeleteCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("attachments-delete", flag.ExitOnError)
 
-	attachmentID := fs.String("id", "", "Review attachment ID (required)")
+	attachmentID := shared.BindResourceIDFlag(fs, "id", "appStoreReviewAttachments", "Review attachment ID (required)")
 	confirm := fs.Bool("confirm", false, "Confirm deletion")
 	output := shared.BindOutputFlags(fs)
 
@@ -285,11 +345,11 @@ Examples:
 			attachmentValue := strings.TrimSpace(*attachmentID)
 			if attachmentValue == "" {
 				fmt.Fprintln(os.Stderr, "Error: --id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--id")
 			}
 			if !*confirm {
 				fmt.Fprintln(os.Stderr, "Error: --confirm is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--confirm")
 			}
 
 			client, err := shared.GetASCClient()

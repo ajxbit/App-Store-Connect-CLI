@@ -13,6 +13,7 @@ func TestMerchantIDsCommandShape(t *testing.T) {
 	cmd := MerchantIDsCommand()
 	if cmd == nil {
 		t.Fatal("expected merchant-ids command")
+		return
 	}
 	if cmd.Name != "merchant-ids" {
 		t.Fatalf("unexpected command name: %q", cmd.Name)
@@ -32,8 +33,8 @@ func TestMerchantIDsValidationErrors(t *testing.T) {
 			t.Fatalf("parse error: %v", err)
 		}
 		err := cmd.Exec(context.Background(), nil)
-		if err == nil || errors.Is(err, flag.ErrHelp) {
-			t.Fatalf("expected non-ErrHelp error, got %v", err)
+		if err == nil || !errors.Is(err, flag.ErrHelp) {
+			t.Fatalf("expected usage error, got %v", err)
 		}
 	})
 

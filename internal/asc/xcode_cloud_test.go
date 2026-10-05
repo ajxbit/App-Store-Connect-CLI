@@ -82,6 +82,46 @@ func TestPrintTable_XcodeCloudRunResult(t *testing.T) {
 	}
 }
 
+func TestPrintTable_XcodeCloudDoctorResultUsesRegisteredRenderer(t *testing.T) {
+	result := &XcodeCloudDoctorResult{
+		Run: &XcodeCloudStatusResult{
+			BuildRunID:        "run-92",
+			BuildNumber:       92,
+			ExecutionProgress: "COMPLETE",
+			CompletionStatus:  "FAILED",
+		},
+		Summary: XcodeCloudDoctorSummary{TotalActions: 1, FailedActions: 1},
+		Actions: []XcodeCloudDoctorAction{{
+			ID:               "action-1",
+			Name:             "Archive - iOS",
+			CompletionStatus: "FAILED",
+		}},
+		LogBundles: []XcodeCloudDoctorLogBundle{{
+			ArtifactID:           "log-1",
+			ActionID:             "action-1",
+			Inspected:            true,
+			DiagnosticsTruncated: true,
+			Diagnostics: []XcodeCloudDoctorLogDiagnostic{{
+				Code:       "ITMS-90478",
+				Message:    "Invalid Version",
+				SourceFile: "IDEDistribution.standard.log",
+			}},
+		}},
+		Conclusion: "The Xcode Cloud build run failed.",
+		NextAction: "Resolve the reported issues.",
+	}
+
+	output := captureXcodeCloudStdout(t, func() error {
+		return PrintTable(result)
+	})
+
+	for _, expected := range []string{"Summary field", "run-92", "Actions ID", "action-1", "Archive - iOS", "Diagnostics truncated", "Log diagnostics action ID", "ITMS-90478", "Invalid Version", "IDEDistribution.standard.log"} {
+		if !strings.Contains(output, expected) {
+			t.Fatalf("registered doctor renderer output missing %q: %s", expected, output)
+		}
+	}
+}
+
 func TestPrintMarkdown_XcodeCloudRunResult(t *testing.T) {
 	result := &XcodeCloudRunResult{
 		BuildRunID:        "run-123",
@@ -336,6 +376,27 @@ func TestPrintMarkdown_CiBuildRuns(t *testing.T) {
 	}
 	if !strings.Contains(output, "RUNNING") {
 		t.Fatalf("expected execution progress in output, got: %s", output)
+	}
+}
+
+func TestPrintTable_CiBuildActionsIncludesID(t *testing.T) {
+	resp := &CiBuildActionsResponse{
+		Data: []CiBuildActionResource{{
+			ID: "action-1",
+			Attributes: CiBuildActionAttributes{
+				Name:              "Archive",
+				ActionType:        "ARCHIVE",
+				ExecutionProgress: CiBuildRunExecutionProgressComplete,
+			},
+		}},
+	}
+
+	headers, rows := ciBuildActionsRows(resp)
+	if len(headers) == 0 || headers[0] != "ID" {
+		t.Fatalf("expected first action header ID, got %#v", headers)
+	}
+	if len(rows) != 1 || len(rows[0]) == 0 || rows[0][0] != "action-1" {
+		t.Fatalf("expected first action value action-1, got %#v", rows)
 	}
 }
 

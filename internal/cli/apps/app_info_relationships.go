@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/peterbourgon/ff/v3/ffcli"
 
@@ -82,9 +83,8 @@ type appInfoCategoryFetcher func(ctx context.Context, client *asc.Client, appInf
 func appsInfoCategoryRelationshipCommand(name, shortHelp string, fetch appInfoCategoryFetcher) *ffcli.Command {
 	fs := flag.NewFlagSet("apps info relationships "+name, flag.ExitOnError)
 
-	appID := fs.String("app", "", "App Store Connect app ID (or ASC_APP_ID env)")
-	infoID := fs.String("info-id", "", "App Info ID (optional override)")
-	legacyID := fs.String("id", "", "Deprecated alias for --info-id")
+	appID := shared.BindResourceIDFlag(fs, "app", "apps", "App Store Connect app ID (or ASC_APP_ID env)")
+	infoID := shared.BindResourceIDFlag(fs, "info-id", "appInfos", "App Info ID (optional override)")
 	output := shared.BindOutputFlags(fs)
 
 	return &ffcli.Command{
@@ -99,14 +99,11 @@ Examples:
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
-			infoIDValue, err := resolveInfoIDFlags(*infoID, *legacyID, "--id")
-			if err != nil {
-				return shared.UsageError(err.Error())
-			}
+			infoIDValue := strings.TrimSpace(*infoID)
 			resolvedAppID := shared.ResolveAppID(*appID)
 			if resolvedAppID == "" && infoIDValue == "" {
 				fmt.Fprintln(os.Stderr, "Error: --app or --info-id is required (or set ASC_APP_ID)")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("")
 			}
 
 			client, err := shared.GetASCClient()
@@ -117,7 +114,7 @@ Examples:
 			requestCtx, cancel := shared.ContextWithTimeout(ctx)
 			defer cancel()
 
-			resolvedInfoID, err := shared.ResolveAppInfoID(requestCtx, client, resolvedAppID, infoIDValue)
+			resolvedInfoID, err := shared.ResolveAppInfoIDWithFlag(requestCtx, client, resolvedAppID, infoIDValue, "--info-id")
 			if err != nil {
 				return fmt.Errorf("apps info relationships %s: %w", name, err)
 			}

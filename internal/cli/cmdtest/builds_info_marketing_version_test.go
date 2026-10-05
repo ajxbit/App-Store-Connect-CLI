@@ -200,7 +200,7 @@ func TestBuildsInfoBuildNumberRequiresUniqueMatch(t *testing.T) {
 			t.Fatalf("expected filter[version]=42, got %q", query.Get("filter[version]"))
 		}
 		if query.Get("filter[preReleaseVersion.platform]") != "IOS" {
-			t.Fatalf("expected implicit IOS platform filter, got %q", query.Get("filter[preReleaseVersion.platform]"))
+			t.Fatalf("expected IOS platform filter, got %q", query.Get("filter[preReleaseVersion.platform]"))
 		}
 		if query.Get("sort") != "-uploadedDate" {
 			t.Fatalf("expected sort=-uploadedDate, got %q", query.Get("sort"))
@@ -227,7 +227,7 @@ func TestBuildsInfoBuildNumberRequiresUniqueMatch(t *testing.T) {
 
 	var runErr error
 	stdout, stderr := captureOutput(t, func() {
-		if err := root.Parse([]string{"builds", "info", "--app", "123456789", "--build-number", "42", "--output", "json"}); err != nil {
+		if err := root.Parse([]string{"builds", "info", "--app", "123456789", "--build-number", "42", "--platform", "IOS", "--output", "json"}); err != nil {
 			t.Fatalf("parse error: %v", err)
 		}
 		runErr = root.Run(context.Background())
@@ -236,14 +236,15 @@ func TestBuildsInfoBuildNumberRequiresUniqueMatch(t *testing.T) {
 	if runErr == nil {
 		t.Fatal("expected unique build-number lookup error")
 	}
-	if got := strings.TrimSpace(stderr); got != deprecatedImplicitIOSBuildNumberPlatformWarning {
-		t.Fatalf("expected only the implicit IOS deprecation warning on stderr, got %q", stderr)
+	if !isUsageClassError(runErr) {
+		t.Fatalf("expected ambiguity to be a usage error, got %v", runErr)
 	}
-	if !strings.Contains(runErr.Error(), `multiple builds found for app 123456789 with build number "42"`) {
+	assertUsageDiagnosticFirstLine(t, stderr, `2 builds match build number "42" for platform IOS for app 123456789; pass --build-id with one of:`)
+	if !strings.Contains(runErr.Error(), `2 builds match build number "42" for platform IOS for app 123456789; pass --build-id with one of:`) {
 		t.Fatalf("expected ambiguity error, got %v", runErr)
 	}
-	if !strings.Contains(runErr.Error(), "add --version, or use --build-id") {
-		t.Fatalf("expected actionable ambiguity hint, got %v", runErr)
+	if !strings.Contains(runErr.Error(), "build-ios") || !strings.Contains(runErr.Error(), "build-macos") {
+		t.Fatalf("expected candidate build IDs in the ambiguity error, got %v", runErr)
 	}
 	if stdout != "" {
 		t.Fatalf("expected empty stdout on ambiguity error, got %q", stdout)

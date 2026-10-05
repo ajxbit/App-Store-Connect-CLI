@@ -10,6 +10,7 @@ func TestVersionCommand(t *testing.T) {
 	cmd := VersionCommand("v1.2.3")
 	if cmd == nil {
 		t.Fatal("expected non-nil version command")
+		return
 	}
 	if cmd.Name != "version" {
 		t.Fatalf("unexpected command name: %q", cmd.Name)
@@ -29,6 +30,7 @@ func TestSubcommandsIncludesCoreEntries(t *testing.T) {
 	for _, sub := range subs {
 		if sub == nil {
 			t.Fatal("expected no nil root subcommands")
+			return
 		}
 		name := strings.TrimSpace(sub.Name)
 		if name == "" {
@@ -37,7 +39,7 @@ func TestSubcommandsIncludesCoreEntries(t *testing.T) {
 		names[name] = struct{}{}
 	}
 
-	required := []string{"auth", "doctor", "account", "insights", "builds", "reviews", "version", "completion"}
+	required := []string{"auth", "doctor", "account", "ads", "optimize", "insights", "builds", "reviews", "system-status", "version", "completion"}
 	for _, name := range required {
 		if _, ok := names[name]; !ok {
 			t.Fatalf("expected root subcommands to include %q", name)

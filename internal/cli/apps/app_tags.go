@@ -90,51 +90,61 @@ Examples:
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
 			if *limit != 0 && (*limit < 1 || *limit > 200) {
-				return fmt.Errorf("app-tags list: --limit must be between 1 and 200")
+				return shared.UsageErrorf("app-tags list: --limit must be between 1 and 200")
 			}
 			if err := shared.ValidateNextURL(*next); err != nil {
-				return fmt.Errorf("app-tags list: %w", err)
+				return shared.UsageErrorf("app-tags list: %v", err)
 			}
 			if err := shared.ValidateSort(*sort, "name", "-name"); err != nil {
-				return fmt.Errorf("app-tags list: %w", err)
+				return shared.UsageErrorf("app-tags list: %v", err)
 			}
 			if *territoryLimit != 0 && (*territoryLimit < 1 || *territoryLimit > 50) {
-				return fmt.Errorf("app-tags list: --territory-limit must be between 1 and 50")
+				return shared.UsageErrorf("app-tags list: --territory-limit must be between 1 and 50")
 			}
 
 			visibleValues, err := normalizeAppTagVisibilityFilter(*visible)
 			if err != nil {
-				return fmt.Errorf("app-tags list: %w", err)
+				return shared.UsageErrorf("app-tags list: %v", err)
 			}
 
 			fieldsValue, err := normalizeAppTagFields(*fields)
 			if err != nil {
-				return fmt.Errorf("app-tags list: %w", err)
+				return shared.UsageErrorf("app-tags list: %v", err)
 			}
 
 			includeValues, err := normalizeAppTagInclude(*include)
 			if err != nil {
-				return fmt.Errorf("app-tags list: %w", err)
+				return shared.UsageErrorf("app-tags list: %v", err)
 			}
 
 			territoryFieldsValue, err := normalizeTerritoryFields(*territoryFields)
 			if err != nil {
-				return fmt.Errorf("app-tags list: %w", err)
+				return shared.UsageErrorf("app-tags list: %v", err)
 			}
 
 			if len(territoryFieldsValue) > 0 && !shared.HasInclude(includeValues, "territories") {
-				fmt.Fprintf(os.Stderr, "Error: --territory-fields requires --include territories\n\n")
-				return flag.ErrHelp
+				return shared.WithDiagnostic(
+					shared.UsageErrorf("--territory-fields requires --include territories"),
+					shared.DiagnosticConflictingInput,
+					"--territory-fields",
+				)
 			}
 			if *territoryLimit != 0 && !shared.HasInclude(includeValues, "territories") {
-				fmt.Fprintf(os.Stderr, "Error: --territory-limit requires --include territories\n\n")
-				return flag.ErrHelp
+				return shared.WithDiagnostic(
+					shared.UsageErrorf("--territory-limit requires --include territories"),
+					shared.DiagnosticConflictingInput,
+					"--territory-limit",
+				)
 			}
 
 			resolvedAppID := shared.ResolveAppID(*appID)
 			if resolvedAppID == "" && strings.TrimSpace(*next) == "" {
 				fmt.Fprintf(os.Stderr, "Error: --app is required (or set ASC_APP_ID)\n\n")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--app")
+			}
+
+			if appTagTerritoriesRequested(fieldsValue, includeValues, *next) {
+				warnAppTagTerritoryDeprecation()
 			}
 
 			client, err := shared.GetASCClient()
@@ -195,10 +205,10 @@ Examples:
 
 // AppTagsGetCommand returns the get subcommand.
 func AppTagsGetCommand() *ffcli.Command {
-	fs := flag.NewFlagSet("app-tags get", flag.ExitOnError)
+	fs := flag.NewFlagSet("app-tags view", flag.ExitOnError)
 
 	appID := fs.String("app", "", "App Store Connect app ID (or ASC_APP_ID env)")
-	tagID := fs.String("id", "", "App tag ID")
+	tagID := shared.BindResourceIDFlag(fs, "id", "appTags", "App tag ID")
 	fields := fs.String("fields", "", "Fields to include: name, visibleInAppStore, territories")
 	include := fs.String("include", "", "Include related resources: territories")
 	territoryFields := fs.String("territory-fields", "", "Territory fields to include: currency")
@@ -206,8 +216,8 @@ func AppTagsGetCommand() *ffcli.Command {
 	output := shared.BindOutputFlags(fs)
 
 	return &ffcli.Command{
-		Name:       "get",
-		ShortUsage: "asc app-tags get [flags]",
+		Name:       "view",
+		ShortUsage: "asc app-tags view [flags]",
 		ShortHelp:  "View an app tag by ID.",
 		LongHelp: `View an app tag by ID.
 
@@ -221,32 +231,32 @@ Examples:
 			trimmedID := strings.TrimSpace(*tagID)
 			if trimmedID == "" {
 				fmt.Fprintln(os.Stderr, "Error: --id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--id")
 			}
 
 			resolvedAppID := shared.ResolveAppID(*appID)
 			if resolvedAppID == "" {
 				fmt.Fprintln(os.Stderr, "Error: --app is required (or set ASC_APP_ID)")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--app")
 			}
 
 			if *territoryLimit != 0 && (*territoryLimit < 1 || *territoryLimit > 50) {
-				return fmt.Errorf("app-tags get: --territory-limit must be between 1 and 50")
+				return shared.UsageError("app-tags view: --territory-limit must be between 1 and 50")
 			}
 
 			fieldsValue, err := normalizeAppTagFields(*fields)
 			if err != nil {
-				return fmt.Errorf("app-tags get: %w", err)
+				return fmt.Errorf("app-tags view: %w", err)
 			}
 
 			includeValues, err := normalizeAppTagInclude(*include)
 			if err != nil {
-				return fmt.Errorf("app-tags get: %w", err)
+				return fmt.Errorf("app-tags view: %w", err)
 			}
 
 			territoryFieldsValue, err := normalizeTerritoryFields(*territoryFields)
 			if err != nil {
-				return fmt.Errorf("app-tags get: %w", err)
+				return fmt.Errorf("app-tags view: %w", err)
 			}
 
 			includeTerritories := shared.HasInclude(includeValues, "territories")
@@ -259,9 +269,13 @@ Examples:
 				return flag.ErrHelp
 			}
 
+			if appTagTerritoriesRequested(fieldsValue, includeValues, "") {
+				warnAppTagTerritoryDeprecation()
+			}
+
 			client, err := shared.GetASCClient()
 			if err != nil {
-				return fmt.Errorf("app-tags get: %w", err)
+				return fmt.Errorf("app-tags view: %w", err)
 			}
 
 			requestCtx, cancel := shared.ContextWithTimeout(ctx)
@@ -285,7 +299,7 @@ Examples:
 
 			resp, err := findAppTagByID(requestCtx, client, resolvedAppID, trimmedID, opts...)
 			if err != nil {
-				return fmt.Errorf("app-tags get: %w", err)
+				return fmt.Errorf("app-tags view: %w", err)
 			}
 
 			if includeTerritories {
@@ -299,12 +313,12 @@ Examples:
 
 				territories, err := client.GetAppTagTerritories(requestCtx, trimmedID, territoryOpts...)
 				if err != nil {
-					return fmt.Errorf("app-tags get: failed to fetch territories: %w", err)
+					return fmt.Errorf("app-tags view: failed to fetch territories: %w", err)
 				}
 				if len(territories.Data) > 0 {
 					included, err := json.Marshal(territories.Data)
 					if err != nil {
-						return fmt.Errorf("app-tags get: %w", err)
+						return fmt.Errorf("app-tags view: %w", err)
 					}
 					resp.Included = included
 				}
@@ -319,7 +333,7 @@ Examples:
 func AppTagsUpdateCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("app-tags update", flag.ExitOnError)
 
-	tagID := fs.String("id", "", "App tag ID")
+	tagID := shared.BindResourceIDFlag(fs, "id", "appTags", "App tag ID")
 	visibleInAppStore := fs.Bool("visible-in-app-store", false, "Set visibility in the App Store")
 	confirm := fs.Bool("confirm", false, "Confirm update")
 	output := shared.BindOutputFlags(fs)
@@ -339,7 +353,7 @@ Examples:
 			trimmedID := strings.TrimSpace(*tagID)
 			if trimmedID == "" {
 				fmt.Fprintln(os.Stderr, "Error: --id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--id")
 			}
 
 			visited := map[string]bool{}
@@ -348,11 +362,11 @@ Examples:
 			})
 			if !visited["visible-in-app-store"] {
 				fmt.Fprintln(os.Stderr, "Error: --visible-in-app-store is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--visible-in-app-store")
 			}
 			if !*confirm {
 				fmt.Fprintln(os.Stderr, "Error: --confirm is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--confirm")
 			}
 
 			client, err := shared.GetASCClient()
@@ -382,7 +396,7 @@ Examples:
 func AppTagsTerritoriesCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("app-tags territories", flag.ExitOnError)
 
-	tagID := fs.String("id", "", "App tag ID")
+	tagID := shared.BindResourceIDFlag(fs, "id", "appTags", "App tag ID")
 	fields := fs.String("fields", "", "Fields to include: currency")
 	limit := fs.Int("limit", 0, "Maximum results per page (1-200)")
 	next := fs.String("next", "", "Fetch next page using a links.next URL")
@@ -392,8 +406,10 @@ func AppTagsTerritoriesCommand() *ffcli.Command {
 	return &ffcli.Command{
 		Name:       "territories",
 		ShortUsage: "asc app-tags territories --id TAG_ID [flags]",
-		ShortHelp:  "List territories for an app tag.",
+		ShortHelp:  "List territories for an app tag (deprecated in API 4.5).",
 		LongHelp: `List territories for an app tag.
+
+Deprecated in API 4.5. Requests remain available for compatibility and emit a stderr warning.
 
 Examples:
   asc app-tags territories --id "TAG_ID"
@@ -405,19 +421,21 @@ Examples:
 			trimmedID := strings.TrimSpace(*tagID)
 			if trimmedID == "" && strings.TrimSpace(*next) == "" {
 				fmt.Fprintln(os.Stderr, "Error: --id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--id")
 			}
 			if *limit != 0 && (*limit < 1 || *limit > 200) {
-				return fmt.Errorf("app-tags territories: --limit must be between 1 and 200")
+				return shared.UsageError("app-tags territories: --limit must be between 1 and 200")
 			}
 			if err := shared.ValidateNextURL(*next); err != nil {
-				return fmt.Errorf("app-tags territories: %w", err)
+				return shared.UsageErrorf("app-tags territories: %v", err)
 			}
 
 			fieldsValue, err := normalizeTerritoryFields(*fields)
 			if err != nil {
 				return fmt.Errorf("app-tags territories: %w", err)
 			}
+
+			warnAppTagTerritoryDeprecation()
 
 			client, err := shared.GetASCClient()
 			if err != nil {
@@ -466,7 +484,7 @@ Examples:
 func AppTagsTerritoriesRelationshipsCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("app-tags territories-links", flag.ExitOnError)
 
-	tagID := fs.String("id", "", "App tag ID")
+	tagID := shared.BindResourceIDFlag(fs, "id", "appTags", "App tag ID")
 	limit := fs.Int("limit", 0, "Maximum results per page (1-200)")
 	next := fs.String("next", "", "Fetch next page using a links.next URL")
 	paginate := fs.Bool("paginate", false, "Automatically fetch all pages (aggregate results)")
@@ -475,8 +493,10 @@ func AppTagsTerritoriesRelationshipsCommand() *ffcli.Command {
 	return &ffcli.Command{
 		Name:       "territories-links",
 		ShortUsage: "asc app-tags territories-links --id TAG_ID [flags]",
-		ShortHelp:  "List territory relationships for an app tag.",
+		ShortHelp:  "List territory relationships for an app tag (deprecated in API 4.5).",
 		LongHelp: `List territory relationships for an app tag.
+
+Deprecated in API 4.5. Requests remain available for compatibility and emit a stderr warning.
 
 Examples:
   asc app-tags territories-links --id "TAG_ID"
@@ -487,14 +507,16 @@ Examples:
 			trimmedID := strings.TrimSpace(*tagID)
 			if trimmedID == "" && strings.TrimSpace(*next) == "" {
 				fmt.Fprintln(os.Stderr, "Error: --id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--id")
 			}
 			if *limit != 0 && (*limit < 1 || *limit > 200) {
-				return fmt.Errorf("app-tags territories-links: --limit must be between 1 and 200")
+				return shared.UsageError("app-tags territories-links: --limit must be between 1 and 200")
 			}
 			if err := shared.ValidateNextURL(*next); err != nil {
-				return fmt.Errorf("app-tags territories-links: %w", err)
+				return shared.UsageErrorf("app-tags territories-links: %v", err)
 			}
+
+			warnAppTagTerritoryDeprecation()
 
 			client, err := shared.GetASCClient()
 			if err != nil {
@@ -562,16 +584,16 @@ Examples:
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
 			if *limit != 0 && (*limit < 1 || *limit > 200) {
-				return fmt.Errorf("app-tags links: --limit must be between 1 and 200")
+				return shared.UsageError("app-tags links: --limit must be between 1 and 200")
 			}
 			if err := shared.ValidateNextURL(*next); err != nil {
-				return fmt.Errorf("app-tags links: %w", err)
+				return shared.UsageErrorf("app-tags links: %v", err)
 			}
 
 			resolvedAppID := shared.ResolveAppID(*appID)
 			if resolvedAppID == "" && strings.TrimSpace(*next) == "" {
 				fmt.Fprintf(os.Stderr, "Error: --app is required (or set ASC_APP_ID)\n\n")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--app")
 			}
 
 			client, err := shared.GetASCClient()
@@ -612,26 +634,6 @@ Examples:
 			return shared.PrintOutput(resp, *output.Output, *output.Pretty)
 		},
 	}
-}
-
-func DeprecatedAppTagsTerritoriesRelationshipsAliasCommand() *ffcli.Command {
-	return shared.DeprecatedAliasLeafCommand(
-		AppTagsTerritoriesRelationshipsCommand(),
-		"territories-relationships",
-		"asc app-tags territories-links --id TAG_ID [flags]",
-		"asc app-tags territories-links",
-		"Warning: `asc app-tags territories-relationships` is deprecated. Use `asc app-tags territories-links`.",
-	)
-}
-
-func DeprecatedAppTagsRelationshipsAliasCommand() *ffcli.Command {
-	return shared.DeprecatedAliasLeafCommand(
-		AppTagsRelationshipsCommand(),
-		"relationships",
-		"asc app-tags links --app APP_ID [flags]",
-		"asc app-tags links",
-		"Warning: `asc app-tags relationships` is deprecated. Use `asc app-tags links`.",
-	)
 }
 
 func normalizeAppTagVisibilityFilter(value string) ([]string, error) {

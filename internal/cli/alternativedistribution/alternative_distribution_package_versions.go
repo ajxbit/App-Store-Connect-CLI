@@ -25,7 +25,7 @@ func AlternativeDistributionPackageVersionsCommand() *ffcli.Command {
 
 Examples:
   asc alternative-distribution packages versions list --package-id "PACKAGE_ID"
-  asc alternative-distribution packages versions get --version-id "VERSION_ID"
+  asc alternative-distribution packages versions view --version-id "VERSION_ID"
   asc alternative-distribution packages versions deltas --version-id "VERSION_ID"
   asc alternative-distribution packages versions variants --version-id "VERSION_ID"`,
 		FlagSet:   fs,
@@ -46,7 +46,7 @@ Examples:
 func AlternativeDistributionPackageVersionsListCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("list", flag.ExitOnError)
 
-	packageID := fs.String("package-id", "", "Alternative distribution package ID")
+	packageID := shared.BindResourceIDFlag(fs, "package-id", "alternativeDistributionPackages", "Alternative distribution package ID")
 	limit := fs.Int("limit", 0, "Maximum results per page (1-200)")
 	next := fs.String("next", "", "Fetch next page using a links.next URL")
 	paginate := fs.Bool("paginate", false, "Automatically fetch all pages (aggregate results)")
@@ -67,13 +67,13 @@ Examples:
 			trimmedID := strings.TrimSpace(*packageID)
 			if trimmedID == "" {
 				fmt.Fprintln(os.Stderr, "Error: --package-id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--package-id")
 			}
 			if *limit != 0 && (*limit < 1 || *limit > alternativeDistributionMaxLimit) {
-				return fmt.Errorf("alternative-distribution packages versions list: --limit must be between 1 and %d", alternativeDistributionMaxLimit)
+				return shared.UsageErrorf("alternative-distribution packages versions list: --limit must be between 1 and %d", alternativeDistributionMaxLimit)
 			}
 			if err := shared.ValidateNextURL(*next); err != nil {
-				return fmt.Errorf("alternative-distribution packages versions list: %w", err)
+				return shared.UsageErrorf("alternative-distribution packages versions list: %v", err)
 			}
 
 			client, err := shared.GetASCClient()
@@ -118,31 +118,31 @@ Examples:
 
 // AlternativeDistributionPackageVersionsGetCommand returns the package versions get subcommand.
 func AlternativeDistributionPackageVersionsGetCommand() *ffcli.Command {
-	fs := flag.NewFlagSet("get", flag.ExitOnError)
+	fs := flag.NewFlagSet("view", flag.ExitOnError)
 
-	versionID := fs.String("version-id", "", "Alternative distribution package version ID")
+	versionID := shared.BindResourceIDFlag(fs, "version-id", "alternativeDistributionPackageVersions", "Alternative distribution package version ID")
 	output := shared.BindOutputFlags(fs)
 
 	return &ffcli.Command{
-		Name:       "get",
-		ShortUsage: "asc alternative-distribution packages versions get --version-id \"VERSION_ID\"",
-		ShortHelp:  "Get an alternative distribution package version.",
-		LongHelp: `Get an alternative distribution package version.
+		Name:       "view",
+		ShortUsage: "asc alternative-distribution packages versions view --version-id \"VERSION_ID\"",
+		ShortHelp:  "View an alternative distribution package version.",
+		LongHelp: `View an alternative distribution package version.
 
 Examples:
-  asc alternative-distribution packages versions get --version-id "VERSION_ID"`,
+  asc alternative-distribution packages versions view --version-id "VERSION_ID"`,
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
 			trimmedID := strings.TrimSpace(*versionID)
 			if trimmedID == "" {
 				fmt.Fprintln(os.Stderr, "Error: --version-id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--version-id")
 			}
 
 			client, err := shared.GetASCClient()
 			if err != nil {
-				return fmt.Errorf("alternative-distribution packages versions get: %w", err)
+				return fmt.Errorf("alternative-distribution packages versions view: %w", err)
 			}
 
 			requestCtx, cancel := shared.ContextWithTimeout(ctx)
@@ -150,7 +150,7 @@ Examples:
 
 			resp, err := client.GetAlternativeDistributionPackageVersion(requestCtx, trimmedID)
 			if err != nil {
-				return fmt.Errorf("alternative-distribution packages versions get: failed to fetch: %w", err)
+				return fmt.Errorf("alternative-distribution packages versions view: failed to fetch: %w", err)
 			}
 
 			return shared.PrintOutput(resp, *output.Output, *output.Pretty)
@@ -162,7 +162,7 @@ Examples:
 func AlternativeDistributionPackageVersionsDeltasCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("deltas", flag.ExitOnError)
 
-	versionID := fs.String("version-id", "", "Alternative distribution package version ID")
+	versionID := shared.BindResourceIDFlag(fs, "version-id", "alternativeDistributionPackageVersions", "Alternative distribution package version ID")
 	limit := fs.Int("limit", 0, "Maximum results per page (1-200)")
 	next := fs.String("next", "", "Fetch next page using a links.next URL")
 	paginate := fs.Bool("paginate", false, "Automatically fetch all pages (aggregate results)")
@@ -183,13 +183,13 @@ Examples:
 			trimmedID := strings.TrimSpace(*versionID)
 			if trimmedID == "" {
 				fmt.Fprintln(os.Stderr, "Error: --version-id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--version-id")
 			}
 			if *limit != 0 && (*limit < 1 || *limit > alternativeDistributionMaxLimit) {
-				return fmt.Errorf("alternative-distribution packages versions deltas: --limit must be between 1 and %d", alternativeDistributionMaxLimit)
+				return shared.UsageErrorf("alternative-distribution packages versions deltas: --limit must be between 1 and %d", alternativeDistributionMaxLimit)
 			}
 			if err := shared.ValidateNextURL(*next); err != nil {
-				return fmt.Errorf("alternative-distribution packages versions deltas: %w", err)
+				return shared.UsageErrorf("alternative-distribution packages versions deltas: %v", err)
 			}
 
 			client, err := shared.GetASCClient()
@@ -236,7 +236,7 @@ Examples:
 func AlternativeDistributionPackageVersionsVariantsCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("variants", flag.ExitOnError)
 
-	versionID := fs.String("version-id", "", "Alternative distribution package version ID")
+	versionID := shared.BindResourceIDFlag(fs, "version-id", "alternativeDistributionPackageVersions", "Alternative distribution package version ID")
 	limit := fs.Int("limit", 0, "Maximum results per page (1-200)")
 	next := fs.String("next", "", "Fetch next page using a links.next URL")
 	paginate := fs.Bool("paginate", false, "Automatically fetch all pages (aggregate results)")
@@ -257,13 +257,13 @@ Examples:
 			trimmedID := strings.TrimSpace(*versionID)
 			if trimmedID == "" {
 				fmt.Fprintln(os.Stderr, "Error: --version-id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--version-id")
 			}
 			if *limit != 0 && (*limit < 1 || *limit > alternativeDistributionMaxLimit) {
-				return fmt.Errorf("alternative-distribution packages versions variants: --limit must be between 1 and %d", alternativeDistributionMaxLimit)
+				return shared.UsageErrorf("alternative-distribution packages versions variants: --limit must be between 1 and %d", alternativeDistributionMaxLimit)
 			}
 			if err := shared.ValidateNextURL(*next); err != nil {
-				return fmt.Errorf("alternative-distribution packages versions variants: %w", err)
+				return shared.UsageErrorf("alternative-distribution packages versions variants: %v", err)
 			}
 
 			client, err := shared.GetASCClient()

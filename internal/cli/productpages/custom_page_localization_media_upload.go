@@ -7,6 +7,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/kballard/go-shellquote"
 	"github.com/peterbourgon/ff/v3/ffcli"
 
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/asc"
@@ -20,7 +21,7 @@ var customPageMediaClientFactory = shared.GetASCClient
 func CustomPageLocalizationsScreenshotSetsUploadCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("custom-page-localizations screenshot-sets upload", flag.ExitOnError)
 
-	localizationID := fs.String("localization-id", "", "Custom product page localization ID")
+	localizationID := shared.BindResourceIDFlag(fs, "localization-id", "appCustomProductPageLocalizations", "Custom product page localization ID")
 	path := fs.String("path", "", "Path to screenshot file or directory")
 	deviceType := fs.String("device-type", "", "Device type (e.g., IPHONE_65)")
 	output := shared.BindOutputFlags(fs)
@@ -50,7 +51,7 @@ Examples:
 func CustomPageLocalizationsScreenshotSetsSyncCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("custom-page-localizations screenshot-sets sync", flag.ExitOnError)
 
-	localizationID := fs.String("localization-id", "", "Custom product page localization ID")
+	localizationID := shared.BindResourceIDFlag(fs, "localization-id", "appCustomProductPageLocalizations", "Custom product page localization ID")
 	path := fs.String("path", "", "Path to screenshot file or directory")
 	deviceType := fs.String("device-type", "", "Device type (e.g., IPHONE_65)")
 	confirm := fs.Bool("confirm", false, "Confirm sync (deletes existing media in the matching set before upload)")
@@ -71,7 +72,7 @@ Examples:
 		Exec: func(ctx context.Context, args []string) error {
 			if !*confirm {
 				fmt.Fprintln(os.Stderr, "Error: --confirm is required to sync")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--confirm")
 			}
 
 			result, err := executeCustomPageScreenshotUpload(ctx, *localizationID, *path, *deviceType, true)
@@ -87,7 +88,7 @@ Examples:
 func CustomPageLocalizationsPreviewSetsUploadCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("custom-page-localizations preview-sets upload", flag.ExitOnError)
 
-	localizationID := fs.String("localization-id", "", "Custom product page localization ID")
+	localizationID := shared.BindResourceIDFlag(fs, "localization-id", "appCustomProductPageLocalizations", "Custom product page localization ID")
 	path := fs.String("path", "", "Path to preview file or directory")
 	deviceType := fs.String("device-type", "", "Device type (e.g., IPHONE_65)")
 	output := shared.BindOutputFlags(fs)
@@ -117,7 +118,7 @@ Examples:
 func CustomPageLocalizationsPreviewSetsSyncCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("custom-page-localizations preview-sets sync", flag.ExitOnError)
 
-	localizationID := fs.String("localization-id", "", "Custom product page localization ID")
+	localizationID := shared.BindResourceIDFlag(fs, "localization-id", "appCustomProductPageLocalizations", "Custom product page localization ID")
 	path := fs.String("path", "", "Path to preview file or directory")
 	deviceType := fs.String("device-type", "", "Device type (e.g., IPHONE_65)")
 	confirm := fs.Bool("confirm", false, "Confirm sync (deletes existing media in the matching set before upload)")
@@ -138,7 +139,7 @@ Examples:
 		Exec: func(ctx context.Context, args []string) error {
 			if !*confirm {
 				fmt.Fprintln(os.Stderr, "Error: --confirm is required to sync")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--confirm")
 			}
 
 			result, err := executeCustomPagePreviewUpload(ctx, *localizationID, *path, *deviceType, true)
@@ -155,17 +156,22 @@ func executeCustomPageScreenshotUpload(
 	localizationID, path, deviceType string,
 	sync bool,
 ) (*asc.CustomProductPageScreenshotUploadResult, error) {
+	trimmedLocalizationID := strings.TrimSpace(localizationID)
+	trimmedPath := strings.TrimSpace(path)
+	trimmedDeviceType := strings.TrimSpace(deviceType)
 	return assets.ExecuteScreenshotSetUpload(ctx, assets.ScreenshotSetUploadOptions[*asc.CustomProductPageScreenshotUploadResult]{
 		LocalizationID: localizationID,
 		Path:           path,
 		DeviceType:     deviceType,
 		Replace:        sync,
+		InspectCommand: fmt.Sprintf("asc product-pages custom-pages localizations screenshot-sets list --localization-id %q --include-screenshots --paginate --output json", trimmedLocalizationID),
+		ReplaceCommand: shellquote.Join("asc", "product-pages", "custom-pages", "localizations", "screenshot-sets", "sync", "--localization-id", trimmedLocalizationID, "--path", trimmedPath, "--device-type", trimmedDeviceType, "--confirm"),
 		ClientFactory:  customPageMediaClientFactory,
 		RequestContext: contextWithCustomPageMediaUploadTimeout,
 		UploadContext:  contextWithCustomPageMediaUploadTimeout,
 		Access: assets.ScreenshotSetAccess{
-			List: func(ctx context.Context, client *asc.Client, localizationID string) (*asc.AppScreenshotSetsResponse, error) {
-				return client.GetAppCustomProductPageLocalizationScreenshotSets(ctx, localizationID)
+			List: func(ctx context.Context, client *asc.Client, localizationID string, requestContext asc.RequestContextFunc) (*asc.AppScreenshotSetsResponse, error) {
+				return client.GetAllAppCustomProductPageLocalizationScreenshotSets(ctx, localizationID, asc.WithAppCustomProductPageLocalizationScreenshotSetsRequestContext(requestContext))
 			},
 			Create: func(ctx context.Context, client *asc.Client, localizationID, displayType string) (*asc.AppScreenshotSetResponse, error) {
 				return client.CreateAppScreenshotSetForCustomProductPageLocalization(ctx, localizationID, displayType)
@@ -190,17 +196,17 @@ func executeCustomPagePreviewUpload(
 	trimmedLocalizationID := strings.TrimSpace(localizationID)
 	if trimmedLocalizationID == "" {
 		fmt.Fprintln(os.Stderr, "Error: --localization-id is required")
-		return nil, flag.ErrHelp
+		return nil, shared.MissingRequiredUsageError("--localization-id")
 	}
 	trimmedPath := strings.TrimSpace(path)
 	if trimmedPath == "" {
 		fmt.Fprintln(os.Stderr, "Error: --path is required")
-		return nil, flag.ErrHelp
+		return nil, shared.MissingRequiredUsageError("--path")
 	}
 	trimmedDeviceType := strings.TrimSpace(deviceType)
 	if trimmedDeviceType == "" {
 		fmt.Fprintln(os.Stderr, "Error: --device-type is required")
-		return nil, flag.ErrHelp
+		return nil, shared.MissingRequiredUsageError("--device-type")
 	}
 
 	previewType, err := assets.NormalizePreviewType(trimmedDeviceType)
@@ -209,6 +215,9 @@ func executeCustomPagePreviewUpload(
 	}
 	files, err := collectCustomPageMediaFiles(trimmedPath)
 	if err != nil {
+		return nil, err
+	}
+	if err := assets.ValidatePreviewFiles(files, true); err != nil {
 		return nil, err
 	}
 

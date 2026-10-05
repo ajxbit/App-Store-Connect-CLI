@@ -8,6 +8,7 @@ import (
 	"image/png"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -109,6 +110,55 @@ func TestGenerateReview_WritesManifestAndHTML(t *testing.T) {
 	}
 	if !strings.Contains(html, "home") {
 		t.Fatalf("expected screenshot ID in HTML, got: %q", html)
+	}
+}
+
+func TestGenerateReviewPreservesExplicitWhitespaceApprovalPath(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows trims trailing spaces from path components")
+	}
+	baseDir := t.TempDir()
+	framedDir := filepath.Join(baseDir, "framed")
+	outputDir := filepath.Join(baseDir, "review")
+	approvalPath := filepath.Join(baseDir, "approved.json ")
+	writeReviewImage(t, filepath.Join(framedDir, "en", "iPhone_Air", "home.png"), 1320, 2868)
+	if err := os.WriteFile(approvalPath, []byte("[]\n"), 0o600); err != nil {
+		t.Fatalf("write whitespace approval file: %v", err)
+	}
+
+	result, err := GenerateReview(context.Background(), ReviewRequest{
+		FramedDir:    framedDir,
+		OutputDir:    outputDir,
+		ApprovalPath: approvalPath,
+	})
+	if err != nil {
+		t.Fatalf("GenerateReview() error = %v", err)
+	}
+	if result == nil || result.ApprovalPath != approvalPath {
+		t.Fatalf("GenerateReview() result = %+v, want explicit approval path %q", result, approvalPath)
+	}
+}
+
+func TestMatchingAppDisplayTypesCanonicalizesAPIAliases(t *testing.T) {
+	got := strings.Join(matchingAppDisplayTypes(1260, 2736), ",")
+	if want := "APP_IPHONE_67"; got != want {
+		t.Fatalf("matchingAppDisplayTypes() = %q, want %q", got, want)
+	}
+}
+
+func TestMatchingAppDisplayTypesPreservesDistinctCanonicalSlots(t *testing.T) {
+	got := strings.Join(matchingAppDisplayTypes(3840, 2160), ",")
+	if want := "APP_APPLE_TV,APP_APPLE_VISION_PRO"; got != want {
+		t.Fatalf("matchingAppDisplayTypes() = %q, want %q", got, want)
+	}
+}
+
+func TestMatchingAppDisplayTypesPrefersCurrentIPadSlot(t *testing.T) {
+	for _, size := range [][2]int{{2048, 2732}, {2732, 2048}, {2064, 2752}} {
+		got := strings.Join(matchingAppDisplayTypes(size[0], size[1]), ",")
+		if want := "APP_IPAD_PRO_3GEN_129"; got != want {
+			t.Fatalf("matchingAppDisplayTypes(%d, %d) = %q, want %q", size[0], size[1], got, want)
+		}
 	}
 }
 

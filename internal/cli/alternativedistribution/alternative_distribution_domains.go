@@ -25,7 +25,7 @@ func AlternativeDistributionDomainsCommand() *ffcli.Command {
 
 Examples:
   asc alternative-distribution domains list
-  asc alternative-distribution domains get --domain-id "DOMAIN_ID"
+  asc alternative-distribution domains view --domain-id "DOMAIN_ID"
   asc alternative-distribution domains create --domain "example.com" --reference-name "Example"
   asc alternative-distribution domains delete --domain-id "DOMAIN_ID" --confirm`,
 		FlagSet:   fs,
@@ -65,10 +65,10 @@ Examples:
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
 			if *limit != 0 && (*limit < 1 || *limit > alternativeDistributionMaxLimit) {
-				return fmt.Errorf("alternative-distribution domains list: --limit must be between 1 and %d", alternativeDistributionMaxLimit)
+				return shared.UsageErrorf("alternative-distribution domains list: --limit must be between 1 and %d", alternativeDistributionMaxLimit)
 			}
 			if err := shared.ValidateNextURL(*next); err != nil {
-				return fmt.Errorf("alternative-distribution domains list: %w", err)
+				return shared.UsageErrorf("alternative-distribution domains list: %v", err)
 			}
 
 			client, err := shared.GetASCClient()
@@ -113,31 +113,31 @@ Examples:
 
 // AlternativeDistributionDomainsGetCommand returns the domains get subcommand.
 func AlternativeDistributionDomainsGetCommand() *ffcli.Command {
-	fs := flag.NewFlagSet("get", flag.ExitOnError)
+	fs := flag.NewFlagSet("view", flag.ExitOnError)
 
-	domainID := fs.String("domain-id", "", "Alternative distribution domain ID")
+	domainID := shared.BindResourceIDFlag(fs, "domain-id", "alternativeDistributionDomains", "Alternative distribution domain ID")
 	output := shared.BindOutputFlags(fs)
 
 	return &ffcli.Command{
-		Name:       "get",
-		ShortUsage: "asc alternative-distribution domains get --domain-id \"DOMAIN_ID\"",
-		ShortHelp:  "Get an alternative distribution domain.",
-		LongHelp: `Get an alternative distribution domain.
+		Name:       "view",
+		ShortUsage: "asc alternative-distribution domains view --domain-id \"DOMAIN_ID\"",
+		ShortHelp:  "View an alternative distribution domain.",
+		LongHelp: `View an alternative distribution domain.
 
 Examples:
-  asc alternative-distribution domains get --domain-id "DOMAIN_ID"`,
+  asc alternative-distribution domains view --domain-id "DOMAIN_ID"`,
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
 			trimmedID := strings.TrimSpace(*domainID)
 			if trimmedID == "" {
 				fmt.Fprintln(os.Stderr, "Error: --domain-id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--domain-id")
 			}
 
 			client, err := shared.GetASCClient()
 			if err != nil {
-				return fmt.Errorf("alternative-distribution domains get: %w", err)
+				return fmt.Errorf("alternative-distribution domains view: %w", err)
 			}
 
 			requestCtx, cancel := shared.ContextWithTimeout(ctx)
@@ -145,7 +145,7 @@ Examples:
 
 			resp, err := client.GetAlternativeDistributionDomain(requestCtx, trimmedID)
 			if err != nil {
-				return fmt.Errorf("alternative-distribution domains get: failed to fetch: %w", err)
+				return fmt.Errorf("alternative-distribution domains view: failed to fetch: %w", err)
 			}
 
 			return shared.PrintOutput(resp, *output.Output, *output.Pretty)
@@ -175,13 +175,13 @@ Examples:
 			domainValue := strings.TrimSpace(*domain)
 			if domainValue == "" {
 				fmt.Fprintln(os.Stderr, "Error: --domain is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--domain")
 			}
 
 			referenceValue := strings.TrimSpace(*referenceName)
 			if referenceValue == "" {
 				fmt.Fprintln(os.Stderr, "Error: --reference-name is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--reference-name")
 			}
 
 			client, err := shared.GetASCClient()
@@ -206,7 +206,7 @@ Examples:
 func AlternativeDistributionDomainsDeleteCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("delete", flag.ExitOnError)
 
-	domainID := fs.String("domain-id", "", "Alternative distribution domain ID")
+	domainID := shared.BindResourceIDFlag(fs, "domain-id", "alternativeDistributionDomains", "Alternative distribution domain ID")
 	confirm := fs.Bool("confirm", false, "Confirm deletion")
 	output := shared.BindOutputFlags(fs)
 
@@ -224,11 +224,11 @@ Examples:
 			trimmedID := strings.TrimSpace(*domainID)
 			if trimmedID == "" {
 				fmt.Fprintln(os.Stderr, "Error: --domain-id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--domain-id")
 			}
 			if !*confirm {
 				fmt.Fprintln(os.Stderr, "Error: --confirm is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--confirm")
 			}
 
 			client, err := shared.GetASCClient()

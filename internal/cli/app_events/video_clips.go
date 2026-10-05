@@ -45,8 +45,8 @@ Examples:
 func AppEventVideoClipsRelationshipsCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("video-clips links", flag.ExitOnError)
 
-	eventID := fs.String("event-id", "", "App event ID")
-	localizationID := fs.String("localization-id", "", "App event localization ID")
+	eventID := shared.BindResourceIDFlag(fs, "event-id", "appEvents", "App event ID")
+	localizationID := shared.BindResourceIDFlag(fs, "localization-id", "appEventLocalizations", "App event localization ID")
 	locale := fs.String("locale", "", "Locale (e.g., en-US) when resolving localization")
 	limit := fs.Int("limit", 0, "Maximum results per page (1-200)")
 	next := fs.String("next", "", "Fetch next page using a links.next URL")
@@ -67,16 +67,16 @@ Examples:
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
 			if *limit != 0 && (*limit < 1 || *limit > 200) {
-				return fmt.Errorf("app-events video-clips links: --limit must be between 1 and 200")
+				return shared.UsageError("app-events video-clips links: --limit must be between 1 and 200")
 			}
 			if err := shared.ValidateNextURL(*next); err != nil {
-				return fmt.Errorf("app-events video-clips links: %w", err)
+				return shared.UsageErrorf("app-events video-clips links: %v", err)
 			}
 
 			trimmedNext := strings.TrimSpace(*next)
 			if trimmedNext == "" && strings.TrimSpace(*localizationID) == "" && strings.TrimSpace(*eventID) == "" {
 				fmt.Fprintln(os.Stderr, "Error: --event-id or --localization-id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("")
 			}
 
 			client, err := shared.GetASCClient()
@@ -130,8 +130,8 @@ Examples:
 func AppEventVideoClipsListCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("video-clips list", flag.ExitOnError)
 
-	eventID := fs.String("event-id", "", "App event ID")
-	localizationID := fs.String("localization-id", "", "App event localization ID")
+	eventID := shared.BindResourceIDFlag(fs, "event-id", "appEvents", "App event ID")
+	localizationID := shared.BindResourceIDFlag(fs, "localization-id", "appEventLocalizations", "App event localization ID")
 	locale := fs.String("locale", "", "Locale (e.g., en-US) when resolving localization")
 	limit := fs.Int("limit", 0, "Maximum results per page (1-200)")
 	next := fs.String("next", "", "Fetch next page using a links.next URL")
@@ -152,14 +152,14 @@ Examples:
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
 			if *limit != 0 && (*limit < 1 || *limit > 200) {
-				return fmt.Errorf("app-events video-clips list: --limit must be between 1 and 200")
+				return shared.UsageError("app-events video-clips list: --limit must be between 1 and 200")
 			}
 			if err := shared.ValidateNextURL(*next); err != nil {
-				return fmt.Errorf("app-events video-clips list: %w", err)
+				return shared.UsageErrorf("app-events video-clips list: %v", err)
 			}
 			if strings.TrimSpace(*next) == "" && strings.TrimSpace(*localizationID) == "" && strings.TrimSpace(*eventID) == "" {
 				fmt.Fprintln(os.Stderr, "Error: --event-id or --localization-id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("")
 			}
 
 			client, err := shared.GetASCClient()
@@ -213,31 +213,31 @@ Examples:
 
 // AppEventVideoClipsGetCommand returns the app event video clips get subcommand.
 func AppEventVideoClipsGetCommand() *ffcli.Command {
-	fs := flag.NewFlagSet("video-clips get", flag.ExitOnError)
+	fs := flag.NewFlagSet("video-clips view", flag.ExitOnError)
 
-	clipID := fs.String("clip-id", "", "App event video clip ID")
+	clipID := shared.BindResourceIDFlag(fs, "clip-id", "appEventVideoClips", "App event video clip ID")
 	output := shared.BindOutputFlags(fs)
 
 	return &ffcli.Command{
-		Name:       "get",
-		ShortUsage: "asc app-events video-clips get --clip-id \"CLIP_ID\"",
-		ShortHelp:  "Get an in-app event video clip by ID.",
-		LongHelp: `Get an in-app event video clip by ID.
+		Name:       "view",
+		ShortUsage: "asc app-events video-clips view --clip-id \"CLIP_ID\"",
+		ShortHelp:  "View an in-app event video clip by ID.",
+		LongHelp: `View an in-app event video clip by ID.
 
 Examples:
-  asc app-events video-clips get --clip-id "CLIP_ID"`,
+  asc app-events video-clips view --clip-id "CLIP_ID"`,
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
 			id := strings.TrimSpace(*clipID)
 			if id == "" {
 				fmt.Fprintln(os.Stderr, "Error: --clip-id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--clip-id")
 			}
 
 			client, err := shared.GetASCClient()
 			if err != nil {
-				return fmt.Errorf("app-events video-clips get: %w", err)
+				return fmt.Errorf("app-events video-clips view: %w", err)
 			}
 
 			requestCtx, cancel := shared.ContextWithTimeout(ctx)
@@ -245,7 +245,7 @@ Examples:
 
 			resp, err := client.GetAppEventVideoClip(requestCtx, id)
 			if err != nil {
-				return fmt.Errorf("app-events video-clips get: failed to fetch: %w", err)
+				return fmt.Errorf("app-events video-clips view: failed to fetch: %w", err)
 			}
 
 			return shared.PrintOutput(resp, *output.Output, *output.Pretty)
@@ -257,8 +257,8 @@ Examples:
 func AppEventVideoClipsCreateCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("video-clips create", flag.ExitOnError)
 
-	eventID := fs.String("event-id", "", "App event ID")
-	localizationID := fs.String("localization-id", "", "App event localization ID")
+	eventID := shared.BindResourceIDFlag(fs, "event-id", "appEvents", "App event ID")
+	localizationID := shared.BindResourceIDFlag(fs, "localization-id", "appEventLocalizations", "App event localization ID")
 	locale := fs.String("locale", "", "Locale (e.g., en-US) when resolving localization")
 	path := fs.String("path", "", "Path to video clip file")
 	assetType := fs.String("asset-type", "", "Asset type: "+strings.Join(asc.ValidAppEventAssetTypes, ", "))
@@ -280,11 +280,11 @@ Examples:
 			pathValue := strings.TrimSpace(*path)
 			if pathValue == "" {
 				fmt.Fprintln(os.Stderr, "Error: --path is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--path")
 			}
 			if strings.TrimSpace(*localizationID) == "" && strings.TrimSpace(*eventID) == "" {
 				fmt.Fprintln(os.Stderr, "Error: --event-id or --localization-id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("")
 			}
 
 			normalizedAssetType, err := normalizeAppEventAssetType(*assetType)
@@ -351,7 +351,7 @@ Examples:
 func AppEventVideoClipsDeleteCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("video-clips delete", flag.ExitOnError)
 
-	clipID := fs.String("clip-id", "", "App event video clip ID")
+	clipID := shared.BindResourceIDFlag(fs, "clip-id", "appEventVideoClips", "App event video clip ID")
 	confirm := fs.Bool("confirm", false, "Confirm deletion")
 	output := shared.BindOutputFlags(fs)
 
@@ -369,11 +369,11 @@ Examples:
 			id := strings.TrimSpace(*clipID)
 			if id == "" {
 				fmt.Fprintln(os.Stderr, "Error: --clip-id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--clip-id")
 			}
 			if !*confirm {
 				fmt.Fprintln(os.Stderr, "Error: --confirm is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--confirm")
 			}
 
 			client, err := shared.GetASCClient()

@@ -54,7 +54,7 @@ func BuildsIndividualTestersListCommand() *ffcli.Command {
 
 	return &ffcli.Command{
 		Name:       "list",
-		ShortUsage: "asc builds individual-testers list (--build-id BUILD_ID | --app APP --latest | --app APP --build-number BUILD_NUMBER [--version VERSION] [--platform PLATFORM]) [flags]",
+		ShortUsage: "asc builds individual-testers list (--build-id BUILD_ID | --app APP --latest | --app APP --build-number BUILD_NUMBER --platform PLATFORM [--version VERSION]) [flags]",
 		ShortHelp:  "List individual testers assigned to a build.",
 		LongHelp: `List individual testers assigned to a build.
 
@@ -65,14 +65,11 @@ Examples:
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
-			if err := selectors.applyLegacyAliases(); err != nil {
-				return err
-			}
 			if *limit != 0 && (*limit < 1 || *limit > 200) {
-				return fmt.Errorf("builds individual-testers list: --limit must be between 1 and 200")
+				return shared.UsageError("builds individual-testers list: --limit must be between 1 and 200")
 			}
 			if err := shared.ValidateNextURL(*next); err != nil {
-				return fmt.Errorf("builds individual-testers list: %w", err)
+				return shared.UsageErrorf("builds individual-testers list: %v", err)
 			}
 
 			nextValue := strings.TrimSpace(*next)
@@ -80,6 +77,8 @@ Examples:
 				if err := selectors.validate(); err != nil {
 					return err
 				}
+			} else if err := selectors.validateNextPageSelectorFlags(); err != nil {
+				return fmt.Errorf("builds individual-testers list: %w", err)
 			}
 
 			client, err := shared.GetASCClient()
@@ -105,7 +104,8 @@ Examples:
 
 			if *paginate {
 				paginateOpts := append(opts, asc.WithBuildIndividualTestersLimit(200))
-				resp, err := shared.PaginateWithSpinner(requestCtx,
+				resp, err := shared.PaginateWithSpinner(
+					requestCtx,
 					func(ctx context.Context) (asc.PaginatedResponse, error) {
 						return client.GetBuildIndividualTesters(ctx, buildID, paginateOpts...)
 					},
@@ -135,12 +135,12 @@ func BuildsIndividualTestersAddCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("individual-testers add", flag.ExitOnError)
 
 	selectors := bindBuildSelectorFlags(fs, buildSelectorFlagOptions{})
-	testers := fs.String("tester", "", "Comma-separated tester IDs")
+	testers := shared.BindOnceCSVFlag(fs, "tester", "Comma-separated tester IDs")
 	output := shared.BindOutputFlags(fs)
 
 	return &ffcli.Command{
 		Name:       "add",
-		ShortUsage: "asc builds individual-testers add (--build-id BUILD_ID | --app APP --latest | --app APP --build-number BUILD_NUMBER [--version VERSION] [--platform PLATFORM]) --tester \"TESTER_ID[,TESTER_ID...]\"",
+		ShortUsage: "asc builds individual-testers add (--build-id BUILD_ID | --app APP --latest | --app APP --build-number BUILD_NUMBER --platform PLATFORM [--version VERSION]) --tester \"TESTER_ID[,TESTER_ID...]\"",
 		ShortHelp:  "Add individual testers to a build.",
 		LongHelp: `Add individual testers to a build.
 
@@ -151,17 +151,14 @@ Examples:
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
-			if err := selectors.applyLegacyAliases(); err != nil {
-				return err
-			}
 			if err := selectors.validate(); err != nil {
 				return err
 			}
 
-			testerIDs := shared.SplitCSV(*testers)
+			testerIDs := shared.SplitCSV(testers.String())
 			if len(testerIDs) == 0 {
 				fmt.Fprintln(os.Stderr, "Error: --tester is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--tester")
 			}
 
 			client, err := shared.GetASCClient()
@@ -197,13 +194,13 @@ func BuildsIndividualTestersRemoveCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("individual-testers remove", flag.ExitOnError)
 
 	selectors := bindBuildSelectorFlags(fs, buildSelectorFlagOptions{})
-	testers := fs.String("tester", "", "Comma-separated tester IDs")
+	testers := shared.BindOnceCSVFlag(fs, "tester", "Comma-separated tester IDs")
 	confirm := fs.Bool("confirm", false, "Confirm removal")
 	output := shared.BindOutputFlags(fs)
 
 	return &ffcli.Command{
 		Name:       "remove",
-		ShortUsage: "asc builds individual-testers remove (--build-id BUILD_ID | --app APP --latest | --app APP --build-number BUILD_NUMBER [--version VERSION] [--platform PLATFORM]) --tester \"TESTER_ID[,TESTER_ID...]\" --confirm",
+		ShortUsage: "asc builds individual-testers remove (--build-id BUILD_ID | --app APP --latest | --app APP --build-number BUILD_NUMBER --platform PLATFORM [--version VERSION]) --tester \"TESTER_ID[,TESTER_ID...]\" --confirm",
 		ShortHelp:  "Remove individual testers from a build.",
 		LongHelp: `Remove individual testers from a build.
 
@@ -214,21 +211,18 @@ Examples:
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
-			if err := selectors.applyLegacyAliases(); err != nil {
-				return err
-			}
 			if err := selectors.validate(); err != nil {
 				return err
 			}
 
-			testerIDs := shared.SplitCSV(*testers)
+			testerIDs := shared.SplitCSV(testers.String())
 			if len(testerIDs) == 0 {
 				fmt.Fprintln(os.Stderr, "Error: --tester is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--tester")
 			}
 			if !*confirm {
 				fmt.Fprintln(os.Stderr, "Error: --confirm is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--confirm")
 			}
 
 			client, err := shared.GetASCClient()

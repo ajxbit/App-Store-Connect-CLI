@@ -25,11 +25,11 @@ func GameCenterAppVersionsCommand() *ffcli.Command {
 
 Examples:
   asc game-center app-versions list --app "APP_ID"
-  asc game-center app-versions get --id "GC_APP_VERSION_ID"
+  asc game-center app-versions view --id "GC_APP_VERSION_ID"
   asc game-center app-versions create --app-store-version-id "APP_STORE_VERSION_ID"
   asc game-center app-versions update --id "GC_APP_VERSION_ID" --enabled true
   asc game-center app-versions compatibility list --id "GC_APP_VERSION_ID"
-  asc game-center app-versions app-store-version get --id "GC_APP_VERSION_ID"`,
+  asc game-center app-versions app-store-version view --id "GC_APP_VERSION_ID"`,
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
 		Subcommands: []*ffcli.Command{
@@ -70,17 +70,17 @@ Examples:
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
 			if *limit != 0 && (*limit < 1 || *limit > 200) {
-				return fmt.Errorf("game-center app-versions list: --limit must be between 1 and 200")
+				return shared.UsageError("game-center app-versions list: --limit must be between 1 and 200")
 			}
 			if err := shared.ValidateNextURL(*next); err != nil {
-				return fmt.Errorf("game-center app-versions list: %w", err)
+				return shared.UsageErrorf("game-center app-versions list: %v", err)
 			}
 
 			resolvedAppID := shared.ResolveAppID(*appID)
 			nextURL := strings.TrimSpace(*next)
 			if resolvedAppID == "" && nextURL == "" {
 				fmt.Fprintln(os.Stderr, "Error: --app is required (or set ASC_APP_ID)")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--app")
 			}
 
 			client, err := shared.GetASCClient()
@@ -137,31 +137,31 @@ Examples:
 
 // GameCenterAppVersionsGetCommand returns the app versions get subcommand.
 func GameCenterAppVersionsGetCommand() *ffcli.Command {
-	fs := flag.NewFlagSet("get", flag.ExitOnError)
+	fs := flag.NewFlagSet("view", flag.ExitOnError)
 
-	appVersionID := fs.String("id", "", "Game Center app version ID")
+	appVersionID := shared.BindResourceIDFlag(fs, "id", "gameCenterAppVersions", "Game Center app version ID")
 	output := shared.BindOutputFlags(fs)
 
 	return &ffcli.Command{
-		Name:       "get",
-		ShortUsage: "asc game-center app-versions get --id \"GC_APP_VERSION_ID\"",
-		ShortHelp:  "Get a Game Center app version by ID.",
-		LongHelp: `Get a Game Center app version by ID.
+		Name:       "view",
+		ShortUsage: "asc game-center app-versions view --id \"GC_APP_VERSION_ID\"",
+		ShortHelp:  "View a Game Center app version by ID.",
+		LongHelp: `View a Game Center app version by ID.
 
 Examples:
-  asc game-center app-versions get --id "GC_APP_VERSION_ID"`,
+  asc game-center app-versions view --id "GC_APP_VERSION_ID"`,
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
 			id := strings.TrimSpace(*appVersionID)
 			if id == "" {
 				fmt.Fprintln(os.Stderr, "Error: --id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--id")
 			}
 
 			client, err := shared.GetASCClient()
 			if err != nil {
-				return fmt.Errorf("game-center app-versions get: %w", err)
+				return fmt.Errorf("game-center app-versions view: %w", err)
 			}
 
 			requestCtx, cancel := shared.ContextWithTimeout(ctx)
@@ -169,7 +169,7 @@ Examples:
 
 			resp, err := client.GetGameCenterAppVersion(requestCtx, id)
 			if err != nil {
-				return fmt.Errorf("game-center app-versions get: failed to fetch: %w", err)
+				return fmt.Errorf("game-center app-versions view: failed to fetch: %w", err)
 			}
 
 			return shared.PrintOutput(resp, *output.Output, *output.Pretty)
@@ -181,7 +181,7 @@ Examples:
 func GameCenterAppVersionsCreateCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("create", flag.ExitOnError)
 
-	appStoreVersionID := fs.String("app-store-version-id", "", "App Store version ID to associate")
+	appStoreVersionID := shared.BindResourceIDFlag(fs, "app-store-version-id", "appStoreVersions", "App Store version ID to associate")
 	output := shared.BindOutputFlags(fs)
 
 	return &ffcli.Command{
@@ -198,7 +198,7 @@ Examples:
 			id := strings.TrimSpace(*appStoreVersionID)
 			if id == "" {
 				fmt.Fprintln(os.Stderr, "Error: --app-store-version-id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--app-store-version-id")
 			}
 
 			client, err := shared.GetASCClient()
@@ -223,7 +223,7 @@ Examples:
 func GameCenterAppVersionsUpdateCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("update", flag.ExitOnError)
 
-	appVersionID := fs.String("id", "", "Game Center app version ID")
+	appVersionID := shared.BindResourceIDFlag(fs, "id", "gameCenterAppVersions", "Game Center app version ID")
 	enabled := fs.String("enabled", "", "Enable or disable the app version (true/false)")
 	output := shared.BindOutputFlags(fs)
 
@@ -242,7 +242,7 @@ Examples:
 			id := strings.TrimSpace(*appVersionID)
 			if id == "" {
 				fmt.Fprintln(os.Stderr, "Error: --id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--id")
 			}
 
 			attrs := asc.GameCenterAppVersionUpdateAttributes{}
@@ -261,7 +261,7 @@ Examples:
 
 			if !hasUpdate {
 				fmt.Fprintln(os.Stderr, "Error: at least one update flag is required (--enabled)")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--enabled")
 			}
 
 			client, err := shared.GetASCClient()
@@ -309,7 +309,7 @@ Examples:
 func GameCenterAppVersionCompatibilityListCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("list", flag.ExitOnError)
 
-	appVersionID := fs.String("id", "", "Game Center app version ID")
+	appVersionID := shared.BindResourceIDFlag(fs, "id", "gameCenterAppVersions", "Game Center app version ID")
 	limit := fs.Int("limit", 0, "Maximum results per page (1-200)")
 	next := fs.String("next", "", "Fetch next page using a links.next URL")
 	paginate := fs.Bool("paginate", false, "Automatically fetch all pages (aggregate results)")
@@ -329,17 +329,17 @@ Examples:
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
 			if *limit != 0 && (*limit < 1 || *limit > 200) {
-				return fmt.Errorf("game-center app-versions compatibility list: --limit must be between 1 and 200")
+				return shared.UsageError("game-center app-versions compatibility list: --limit must be between 1 and 200")
 			}
 			if err := shared.ValidateNextURL(*next); err != nil {
-				return fmt.Errorf("game-center app-versions compatibility list: %w", err)
+				return shared.UsageErrorf("game-center app-versions compatibility list: %v", err)
 			}
 
 			id := strings.TrimSpace(*appVersionID)
 			nextURL := strings.TrimSpace(*next)
 			if id == "" && nextURL == "" {
 				fmt.Fprintln(os.Stderr, "Error: --id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--id")
 			}
 
 			client, err := shared.GetASCClient()
@@ -391,12 +391,12 @@ func GameCenterAppVersionAppStoreVersionCommand() *ffcli.Command {
 
 	return &ffcli.Command{
 		Name:       "app-store-version",
-		ShortUsage: "asc game-center app-versions app-store-version get --id \"GC_APP_VERSION_ID\"",
-		ShortHelp:  "Get the App Store version for a Game Center app version.",
-		LongHelp: `Get the App Store version for a Game Center app version.
+		ShortUsage: "asc game-center app-versions app-store-version view --id \"GC_APP_VERSION_ID\"",
+		ShortHelp:  "View the App Store version for a Game Center app version.",
+		LongHelp: `View the App Store version for a Game Center app version.
 
 Examples:
-  asc game-center app-versions app-store-version get --id "GC_APP_VERSION_ID"`,
+  asc game-center app-versions app-store-version view --id "GC_APP_VERSION_ID"`,
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
 		Subcommands: []*ffcli.Command{
@@ -410,31 +410,31 @@ Examples:
 
 // GameCenterAppVersionAppStoreVersionGetCommand returns the app store version get subcommand.
 func GameCenterAppVersionAppStoreVersionGetCommand() *ffcli.Command {
-	fs := flag.NewFlagSet("get", flag.ExitOnError)
+	fs := flag.NewFlagSet("view", flag.ExitOnError)
 
-	appVersionID := fs.String("id", "", "Game Center app version ID")
+	appVersionID := shared.BindResourceIDFlag(fs, "id", "gameCenterAppVersions", "Game Center app version ID")
 	output := shared.BindOutputFlags(fs)
 
 	return &ffcli.Command{
-		Name:       "get",
-		ShortUsage: "asc game-center app-versions app-store-version get --id \"GC_APP_VERSION_ID\"",
-		ShortHelp:  "Get the App Store version for a Game Center app version.",
-		LongHelp: `Get the App Store version for a Game Center app version.
+		Name:       "view",
+		ShortUsage: "asc game-center app-versions app-store-version view --id \"GC_APP_VERSION_ID\"",
+		ShortHelp:  "View the App Store version for a Game Center app version.",
+		LongHelp: `View the App Store version for a Game Center app version.
 
 Examples:
-  asc game-center app-versions app-store-version get --id "GC_APP_VERSION_ID"`,
+  asc game-center app-versions app-store-version view --id "GC_APP_VERSION_ID"`,
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
 			id := strings.TrimSpace(*appVersionID)
 			if id == "" {
 				fmt.Fprintln(os.Stderr, "Error: --id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--id")
 			}
 
 			client, err := shared.GetASCClient()
 			if err != nil {
-				return fmt.Errorf("game-center app-versions app-store-version get: %w", err)
+				return fmt.Errorf("game-center app-versions app-store-version view: %w", err)
 			}
 
 			requestCtx, cancel := shared.ContextWithTimeout(ctx)
@@ -442,7 +442,7 @@ Examples:
 
 			resp, err := client.GetGameCenterAppVersionAppStoreVersion(requestCtx, id)
 			if err != nil {
-				return fmt.Errorf("game-center app-versions app-store-version get: failed to fetch: %w", err)
+				return fmt.Errorf("game-center app-versions app-store-version view: failed to fetch: %w", err)
 			}
 
 			return shared.PrintOutput(resp, *output.Output, *output.Pretty)

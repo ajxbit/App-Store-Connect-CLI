@@ -4,8 +4,21 @@ import (
 	"context"
 	"errors"
 	"flag"
+	"strings"
 	"testing"
 )
+
+func TestProfilesListQueryFlagsAreRegistered(t *testing.T) {
+	cmd := ProfilesListCommand()
+	for _, name := range []string{
+		"name", "id", "sort", "fields", "bundle-id-fields", "device-fields", "certificate-fields", "include", "limit-devices", "limit-certificates",
+	} {
+		flagValue := cmd.FlagSet.Lookup(name)
+		if flagValue == nil {
+			t.Fatalf("missing --%s flag", name)
+		}
+	}
+}
 
 func TestProfilesGetCommand_MissingID(t *testing.T) {
 	cmd := ProfilesGetCommand()
@@ -16,6 +29,26 @@ func TestProfilesGetCommand_MissingID(t *testing.T) {
 
 	if err := cmd.Exec(context.Background(), []string{}); !errors.Is(err, flag.ErrHelp) {
 		t.Fatalf("expected flag.ErrHelp when --id is missing, got %v", err)
+	}
+}
+
+func TestProfilesCreateCommand_NameLongerThanLimitIsUsageError(t *testing.T) {
+	cmd := ProfilesCreateCommand()
+	name := strings.Repeat("n", 65)
+	if err := cmd.FlagSet.Parse([]string{
+		"--name", name,
+		"--profile-type", "IOS_APP_DEVELOPMENT",
+		"--bundle", "BUNDLE_ID",
+		"--certificate", "CERT_ID",
+	}); err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	err := cmd.Exec(context.Background(), nil)
+	if !errors.Is(err, flag.ErrHelp) {
+		t.Fatalf("error = %v, want a usage error", err)
+	}
+	if !strings.Contains(err.Error(), "at most 64") {
+		t.Fatalf("error = %v, want the length limit", err)
 	}
 }
 

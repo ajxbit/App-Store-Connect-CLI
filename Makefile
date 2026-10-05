@@ -4,18 +4,58 @@
 BINARY_NAME := asc
 VERSION := $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
 COMMIT := $(shell git rev-parse --short HEAD 2>/dev/null || echo "unknown")
-DATE := $(shell date -u +"%Y-%m-%dT%H:%M:%SZ")
+# Keep local build metadata stable so unchanged builds can reuse Go's link cache.
+# Release builds set their actual build timestamp in the release workflow.
+DATE := $(shell git show -s --format=%cI HEAD 2>/dev/null || echo "unknown")
 LDFLAGS := -X main.version=$(VERSION) -X main.commit=$(COMMIT) -X main.date=$(DATE)
+# Release builds strip symbol/DWARF tables (-s -w) and file-system paths
+# (-trimpath) for smaller, reproducible binaries. Dev builds (`make build`)
+# stay unstripped for debuggability.
+RELEASE_LDFLAGS := -s -w $(LDFLAGS)
+RELEASE_BUILD_FLAGS := -trimpath
 
 # Go variables
 GO := go
 GOMOD := go.mod
 GOBIN := $(shell $(GO) env GOPATH)/bin
 GO_TOOLCHAIN_VERSION := $(shell $(GO) env GOVERSION)
-GOLANGCI_LINT_TIMEOUT ?= 5m
+# Cold hosted runners can require more than ten minutes for the full-module lint.
+GOLANGCI_LINT_TIMEOUT ?= 15m
 INSTALL_PREFIX ?= /usr/local/bin
-GOFUMPT_VERSION ?= v0.9.2
-GOLANGCI_LINT_VERSION ?= v2.11.4
+GOFUMPT_VERSION ?= v0.10.0
+GOLANGCI_LINT_VERSION ?= v2.12.1
+GOVULNCHECK_VERSION ?= v1.6.0
+
+# Test environment
+# Tests must not depend on the invoking shell or the developer's stored asc
+# state. Unset every inherited ASC_* variable (except test-only switches) and
+# DO_NOT_TRACK, bypass the keychain, and point ASC_CONFIG_PATH at a missing
+# file in a fresh per-run directory that is removed afterwards: a temporary HOME
+# alone is not enough, because the upward .asc/config.json search from a
+# checkout inside the home directory reaches ~/.asc/config.json. The directory
+# is read-only so a test that writes config without choosing its own path fails
+# (root bypasses the mode, but the directory is still private to the run).
+# Tests that need any of these inputs set them with t.Setenv.
+TEST_ENV_PASSTHROUGH := ASC_UPDATE_GOLDEN ASC_SIGNING_RUN_LIVE_TEST ASC_SIGNING_KEYCHAIN_INSTALL_LIVE_TEST
+TEST_ENV = env $(foreach var,$(sort $(filter-out $(TEST_ENV_PASSTHROUGH),$(filter ASC_%,$(.VARIABLES)))),-u $(var)) -u DO_NOT_TRACK ASC_BYPASS_KEYCHAIN=1
+
+# $(call run_isolated_tests,<go test arguments>)
+# The EXIT trap removes the directory however the run ends, including Ctrl-C.
+define run_isolated_tests
+	@config_dir="$$(mktemp -d "$${TMPDIR:-/tmp}/asc-test-config.XXXXXX")" || exit 1; \
+	trap 'chmod 700 "$$config_dir" 2>/dev/null; rm -rf "$$config_dir"' EXIT; \
+	trap 'exit 130' INT; \
+	trap 'exit 143' TERM; \
+	chmod 500 "$$config_dir"; \
+	echo "ASC_CONFIG_PATH=$$config_dir/config.json $(GO) test $(1)"; \
+	$(TEST_ENV) ASC_CONFIG_PATH="$$config_dir/config.json" $(GO) test $(1); \
+	status=$$?; \
+	if [ -n "$$(ls -A "$$config_dir")" ]; then \
+		echo "error: tests wrote to the shared test config directory $$config_dir; set ASC_CONFIG_PATH in the test instead" >&2; \
+		[ $$status -ne 0 ] || status=1; \
+	fi; \
+	exit $$status
+endef
 
 # Directories
 SRC_DIR := .
@@ -44,13 +84,14 @@ build:
 .PHONY: build-all
 build-all: clean
 	@echo "$(BLUE)Building for multiple platforms...$(NC)"
-	@mkdir -p $(RELEASE_DIR)
+	@mkdir -p "$(RELEASE_DIR)"
 	@for target in "darwin amd64 macOS" "darwin arm64 macOS" "linux amd64 linux" "linux arm64 linux" "windows amd64 windows"; do \
 		set -- $$target; \
 		os="$$1"; arch="$$2"; label="$$3"; suffix=""; \
 		if [ "$$os" = "windows" ]; then suffix=".exe"; fi; \
+		if [ "$$os" = "darwin" ]; then cgo="1"; else cgo="0"; fi; \
 		echo "Building $$label/$$arch..."; \
-		GOOS="$$os" GOARCH="$$arch" $(GO) build -ldflags "$(LDFLAGS)" -o "$(RELEASE_DIR)/$(BINARY_NAME)_$(VERSION)_$${label}_$${arch}$${suffix}" .; \
+		CGO_ENABLED="$$cgo" GOOS="$$os" GOARCH="$$arch" $(GO) build $(RELEASE_BUILD_FLAGS) -ldflags "$(RELEASE_LDFLAGS)" -o "$(RELEASE_DIR)/$(BINARY_NAME)_$(VERSION)_$${label}_$${arch}$${suffix}" . || exit $$?; \
 	done
 	@echo "$(GREEN)✓ Release binaries written to $(RELEASE_DIR)/$(NC)"
 
@@ -63,13 +104,26 @@ build-debug:
 .PHONY: test
 test:
 	@echo "$(BLUE)Running tests...$(NC)"
-	ASC_BYPASS_KEYCHAIN=1 $(GO) test -v ./...
+	$(call run_isolated_tests,-v ./...)
+
+# Run the short test suite (used by the pre-commit hook)
+.PHONY: test-short
+test-short:
+	@echo "$(BLUE)Running short tests...$(NC)"
+	$(call run_isolated_tests,-short ./...)
+
+# Run tests with parallel package compilation
+# Defaults to GOMAXPROCS; set PARALLEL to override (e.g. PARALLEL=4)
+.PHONY: test-parallel
+test-parallel:
+	@echo "$(BLUE)Running tests (parallel=$(or $(PARALLEL),auto))...$(NC)"
+	$(call run_isolated_tests,-v -count=1 $(if $(PARALLEL),-p=$(PARALLEL)) ./...)
 
 # Run tests with coverage
 .PHONY: test-coverage
 test-coverage:
 	@echo "$(BLUE)Running tests with coverage...$(NC)"
-	ASC_BYPASS_KEYCHAIN=1 $(GO) test -coverprofile=coverage.out ./...
+	$(call run_isolated_tests,-coverprofile=coverage.out ./...)
 	$(GO) tool cover -html=coverage.out -o coverage.html
 	@echo "$(GREEN)Coverage report: coverage.html$(NC)"
 
@@ -84,7 +138,7 @@ test-integration:
 lint:
 	@echo "$(BLUE)Linting code...$(NC)"
 	@if command -v golangci-lint >/dev/null 2>&1; then \
-		golangci-lint run --timeout=$(GOLANGCI_LINT_TIMEOUT) ./...; \
+		GOLANGCI_LINT_CACHE="$(CURDIR)/.golangci-cache" golangci-lint run --timeout=$(GOLANGCI_LINT_TIMEOUT) ./...; \
 	else \
 		echo "$(YELLOW)golangci-lint not found; falling back to 'go vet ./...'.$(NC)"; \
 		echo "$(YELLOW)Install with: make tools (or: GOTOOLCHAIN=$(GO_TOOLCHAIN_VERSION) $(GO) install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest)$(NC)"; \
@@ -133,6 +187,10 @@ tools:
 	@echo "$(GREEN)✓ Tools installed$(NC)"
 	@echo "$(YELLOW)Make sure '$(GOBIN)' is on your PATH$(NC)"
 
+.PHONY: install-govulncheck
+install-govulncheck:
+	$(GO) install golang.org/x/vuln/cmd/govulncheck@$(GOVULNCHECK_VERSION)
+
 # Install local git hooks
 .PHONY: install-hooks
 install-hooks:
@@ -147,31 +205,6 @@ deps:
 	@echo "$(BLUE)Installing dependencies...$(NC)"
 	$(GO) mod download
 	$(GO) mod tidy
-
-.PHONY: studio-frontend-install
-studio-frontend-install:
-	@echo "$(BLUE)Installing ASC Studio frontend dependencies...$(NC)"
-	cd apps/studio/frontend && npm install
-
-.PHONY: studio-frontend-test
-studio-frontend-test:
-	@echo "$(BLUE)Running ASC Studio frontend tests...$(NC)"
-	cd apps/studio/frontend && npm run test -- --run
-
-.PHONY: studio-frontend-build
-studio-frontend-build:
-	@echo "$(BLUE)Building ASC Studio frontend assets...$(NC)"
-	cd apps/studio/frontend && npm run build
-
-.PHONY: studio-test
-studio-test:
-	@echo "$(BLUE)Running ASC Studio Go tests...$(NC)"
-	$(GO) test ./apps/studio/...
-
-.PHONY: studio-build
-studio-build:
-	@echo "$(BLUE)Building ASC Studio bootstrap binary...$(NC)"
-	$(GO) build ./apps/studio
 
 # Update dependencies
 .PHONY: update-deps
@@ -201,6 +234,7 @@ generate-command-docs:
 .PHONY: check-command-docs
 check-command-docs:
 	@echo "$(BLUE)Checking command docs sync...$(NC)"
+	python3 ./scripts/test_generate_command_docs.py
 	python3 ./scripts/generate-command-docs.py --check
 	python3 ./scripts/check-commands-docs.py
 
@@ -215,17 +249,22 @@ check-website-docs:
 	python3 ./scripts/check_website_docs.py
 	python3 ./scripts/check_website_commands.py
 
-.PHONY: check-release-docs
-check-release-docs:
-	@if [ -z "$(VERSION)" ]; then \
-		echo "$(YELLOW)VERSION is required. Example: make check-release-docs VERSION=0.36.4$(NC)"; \
-		exit 1; \
-	fi
-	@echo "$(BLUE)Checking release docs for $(VERSION)...$(NC)"
-	python3 ./scripts/check_release_docs.py "$(VERSION)"
+.PHONY: check-agent-skills
+check-agent-skills:
+	@echo "$(BLUE)Checking repository agent skills...$(NC)"
+	python3 ./scripts/test_check_agent_skills.py
+	python3 ./scripts/check_agent_skills.py
+
+.PHONY: check-openapi
+check-openapi:
+	@echo "$(BLUE)Checking OpenAPI generated artifacts...$(NC)"
+	python3 ./scripts/test_update_openapi_index.py
+	python3 ./scripts/test_generate_schema_index.py
+	python3 ./scripts/update-openapi-index.py --check
+	python3 ./scripts/generate-schema-index.py --check
 
 .PHONY: check-docs
-check-docs: check-command-docs check-repo-docs check-website-docs
+check-docs: check-command-docs check-repo-docs check-website-docs check-agent-skills check-openapi
 
 .PHONY: check-wall-of-apps
 check-wall-of-apps:
@@ -237,7 +276,7 @@ check-wall-of-apps:
 clean:
 	@echo "$(BLUE)Cleaning...$(NC)"
 	rm -f $(BINARY_NAME) $(BINARY_NAME)-debug
-	rm -rf $(BUILD_DIR) $(DIST_DIR) $(RELEASE_DIR)
+	rm -rf $(BUILD_DIR) $(DIST_DIR) "$(RELEASE_DIR)"
 	rm -f coverage.out coverage.html
 
 # Install the binary
@@ -265,6 +304,17 @@ release: clean
 	@echo "$(BLUE)Creating release...$(NC)"
 	@echo "$(YELLOW)Note: Use GitHub Actions for releases$(NC)"
 
+# Run the non-publishing checks used by the release rehearsal workflow
+.PHONY: release-guardrails
+release-guardrails:
+	python3 scripts/test_release_rehearsal.py
+	python3 scripts/test_check_docs.py
+	$(MAKE) format-check
+	$(MAKE) check-docs
+	$(MAKE) check-wall-of-apps
+	$(MAKE) lint
+	ASC_BYPASS_KEYCHAIN=1 $(MAKE) test
+
 # Show help
 .PHONY: help
 help:
@@ -276,27 +326,28 @@ help:
 	@echo "  build-all      Build release binaries for supported platforms"
 	@echo "  build-debug    Build with debug symbols"
 	@echo "  test           Run tests"
+	@echo "  test-short     Run the short test suite"
+	@echo "  test-parallel  Run tests with optional package parallelism (PARALLEL=<n>)"
 	@echo "  test-coverage  Run tests with coverage"
 	@echo "  test-integration  Run opt-in integration tests"
 	@echo "  lint           Lint the code"
 	@echo "  format         Format code"
 	@echo "  format-check   Check formatting without writing files"
 	@echo "  tools          Install dev tools"
+	@echo "  install-govulncheck Install the pinned vulnerability scanner"
 	@echo "  install-hooks  Install local git hooks"
 	@echo "  deps           Install dependencies"
-	@echo "  studio-frontend-install  Install ASC Studio frontend dependencies"
-	@echo "  studio-frontend-test  Run ASC Studio frontend tests"
-	@echo "  studio-frontend-build  Build ASC Studio frontend assets"
-	@echo "  studio-test    Run ASC Studio Go tests"
-	@echo "  studio-build   Build ASC Studio bootstrap binary"
 	@echo "  update-deps    Update dependencies"
 	@echo "  update-openapi Update OpenAPI paths index"
+	@echo "  update-schema-index Update runtime schema index"
 	@echo "  generate-command-docs Generate docs/COMMANDS.md from live CLI help"
 	@echo "  check-command-docs Validate docs command lists against live CLI help"
 	@echo "  check-repo-docs Validate local links in repository markdown docs"
 	@echo "  check-website-docs Validate Mintlify website navigation, links, and CLI examples"
-	@echo "  check-release-docs Validate website release docs for VERSION=<x.y.z>"
+	@echo "  check-agent-skills Validate repository-scoped Codex skills"
+	@echo "  check-openapi  Validate generated OpenAPI indexes"
 	@echo "  check-docs     Run all documentation checks"
+	@echo "  release-guardrails Run non-publishing release checks"
 	@echo "  clean          Clean build artifacts"
 	@echo "  install        Install binary"
 	@echo "  uninstall      Uninstall binary"
@@ -313,6 +364,8 @@ dev: format lint test build
 .PHONY: security
 security:
 	@echo "$(BLUE)Checking for security vulnerabilities...$(NC)"
-	@which gosec > /dev/null 2>&1 && \
-		gosec ./... || \
-		echo "$(YELLOW)Install gosec for security checks$(NC)"
+	@if command -v gosec > /dev/null 2>&1; then \
+		gosec ./...; \
+	else \
+		echo "$(YELLOW)Install gosec for security checks$(NC)"; \
+	fi

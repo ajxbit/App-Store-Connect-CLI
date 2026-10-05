@@ -69,14 +69,6 @@ type TestFlightTesterConfig struct {
 	Groups []string `yaml:"groups,omitempty"`
 }
 
-type testFlightSyncSummary struct {
-	File    string `json:"file"`
-	App     string `json:"app"`
-	Groups  int    `json:"groups"`
-	Builds  int    `json:"builds"`
-	Testers int    `json:"testers"`
-}
-
 type testFlightPullOptions struct {
 	includeBuilds  bool
 	includeTesters bool
@@ -123,8 +115,8 @@ func TestFlightSyncPullCommand() *ffcli.Command {
 	output := fs.String("output", "", "Output file path for YAML (required)")
 	includeBuilds := fs.Bool("include-builds", false, "Include builds and group assignments")
 	includeTesters := fs.Bool("include-testers", false, "Include testers and group memberships")
-	groupFilter := fs.String("group", "", "Filter to a specific beta group (name or ID)")
-	buildFilter, legacyBuildFilter := bindBuildIDFlag(fs, "Filter to build ID(s), comma-separated")
+	groupFilter := shared.BindResourceIDFlag(fs, "group", "betaGroups", "Filter to a specific beta group (name or ID)")
+	buildFilter := fs.String("build-id", "", "Filter to build ID(s), comma-separated")
 	testerFilter := fs.String("tester", "", "Filter to tester ID(s) or emails, comma-separated")
 	pretty := shared.BindPrettyJSONFlag(fs)
 
@@ -141,30 +133,27 @@ Examples:
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
-			if err := applyLegacyBuildIDAlias(buildFilter, legacyBuildFilter); err != nil {
-				return err
-			}
 			resolvedAppID := shared.ResolveAppID(*appID)
 			if resolvedAppID == "" {
 				fmt.Fprintf(os.Stderr, "Error: --app is required (or set ASC_APP_ID)\n\n")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--app")
 			}
 
 			outputValue := strings.TrimSpace(*output)
 			if outputValue == "" {
 				fmt.Fprintf(os.Stderr, "Error: --output is required\n\n")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--output")
 			}
 
 			buildFilters := shared.SplitCSV(*buildFilter)
 			testerFilters := shared.SplitCSV(*testerFilter)
 			if len(buildFilters) > 0 && !*includeBuilds {
 				fmt.Fprintf(os.Stderr, "Error: --build-id requires --include-builds\n\n")
-				return flag.ErrHelp
+				return shared.WithDiagnostic(flag.ErrHelp, shared.DiagnosticConflictingInput, "--build-id")
 			}
 			if len(testerFilters) > 0 && !*includeTesters {
 				fmt.Fprintf(os.Stderr, "Error: --tester requires --include-testers\n\n")
-				return flag.ErrHelp
+				return shared.WithDiagnostic(flag.ErrHelp, shared.DiagnosticConflictingInput, "--tester")
 			}
 
 			resolvedOutputPath, err := resolveTestFlightOutputPath(outputValue)
@@ -202,7 +191,7 @@ Examples:
 				return fmt.Errorf("testflight sync pull: %w", err)
 			}
 
-			summary := testFlightSyncSummary{
+			summary := asc.TestFlightSyncSummary{
 				File:    filepath.Clean(outputValue),
 				App:     config.App.Name,
 				Groups:  len(config.Groups),
@@ -434,7 +423,19 @@ func filterBetaGroups(groups []asc.Resource[asc.BetaGroupAttributes], filter str
 	case 1:
 		return matches, nil
 	default:
-		return nil, fmt.Errorf("multiple beta groups named %q; use group ID", trimmed)
+		candidates := make([]shared.AmbiguousCandidate, 0, len(matches))
+		for _, group := range matches {
+			kind := "external"
+			if group.Attributes.IsInternalGroup {
+				kind = "internal"
+			}
+			candidates = append(candidates, shared.AmbiguousCandidate{
+				ID:    strings.TrimSpace(group.ID),
+				Label: strings.TrimSpace(group.Attributes.Name),
+				Extra: kind,
+			})
+		}
+		return nil, shared.AmbiguousError("beta group", "--group", trimmed, candidates)
 	}
 }
 

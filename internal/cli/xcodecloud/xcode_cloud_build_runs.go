@@ -11,7 +11,7 @@ import (
 )
 
 func xcodeCloudBuildRunsListFlags(fs *flag.FlagSet) (workflowID *string, sort *string, limit *int, next *string, paginate *bool, output *string, pretty *bool) {
-	workflowID = fs.String("workflow-id", "", "Workflow ID to list build runs for")
+	workflowID = shared.BindResourceIDFlag(fs, "workflow-id", "ciWorkflows", "Workflow ID to list build runs for")
 	sort = fs.String("sort", "", "Sort by number or -number")
 	limit = fs.Int("limit", 0, "Maximum results per page (1-200)")
 	next = fs.String("next", "", "Fetch next page using a links.next URL")
@@ -38,7 +38,7 @@ Examples:
   asc xcode-cloud build-runs --workflow-id "WORKFLOW_ID"
   asc xcode-cloud build-runs --workflow-id "WORKFLOW_ID" --sort "-number"
   asc xcode-cloud build-runs list --workflow-id "WORKFLOW_ID"
-  asc xcode-cloud build-runs get --id "BUILD_RUN_ID"
+  asc xcode-cloud build-runs view --id "BUILD_RUN_ID"
   asc xcode-cloud build-runs builds --run-id "BUILD_RUN_ID"
   asc xcode-cloud build-runs --workflow-id "WORKFLOW_ID" --limit 50
   asc xcode-cloud build-runs --workflow-id "WORKFLOW_ID" --paginate`,
@@ -81,18 +81,19 @@ Examples:
 
 func XcodeCloudBuildRunsGetCommand() *ffcli.Command {
 	return shared.BuildIDGetCommand(shared.IDGetCommandConfig{
-		FlagSetName: "get",
-		Name:        "get",
-		ShortUsage:  "asc xcode-cloud build-runs get --id \"BUILD_RUN_ID\"",
-		ShortHelp:   "Get details for a build run.",
-		LongHelp: `Get details for a build run.
+		FlagSetName: "view",
+		Name:        "view",
+		ShortUsage:  "asc xcode-cloud build-runs view --id \"BUILD_RUN_ID\"",
+		ShortHelp:   "View details for a build run.",
+		LongHelp: `View details for a build run.
 
 Examples:
-  asc xcode-cloud build-runs get --id "BUILD_RUN_ID"
-  asc xcode-cloud build-runs get --id "BUILD_RUN_ID" --output table`,
+  asc xcode-cloud build-runs view --id "BUILD_RUN_ID"
+  asc xcode-cloud build-runs view --id "BUILD_RUN_ID" --output table`,
 		IDFlag:      "id",
 		IDUsage:     "Build run ID",
-		ErrorPrefix: "xcode-cloud build-runs get",
+		IDType:      "ciBuildRuns",
+		ErrorPrefix: "xcode-cloud build-runs view",
 		ContextTimeout: func(ctx context.Context) (context.Context, context.CancelFunc) {
 			return contextWithXcodeCloudTimeout(ctx, 0)
 		},
@@ -105,7 +106,7 @@ Examples:
 func XcodeCloudBuildRunsBuildsCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("builds", flag.ExitOnError)
 
-	runID := fs.String("run-id", "", "Build run ID to list builds for")
+	runID := shared.BindResourceIDFlag(fs, "run-id", "ciBuildRuns", "Build run ID to list builds for")
 	limit := fs.Int("limit", 0, "Maximum results per page (1-200)")
 	next := fs.String("next", "", "Fetch next page using a links.next URL")
 	paginate := fs.Bool("paginate", false, "Automatically fetch all pages (aggregate results)")
@@ -129,6 +130,7 @@ Examples:
 				ctx,
 				*runID,
 				"run-id",
+				"",
 				*limit,
 				*next,
 				*paginate,
@@ -160,6 +162,7 @@ func xcodeCloudBuildRunsList(ctx context.Context, workflowID string, sort string
 		ctx,
 		workflowID,
 		"workflow-id",
+		`Find workflow IDs with: asc xcode-cloud workflows list --app "APP_ID"`,
 		limit,
 		next,
 		paginate,

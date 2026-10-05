@@ -48,12 +48,15 @@ func TestNormalizeAttachmentFilenameSanitizesFallbackAttachmentID(t *testing.T) 
 }
 
 func TestResolveDownloadPathRejectsEscapingOutDir(t *testing.T) {
-	outDir := t.TempDir()
-	_, err := resolveDownloadPath(outDir, "../outside.txt", true)
+	root, prefix, err := newDownloadRoot(t.TempDir())
+	if err != nil {
+		t.Fatalf("newDownloadRoot() error: %v", err)
+	}
+	_, err = resolveDownloadPath(root, prefix, "../outside.txt", true)
 	if err == nil {
 		t.Fatal("expected path escape error")
 	}
-	if !strings.Contains(err.Error(), "escapes output directory") {
+	if !strings.Contains(err.Error(), "escapes trusted root") {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
@@ -63,6 +66,13 @@ func TestResolveShowOutDirSanitizesDotDotPathPart(t *testing.T) {
 	want := filepath.Join(".asc", "web-review", "unknown", "submission-1")
 	if got != want {
 		t.Fatalf("expected resolved path %q, got %q", want, got)
+	}
+}
+
+func TestResolveShowOutDirPreservesWhitespacePathBytes(t *testing.T) {
+	want := filepath.Join(t.TempDir(), " downloads ")
+	if got := resolveShowOutDir("app", "submission", want); got != want {
+		t.Fatalf("resolveShowOutDir() = %q, want %q", got, want)
 	}
 }
 
@@ -125,6 +135,7 @@ func TestBuildReviewShowTableRowsIncludesExpectedSections(t *testing.T) {
 						Relationship: "appStoreVersion",
 						Type:         "appStoreVersions",
 						ID:           "version-1",
+						Label:        "2.2.1",
 					},
 				},
 			},
@@ -157,6 +168,20 @@ func TestBuildReviewShowTableRowsIncludesExpectedSections(t *testing.T) {
 								ReasonDescription: "Performance: App Completeness",
 							},
 						},
+						Related: []webcore.ReviewRelatedResource{
+							{
+								Relationship: "appStoreVersion",
+								Type:         "appStoreVersions",
+								ID:           "version-1",
+								Label:        "2.2.1",
+							},
+							{
+								Relationship: "build",
+								Type:         "builds",
+								ID:           "build-1",
+								Label:        "88",
+							},
+						},
 					},
 				},
 			},
@@ -185,7 +210,10 @@ func TestBuildReviewShowTableRowsIncludesExpectedSections(t *testing.T) {
 
 	assertRowContains(t, rows, "Submission", "Review Status", "UNRESOLVED_ISSUES")
 	assertRowContains(t, rows, "Items Reviewed", "Item 1", "appStoreVersion")
-	assertRowEquals(t, rows, "Rejections", "Reason 1", "code=2.1.0 section=2.1 description=Performance: App Completeness")
+	assertRowContains(t, rows, "Items Reviewed", "Item 1", "2.2.1")
+	assertRowContains(t, rows, "Rejections", "Reason 1", "2.2.1")
+	assertRowContains(t, rows, "Rejections", "Reason 1", "88")
+	assertRowContains(t, rows, "Rejections", "Reason 1", "code=2.1.0 section=2.1 description=Performance: App Completeness")
 	assertRowEquals(t, rows, "Messages", "Message 1", "Hello Issue details")
 	assertRowContains(t, rows, "Screenshots", "Attachment 1", "Screenshot-1.png")
 	assertRowContains(t, rows, "Downloads", "Downloaded 1", ".asc/web-review/6567933550/submission-1/Screenshot-1.png")
@@ -202,6 +230,18 @@ func TestSummarizeMessageForTableStripsHTMLAndLinks(t *testing.T) {
 	}
 	if !strings.Contains(got, "Testing a Release Build") {
 		t.Fatalf("expected link text to remain, got %q", got)
+	}
+}
+
+func TestSummarizeHTMLBodyForTablePreservesPlainAngleBrackets(t *testing.T) {
+	got := summarizeHTMLBodyForTable("a < b > c", "<p>a &lt; b &gt; c</p>")
+	if got != "a < b > c" {
+		t.Fatalf("plain text with comparison operators = %q, want %q", got, "a < b > c")
+	}
+
+	got = summarizeHTMLBodyForTable("", "<p>a &lt; b &gt; c</p>")
+	if got != "a < b > c" {
+		t.Fatalf("raw HTML fallback = %q, want %q", got, "a < b > c")
 	}
 }
 

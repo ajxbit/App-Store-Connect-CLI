@@ -11,33 +11,36 @@ func offerCodesRows(resp *SubscriptionOfferCodeOneTimeUseCodesResponse) ([]strin
 	for _, item := range resp.Data {
 		attrs := item.Attributes
 		rows = append(rows, []string{
-			sanitizeTerminal(item.ID),
+			SanitizeTerminalText(item.ID),
 			fmt.Sprintf("%d", attrs.NumberOfCodes),
-			sanitizeTerminal(attrs.ExpirationDate),
-			sanitizeTerminal(attrs.CreatedDate),
+			SanitizeTerminalText(attrs.ExpirationDate),
+			SanitizeTerminalText(attrs.CreatedDate),
 			fmt.Sprintf("%t", attrs.Active),
 		})
 	}
 	return headers, rows
 }
 
-func subscriptionOfferCodeRows(resp *SubscriptionOfferCodeResponse) ([]string, [][]string) {
+func subscriptionOfferCodesRows(resp *SubscriptionOfferCodesResponse) ([]string, [][]string) {
 	headers := []string{"ID", "Name", "Customer Eligibilities", "Offer Eligibility", "Duration", "Mode", "Periods", "Total Codes", "Production Codes", "Sandbox Codes", "Active", "Auto Renew"}
-	attrs := resp.Data.Attributes
-	rows := [][]string{{
-		sanitizeTerminal(resp.Data.ID),
-		compactWhitespace(attrs.Name),
-		sanitizeTerminal(formatOfferCodeCustomerEligibilities(attrs.CustomerEligibilities)),
-		sanitizeTerminal(string(attrs.OfferEligibility)),
-		sanitizeTerminal(string(attrs.Duration)),
-		sanitizeTerminal(string(attrs.OfferMode)),
-		fmt.Sprintf("%d", attrs.NumberOfPeriods),
-		fmt.Sprintf("%d", attrs.TotalNumberOfCodes),
-		fmt.Sprintf("%d", attrs.ProductionCodeCount),
-		fmt.Sprintf("%d", attrs.SandboxCodeCount),
-		fmt.Sprintf("%t", attrs.Active),
-		formatOptionalBool(attrs.AutoRenewEnabled),
-	}}
+	rows := make([][]string, 0, len(resp.Data))
+	for _, item := range resp.Data {
+		attrs := item.Attributes
+		rows = append(rows, []string{
+			SanitizeTerminalText(item.ID),
+			SanitizeTerminalText(compactWhitespace(attrs.Name)),
+			SanitizeTerminalText(formatOfferCodeCustomerEligibilities(attrs.CustomerEligibilities)),
+			SanitizeTerminalText(string(attrs.OfferEligibility)),
+			SanitizeTerminalText(string(attrs.Duration)),
+			SanitizeTerminalText(string(attrs.OfferMode)),
+			fmt.Sprintf("%d", attrs.NumberOfPeriods),
+			fmt.Sprintf("%d", attrs.TotalNumberOfCodes),
+			fmt.Sprintf("%d", attrs.ProductionCodeCount),
+			fmt.Sprintf("%d", attrs.SandboxCodeCount),
+			fmt.Sprintf("%t", attrs.Active),
+			formatOptionalBool(attrs.AutoRenewEnabled),
+		})
+	}
 	return headers, rows
 }
 

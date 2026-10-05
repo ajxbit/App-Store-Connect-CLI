@@ -17,7 +17,7 @@ import (
 func VersionsReleaseCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("versions release", flag.ExitOnError)
 
-	versionID := fs.String("version-id", "", "App Store version ID (required)")
+	versionID := shared.BindResourceIDFlag(fs, "version-id", "appStoreVersions", "App Store version ID (required)")
 	confirm := fs.Bool("confirm", false, "Confirm release request (required)")
 	output := shared.BindOutputFlags(fs)
 
@@ -35,11 +35,11 @@ Examples:
 			version := strings.TrimSpace(*versionID)
 			if version == "" {
 				fmt.Fprintln(os.Stderr, "Error: --version-id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--version-id")
 			}
 			if !*confirm {
 				fmt.Fprintln(os.Stderr, "Error: --confirm is required to release a version")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--confirm")
 			}
 
 			client, err := shared.GetASCClient()

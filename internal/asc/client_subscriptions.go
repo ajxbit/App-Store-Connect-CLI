@@ -3,9 +3,9 @@ package asc
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"net/http"
+	"sort"
 	"strings"
 )
 
@@ -75,8 +75,26 @@ func (c *Client) CreateSubscriptionGroup(ctx context.Context, appID string, attr
 }
 
 // GetSubscriptionGroup retrieves a subscription group by ID.
-func (c *Client) GetSubscriptionGroup(ctx context.Context, groupID string) (*SubscriptionGroupResponse, error) {
-	path := fmt.Sprintf("/v1/subscriptionGroups/%s", strings.TrimSpace(groupID))
+func (c *Client) GetSubscriptionGroup(ctx context.Context, groupID string, opts ...SubscriptionGroupsOption) (*SubscriptionGroupResponse, error) {
+	groupID = strings.TrimSpace(groupID)
+	if groupID == "" {
+		return nil, fmt.Errorf("groupID is required")
+	}
+	query := &subscriptionGroupsQuery{}
+	for _, opt := range opts {
+		opt(query)
+	}
+	if query.limit > 0 {
+		return nil, fmt.Errorf("limit is only supported when listing subscription groups")
+	}
+	if query.nextURL != "" {
+		return nil, fmt.Errorf("next URL is only supported when listing subscription groups")
+	}
+
+	path := fmt.Sprintf("/v1/subscriptionGroups/%s", groupID)
+	if queryString := buildSubscriptionGroupsQuery(query); queryString != "" {
+		path += "?" + queryString
+	}
 	data, err := c.do(ctx, http.MethodGet, path, nil)
 	if err != nil {
 		return nil, err
@@ -192,8 +210,19 @@ func (c *Client) CreateSubscription(ctx context.Context, groupID string, attrs S
 }
 
 // GetSubscription retrieves a subscription by ID.
-func (c *Client) GetSubscription(ctx context.Context, subID string) (*SubscriptionResponse, error) {
-	path := fmt.Sprintf("/v1/subscriptions/%s", strings.TrimSpace(subID))
+func (c *Client) GetSubscription(ctx context.Context, subID string, opts ...SubscriptionOption) (*SubscriptionResponse, error) {
+	subID = strings.TrimSpace(subID)
+	if subID == "" {
+		return nil, fmt.Errorf("subscription ID is required")
+	}
+	query := &subscriptionQuery{}
+	for _, opt := range opts {
+		opt(query)
+	}
+	path := fmt.Sprintf("/v1/subscriptions/%s", subID)
+	if queryString := buildSubscriptionQuery(query); queryString != "" {
+		path += "?" + queryString
+	}
 	data, err := c.do(ctx, http.MethodGet, path, nil)
 	if err != nil {
 		return nil, err
@@ -236,68 +265,93 @@ func (c *Client) UpdateSubscription(ctx context.Context, subID string, attrs Sub
 	return &response, nil
 }
 
-// SetSubscriptionInitialPrice sets the initial base price on a subscription that
-// has no existing prices. This uses PATCH /v1/subscriptions/{id} with inline
-// SubscriptionPriceInlineCreate resources, which is the only supported method
-// for setting the first price on a new subscription. POST /v1/subscriptionPrices
-// only works for price *changes* on subscriptions that already have a price.
-func (c *Client) SetSubscriptionInitialPrice(ctx context.Context, subID, pricePointID, territoryID string, attrs SubscriptionPriceCreateAttributes) (*SubscriptionResponse, error) {
+// SetSubscriptionPriceMatrix atomically sets an initial subscription price
+// matrix using inline SubscriptionPriceInlineCreate resources.
+func (c *Client) SetSubscriptionPriceMatrix(ctx context.Context, subID string, entries []SubscriptionInlinePrice) (*SubscriptionResponse, error) {
 	subID = strings.TrimSpace(subID)
-	pricePointID = strings.TrimSpace(pricePointID)
-	territoryID = strings.ToUpper(strings.TrimSpace(territoryID))
-	if subID == "" || pricePointID == "" {
-		return nil, fmt.Errorf("subscription ID and price point ID are required")
+	if subID == "" {
+		return nil, fmt.Errorf("subscription ID is required")
+	}
+	if len(entries) == 0 {
+		return nil, fmt.Errorf("at least one subscription price is required")
 	}
 
-	var attributes *SubscriptionPriceCreateAttributes
-	if attrs.StartDate != "" || attrs.Preserved != nil {
-		attributes = &attrs
-	}
-
-	relationships := SubscriptionPriceInlineRelationships{
-		Subscription:           Relationship{Data: ResourceData{Type: ResourceTypeSubscriptions, ID: subID}},
-		SubscriptionPricePoint: Relationship{Data: ResourceData{Type: ResourceTypeSubscriptionPricePoints, ID: pricePointID}},
-	}
-	if territoryID != "" {
-		relationships.Territory = &Relationship{
-			Data: ResourceData{
-				Type: ResourceTypeTerritories,
-				ID:   territoryID,
-			},
+	normalized := make([]SubscriptionInlinePrice, 0, len(entries))
+	byTerritory := make(map[string]SubscriptionInlinePrice, len(entries))
+	for i, entry := range entries {
+		entry.PricePointID = strings.TrimSpace(entry.PricePointID)
+		entry.TerritoryID = strings.ToUpper(strings.TrimSpace(entry.TerritoryID))
+		entry.Attributes.StartDate = strings.TrimSpace(entry.Attributes.StartDate)
+		entry.Attributes.PlanType = SubscriptionPlanType(strings.TrimSpace(string(entry.Attributes.PlanType)))
+		if entry.PricePointID == "" {
+			return nil, fmt.Errorf("subscription price row %d: price point ID is required", i+1)
 		}
+		if previous, ok := byTerritory[entry.TerritoryID]; ok {
+			if subscriptionPriceMatrixEntriesEqual(previous, entry) {
+				continue
+			}
+			return nil, fmt.Errorf("subscription price matrix has duplicate territory %q with conflicting values", entry.TerritoryID)
+		}
+		byTerritory[entry.TerritoryID] = entry
+		normalized = append(normalized, entry)
+	}
+	sort.Slice(normalized, func(i, j int) bool {
+		return normalized[i].TerritoryID < normalized[j].TerritoryID
+	})
+
+	relationshipData := make([]ResourceData, 0, len(normalized))
+	included := make([]SubscriptionPriceInlineCreate, 0, len(normalized))
+	for i, entry := range normalized {
+		inlinePriceID := fmt.Sprintf("${price-%d}", i+1)
+		relationshipData = append(relationshipData, ResourceData{
+			Type: ResourceTypeSubscriptionPrices,
+			ID:   inlinePriceID,
+		})
+
+		var attributes *SubscriptionPriceCreateAttributes
+		if entry.Attributes.StartDate != "" || entry.Attributes.Preserved != nil || entry.Attributes.PlanType != "" {
+			attrs := entry.Attributes
+			attributes = &attrs
+		}
+		relationships := SubscriptionPriceInlineRelationships{
+			Subscription:           Relationship{Data: ResourceData{Type: ResourceTypeSubscriptions, ID: subID}},
+			SubscriptionPricePoint: Relationship{Data: ResourceData{Type: ResourceTypeSubscriptionPricePoints, ID: entry.PricePointID}},
+		}
+		if entry.TerritoryID != "" {
+			relationships.Territory = &Relationship{
+				Data: ResourceData{
+					Type: ResourceTypeTerritories,
+					ID:   entry.TerritoryID,
+				},
+			}
+		}
+		included = append(included, SubscriptionPriceInlineCreate{
+			Type:          ResourceTypeSubscriptionPrices,
+			ID:            inlinePriceID,
+			Attributes:    attributes,
+			Relationships: relationships,
+		})
 	}
 
-	inlinePriceID := "${price-1}"
 	payload := SubscriptionUpdateRequest{
 		Data: SubscriptionUpdateData{
 			Type: ResourceTypeSubscriptions,
 			ID:   subID,
 			Relationships: &SubscriptionUpdateRelationships{
 				Prices: &RelationshipList{
-					Data: []ResourceData{
-						{Type: ResourceTypeSubscriptionPrices, ID: inlinePriceID},
-					},
+					Data: relationshipData,
 				},
 			},
 		},
-		Included: []SubscriptionPriceInlineCreate{
-			{
-				Type:          ResourceTypeSubscriptionPrices,
-				ID:            inlinePriceID,
-				Attributes:    attributes,
-				Relationships: relationships,
-			},
-		},
+		Included: included,
 	}
 
 	path := fmt.Sprintf("/v1/subscriptions/%s", subID)
-	data, err := c.doRetriedSubscriptionMutation(ctx, func() ([]byte, error) {
-		body, err := BuildRequestBody(payload)
-		if err != nil {
-			return nil, err
-		}
-		return c.do(ctx, http.MethodPatch, path, body)
-	})
+	body, err := BuildRequestBody(payload)
+	if err != nil {
+		return nil, err
+	}
+	data, err := c.do(ctx, http.MethodPatch, path, body)
 	if err != nil {
 		return nil, err
 	}
@@ -308,6 +362,29 @@ func (c *Client) SetSubscriptionInitialPrice(ctx context.Context, subID, pricePo
 	}
 
 	return &response, nil
+}
+
+func subscriptionPriceMatrixEntriesEqual(a, b SubscriptionInlinePrice) bool {
+	if a.PricePointID != b.PricePointID || a.TerritoryID != b.TerritoryID || a.Attributes.StartDate != b.Attributes.StartDate || a.Attributes.PlanType != b.Attributes.PlanType {
+		return false
+	}
+	if a.Attributes.Preserved == nil || b.Attributes.Preserved == nil {
+		return a.Attributes.Preserved == nil && b.Attributes.Preserved == nil
+	}
+	return *a.Attributes.Preserved == *b.Attributes.Preserved
+}
+
+// SetSubscriptionInitialPrice sets the initial base price on a subscription that
+// has no existing prices. This uses PATCH /v1/subscriptions/{id} with inline
+// SubscriptionPriceInlineCreate resources, which is the only supported method
+// for setting the first price on a new subscription. POST /v1/subscriptionPrices
+// only works for price *changes* on subscriptions that already have a price.
+func (c *Client) SetSubscriptionInitialPrice(ctx context.Context, subID, pricePointID, territoryID string, attrs SubscriptionPriceCreateAttributes) (*SubscriptionResponse, error) {
+	return c.SetSubscriptionPriceMatrix(ctx, subID, []SubscriptionInlinePrice{{
+		PricePointID: pricePointID,
+		TerritoryID:  territoryID,
+		Attributes:   attrs,
+	}})
 }
 
 // DeleteSubscription deletes a subscription.
@@ -327,7 +404,7 @@ func (c *Client) CreateSubscriptionPrice(ctx context.Context, subID, pricePointI
 	}
 
 	var attributes *SubscriptionPriceCreateAttributes
-	if attrs.StartDate != "" || attrs.Preserved != nil {
+	if attrs.StartDate != "" || attrs.Preserved != nil || attrs.PlanType != "" {
 		attributes = &attrs
 	}
 
@@ -362,13 +439,11 @@ func (c *Client) CreateSubscriptionPrice(ctx context.Context, subID, pricePointI
 		},
 	}
 
-	data, err := c.doRetriedSubscriptionMutation(ctx, func() ([]byte, error) {
-		body, err := BuildRequestBody(payload)
-		if err != nil {
-			return nil, err
-		}
-		return c.do(ctx, http.MethodPost, "/v1/subscriptionPrices", body)
-	})
+	body, err := BuildRequestBody(payload)
+	if err != nil {
+		return nil, err
+	}
+	data, err := c.do(ctx, http.MethodPost, "/v1/subscriptionPrices", body)
 	if err != nil {
 		return nil, err
 	}
@@ -379,40 +454,6 @@ func (c *Client) CreateSubscriptionPrice(ctx context.Context, subID, pricePointI
 	}
 
 	return &response, nil
-}
-
-func (c *Client) doRetriedSubscriptionMutation(ctx context.Context, request func() ([]byte, error)) ([]byte, error) {
-	retryOpts := ResolveRetryOptions()
-	return WithRetry(ctx, func() ([]byte, error) {
-		data, err := request()
-		if err != nil {
-			if IsRetryable(err) {
-				return nil, err
-			}
-			if isRetryableSubscriptionMutationError(err) {
-				return nil, &RetryableError{Err: err}
-			}
-			return nil, err
-		}
-		return data, nil
-	}, retryOpts)
-}
-
-func isRetryableSubscriptionMutationError(err error) bool {
-	apiErr, ok := errors.AsType[*APIError](err)
-	if !ok || apiErr == nil {
-		return false
-	}
-
-	switch apiErr.StatusCode {
-	case http.StatusInternalServerError, http.StatusBadGateway, http.StatusGatewayTimeout:
-		// App Store Connect intermittently returns UNEXPECTED_ERROR on this endpoint.
-		// Retry these transient server-side failures.
-		code := strings.ToUpper(strings.TrimSpace(apiErr.Code))
-		return code == "" || code == "UNEXPECTED_ERROR"
-	default:
-		return false
-	}
 }
 
 // DeleteSubscriptionPrice deletes a subscription price.
@@ -457,13 +498,11 @@ func (c *Client) CreateSubscriptionAvailability(ctx context.Context, subID strin
 		},
 	}
 
-	data, err := c.doRetriedSubscriptionMutation(ctx, func() ([]byte, error) {
-		body, err := BuildRequestBody(payload)
-		if err != nil {
-			return nil, err
-		}
-		return c.do(ctx, http.MethodPost, "/v1/subscriptionAvailabilities", body)
-	})
+	body, err := BuildRequestBody(payload)
+	if err != nil {
+		return nil, err
+	}
+	data, err := c.do(ctx, http.MethodPost, "/v1/subscriptionAvailabilities", body)
 	if err != nil {
 		return nil, err
 	}
@@ -554,13 +593,20 @@ func (c *Client) GetSubscriptionAvailabilityAvailableTerritories(ctx context.Con
 }
 
 // GetSubscriptionAppStoreReviewScreenshotForSubscription retrieves the review screenshot for a subscription.
-func (c *Client) GetSubscriptionAppStoreReviewScreenshotForSubscription(ctx context.Context, subID string) (*SubscriptionAppStoreReviewScreenshotResponse, error) {
+func (c *Client) GetSubscriptionAppStoreReviewScreenshotForSubscription(ctx context.Context, subID string, opts ...SubscriptionAppStoreReviewScreenshotOption) (*SubscriptionAppStoreReviewScreenshotResponse, error) {
 	subID = strings.TrimSpace(subID)
 	if subID == "" {
 		return nil, fmt.Errorf("subscription ID is required")
 	}
 
+	query := &subscriptionAppStoreReviewScreenshotQuery{}
+	for _, opt := range opts {
+		opt(query)
+	}
 	path := fmt.Sprintf("/v1/subscriptions/%s/appStoreReviewScreenshot", subID)
+	if queryString := buildSubscriptionAppStoreReviewScreenshotQuery(query); queryString != "" {
+		path += "?" + queryString
+	}
 	data, err := c.do(ctx, http.MethodGet, path, nil)
 	if err != nil {
 		return nil, err
@@ -575,13 +621,20 @@ func (c *Client) GetSubscriptionAppStoreReviewScreenshotForSubscription(ctx cont
 }
 
 // GetSubscriptionPromotedPurchase retrieves the promoted purchase for a subscription.
-func (c *Client) GetSubscriptionPromotedPurchase(ctx context.Context, subID string) (*PromotedPurchaseResponse, error) {
+func (c *Client) GetSubscriptionPromotedPurchase(ctx context.Context, subID string, opts ...PromotedPurchaseGetOption) (*PromotedPurchaseResponse, error) {
 	subID = strings.TrimSpace(subID)
 	if subID == "" {
 		return nil, fmt.Errorf("subscription ID is required")
 	}
 
+	query := &promotedPurchaseGetQuery{}
+	for _, opt := range opts {
+		opt(query)
+	}
 	path := fmt.Sprintf("/v1/subscriptions/%s/promotedPurchase", subID)
+	if queryString := buildPromotedPurchaseGetQuery(query); queryString != "" {
+		path += "?" + queryString
+	}
 	data, err := c.do(ctx, http.MethodGet, path, nil)
 	if err != nil {
 		return nil, err
@@ -629,41 +682,6 @@ func (c *Client) GetSubscriptionAvailabilityAvailableTerritoriesRelationships(ct
 	if query.nextURL != "" {
 		if err := validateNextURL(query.nextURL); err != nil {
 			return nil, fmt.Errorf("subscriptionAvailabilityAvailableTerritoriesRelationships: %w", err)
-		}
-		path = query.nextURL
-	} else if queryString := buildLinkagesQuery(query); queryString != "" {
-		path += "?" + queryString
-	}
-
-	data, err := c.do(ctx, http.MethodGet, path, nil)
-	if err != nil {
-		return nil, err
-	}
-
-	var response LinkagesResponse
-	if err := json.Unmarshal(data, &response); err != nil {
-		return nil, fmt.Errorf("failed to parse response: %w", err)
-	}
-
-	return &response, nil
-}
-
-// GetSubscriptionGroupSubscriptionGroupLocalizationsRelationships retrieves localization linkages for a subscription group.
-func (c *Client) GetSubscriptionGroupSubscriptionGroupLocalizationsRelationships(ctx context.Context, groupID string, opts ...LinkagesOption) (*LinkagesResponse, error) {
-	query := &linkagesQuery{}
-	for _, opt := range opts {
-		opt(query)
-	}
-
-	groupID = strings.TrimSpace(groupID)
-	if query.nextURL == "" && groupID == "" {
-		return nil, fmt.Errorf("groupID is required")
-	}
-
-	path := fmt.Sprintf("/v1/subscriptionGroups/%s/relationships/subscriptionGroupLocalizations", groupID)
-	if query.nextURL != "" {
-		if err := validateNextURL(query.nextURL); err != nil {
-			return nil, fmt.Errorf("subscriptionGroupLocalizationsRelationships: %w", err)
 		}
 		path = query.nextURL
 	} else if queryString := buildLinkagesQuery(query); queryString != "" {
@@ -732,41 +750,6 @@ func (c *Client) GetSubscriptionAppStoreReviewScreenshotRelationship(ctx context
 	}
 
 	var response SubscriptionAppStoreReviewScreenshotLinkageResponse
-	if err := json.Unmarshal(data, &response); err != nil {
-		return nil, fmt.Errorf("failed to parse response: %w", err)
-	}
-
-	return &response, nil
-}
-
-// GetSubscriptionImagesRelationships retrieves image linkages for a subscription.
-func (c *Client) GetSubscriptionImagesRelationships(ctx context.Context, subID string, opts ...LinkagesOption) (*LinkagesResponse, error) {
-	query := &linkagesQuery{}
-	for _, opt := range opts {
-		opt(query)
-	}
-
-	subID = strings.TrimSpace(subID)
-	if query.nextURL == "" && subID == "" {
-		return nil, fmt.Errorf("subscription ID is required")
-	}
-
-	path := fmt.Sprintf("/v1/subscriptions/%s/relationships/images", subID)
-	if query.nextURL != "" {
-		if err := validateNextURL(query.nextURL); err != nil {
-			return nil, fmt.Errorf("subscriptionImagesRelationships: %w", err)
-		}
-		path = query.nextURL
-	} else if queryString := buildLinkagesQuery(query); queryString != "" {
-		path += "?" + queryString
-	}
-
-	data, err := c.do(ctx, http.MethodGet, path, nil)
-	if err != nil {
-		return nil, err
-	}
-
-	var response LinkagesResponse
 	if err := json.Unmarshal(data, &response); err != nil {
 		return nil, fmt.Errorf("failed to parse response: %w", err)
 	}
@@ -1046,41 +1029,6 @@ func (c *Client) GetSubscriptionSubscriptionAvailabilityRelationship(ctx context
 	}
 
 	var response SubscriptionSubscriptionAvailabilityLinkageResponse
-	if err := json.Unmarshal(data, &response); err != nil {
-		return nil, fmt.Errorf("failed to parse response: %w", err)
-	}
-
-	return &response, nil
-}
-
-// GetSubscriptionSubscriptionLocalizationsRelationships retrieves subscription localization linkages for a subscription.
-func (c *Client) GetSubscriptionSubscriptionLocalizationsRelationships(ctx context.Context, subID string, opts ...LinkagesOption) (*LinkagesResponse, error) {
-	query := &linkagesQuery{}
-	for _, opt := range opts {
-		opt(query)
-	}
-
-	subID = strings.TrimSpace(subID)
-	if query.nextURL == "" && subID == "" {
-		return nil, fmt.Errorf("subscription ID is required")
-	}
-
-	path := fmt.Sprintf("/v1/subscriptions/%s/relationships/subscriptionLocalizations", subID)
-	if query.nextURL != "" {
-		if err := validateNextURL(query.nextURL); err != nil {
-			return nil, fmt.Errorf("subscriptionSubscriptionLocalizationsRelationships: %w", err)
-		}
-		path = query.nextURL
-	} else if queryString := buildLinkagesQuery(query); queryString != "" {
-		path += "?" + queryString
-	}
-
-	data, err := c.do(ctx, http.MethodGet, path, nil)
-	if err != nil {
-		return nil, err
-	}
-
-	var response LinkagesResponse
 	if err := json.Unmarshal(data, &response); err != nil {
 		return nil, fmt.Errorf("failed to parse response: %w", err)
 	}

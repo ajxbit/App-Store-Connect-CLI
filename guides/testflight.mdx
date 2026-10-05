@@ -97,6 +97,10 @@ TestFlight allows you to distribute pre-release builds to internal and external 
       --output "./testers.csv"
     ```
 
+    <Note>
+      Export prefixes a cell with a single quote when its first character would start a spreadsheet formula (`=`, `+`, `-`, `@`), so opening the file in Excel, Numbers, or Google Sheets cannot execute tester or group values. When a prefix is needed, export adds an `_asc_formula_escaping` provenance column. `asc testflight testers import` only removes prefixes from rows carrying that marker, so leading apostrophes in third-party or user-authored CSV files remain unchanged.
+    </Note>
+
     Import testers from CSV (with dry-run first):
 
     ```bash  theme={null}
@@ -105,11 +109,14 @@ TestFlight allows you to distribute pre-release builds to internal and external 
       --input "./testers.csv" \
       --dry-run
 
-    # After verifying, run without dry-run
+    # After verifying, apply the plan
     asc testflight testers import \
       --app "YOUR_APP_ID" \
-      --input "./testers.csv"
+      --input "./testers.csv" \
+      --confirm
     ```
+
+    `--confirm` is required unless `--dry-run` is set.
   </Step>
 
   <Step title="List and filter testers">
@@ -165,7 +172,7 @@ TestFlight allows you to distribute pre-release builds to internal and external 
     Get a specific build:
 
     ```bash  theme={null}
-    asc builds info --app "YOUR_APP_ID" --version "1.0" --build-number "42"
+    asc builds info --app "YOUR_APP_ID" --version "1.0" --build-number "42" --platform IOS
     ```
   </Step>
 

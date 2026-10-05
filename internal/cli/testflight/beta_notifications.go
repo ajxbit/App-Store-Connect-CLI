@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/peterbourgon/ff/v3/ffcli"
+	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/asc"
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/cli/shared"
 )
 
@@ -38,7 +39,7 @@ Examples:
 func BetaNotificationsCreateCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("create", flag.ExitOnError)
 
-	buildID, legacyBuildID := bindBuildIDFlag(fs, "Build ID")
+	buildID := shared.BindResourceIDFlag(fs, "build-id", "builds", "Build ID")
 	output := shared.BindOutputFlags(fs)
 
 	return &ffcli.Command{
@@ -52,13 +53,10 @@ Examples:
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
-			if err := applyLegacyBuildIDAlias(buildID, legacyBuildID); err != nil {
-				return err
-			}
 			trimmedBuildID := strings.TrimSpace(*buildID)
 			if trimmedBuildID == "" {
 				fmt.Fprintln(os.Stderr, "Error: --build-id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--build-id")
 			}
 
 			client, err := shared.GetASCClient()
@@ -74,7 +72,9 @@ Examples:
 				return fmt.Errorf("beta-notifications create: failed to inspect notification state: %w", err)
 			}
 			if detail.Data.Attributes.AutoNotifyEnabled {
-				return fmt.Errorf("beta-notifications create: auto-notify is already enabled for build %q; no manual build notification is needed", trimmedBuildID)
+				return shared.PrintOutput(&asc.BuildBetaNotificationResponse{
+					NotificationAction: asc.BuildBetaGroupsNotificationActionAutoNotifyEnabled,
+				}, *output.Output, *output.Pretty)
 			}
 
 			resp, err := client.CreateBuildBetaNotification(requestCtx, trimmedBuildID)

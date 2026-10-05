@@ -60,6 +60,48 @@ asc iap view --id "IAP_ID"
 
 * `--legacy` - Use v1 endpoint
 
+## Versioned IAP Resources (API 4.4.1)
+
+IAP metadata and promotional images are managed through a discrete version
+resource. Localizations, images, and review submission are all version-scoped:
+resolve or create an IAP version first, then pass its ID to the commands below.
+
+```bash  theme={null}
+asc iap versions list --iap-id "IAP_ID"
+asc iap versions create --iap-id "IAP_ID"
+asc iap versions view --version-id "IAP_VERSION_ID"
+asc iap versions links versions --iap-id "IAP_ID"
+asc iap versions links image --version-id "IAP_VERSION_ID"
+asc iap versions links images --version-id "IAP_VERSION_ID"
+asc iap versions links localizations --version-id "IAP_VERSION_ID"
+asc iap versions localizations list --version-id "IAP_VERSION_ID"
+asc iap versions localizations create --version-id "IAP_VERSION_ID" --locale "en-US" --name "Premium" --description "Unlock premium features"
+asc iap versions images create --version-id "IAP_VERSION_ID" --file ./promotional.png
+asc iap versions submit --version-id "IAP_VERSION_ID" --submission "REVIEW_SUBMISSION_ID" --confirm
+```
+
+Use the version ID—not the product ID—for v2 localization, image, and review
+submission operations.
+
+<Warning>
+  Resolve and reuse an existing version before running `versions create`.
+  Apple exposes no DELETE operation for IAP versions, and deleting the parent
+  product does not reliably remove a version. An unnecessary create can leave
+  an orphan that the CLI cannot clean up.
+</Warning>
+
+Handle the list result explicitly: create only when it contains zero versions,
+reuse the returned ID when it contains exactly one, and require the operator to
+choose an intended version when it contains more than one. Check the selected
+version's state before changing its metadata; do not guess by taking the first
+array element.
+
+Update commands distinguish omitted fields, explicit values, and explicit
+clears. Although the OpenAPI request schema permits an empty or nullable
+description, the live App Store Connect service rejects both an empty string
+and JSON `null` for IAP-version localization descriptions. Always send a
+non-empty `--description`; do not use `--clear-description` in live workflows.
+
 ## Create In-App Purchase
 
 Create a new in-app purchase product.
@@ -197,14 +239,22 @@ asc iap pricing schedules create \
   --prices "PRICE_POINT_ID:2026-03-01"
 ```
 
-## Localizations
+## Version-Scoped Localizations
 
-Manage in-app purchase localizations for different languages and regions.
+Manage in-app purchase localizations for different languages and regions. First
+create or resolve an IAP version, then pass its version ID to these commands.
+
+<Warning>
+  Keep at least one complete localization on the version. App Store Connect
+  rejects deletion of the final required localization. Create its replacement
+  first, verify it, and only then delete an older locale.
+</Warning>
 
 ### List Localizations
 
 ```bash  theme={null}
-asc iap localizations list --iap-id "IAP_ID"
+asc iap versions localizations list --version-id "IAP_VERSION_ID"
+asc iap versions localizations view --localization-id "LOCALIZATION_ID"
 ```
 
 **Optional Flags:**
@@ -215,8 +265,8 @@ asc iap localizations list --iap-id "IAP_ID"
 ### Create Localization
 
 ```bash  theme={null}
-asc iap localizations create \
-  --iap-id "IAP_ID" \
+asc iap versions localizations create \
+  --version-id "IAP_VERSION_ID" \
   --locale "en-US" \
   --name "Premium Features" \
   --description "Unlock all premium features"
@@ -225,30 +275,63 @@ asc iap localizations create \
 ### Update Localization
 
 ```bash  theme={null}
-asc iap localizations update \
+asc iap versions localizations update \
   --localization-id "LOCALIZATION_ID" \
   --name "Updated Name" \
   --description "Updated description"
 ```
 
+Descriptions must remain non-empty in live App Store Connect. The CLI exposes
+schema-correct clear encoding, but Apple currently rejects an empty or null
+description for this v2 resource.
+
+### Import Localizations
+
+Create missing locales and update changed ones from one JSON file that maps
+each locale to `name` and `description`:
+
+```json
+{
+  "en-US": {"name": "Premium Features", "description": "Unlock all premium features"},
+  "de-DE": {"name": "Premium-Funktionen", "description": "Alle Premium-Funktionen freischalten"}
+}
+```
+
+```bash  theme={null}
+asc iap versions localizations import \
+  --version-id "IAP_VERSION_ID" \
+  --file "./localizations.json" \
+  --dry-run
+```
+
+Rerun with `--confirm` to write. Omitted fields stay unchanged and unchanged
+locales are skipped. A failed locale is reported in the receipt while the
+remaining locales still run, and the command exits non-zero when any failed.
+
 ### Delete Localization
 
 ```bash  theme={null}
-asc iap localizations delete \
+asc iap versions localizations delete \
   --localization-id "LOCALIZATION_ID" \
   --confirm
 ```
 
-## Images and Screenshots
+## Version-Scoped Images and Review Screenshots
 
 ### Upload Promotional Image
 
-Upload a promotional image for an in-app purchase.
+Upload a promotional image for an in-app purchase version. Create or resolve an
+IAP version first; images belong to the version, not the product.
 
 ```bash  theme={null}
-asc iap images create \
-  --iap-id "IAP_ID" \
+asc iap versions images create \
+  --version-id "IAP_VERSION_ID" \
   --file "./promo-image.png"
+
+asc iap versions images list --version-id "IAP_VERSION_ID"
+asc iap versions images view --image-id "IMAGE_ID"
+asc iap versions images update --image-id "IMAGE_ID" --uploaded true
+asc iap versions images delete --image-id "IMAGE_ID" --confirm
 ```
 
 **Image Requirements:**
@@ -258,9 +341,45 @@ asc iap images create \
 * Color space: RGB
 * Maximum file size: 4MB
 
+### Raw Version Relationship Links
+
+Use linkage commands when you need relationship IDs without fetching the full
+related resources:
+
+```bash  theme={null}
+# All versions related to an IAP product
+asc iap versions links versions \
+  --iap-id "IAP_ID" \
+  --paginate
+
+# Singular primary-image linkage for a version
+asc iap versions links image \
+  --version-id "IAP_VERSION_ID"
+
+# Plural image and localization linkages for a version
+asc iap versions links images \
+  --version-id "IAP_VERSION_ID" \
+  --paginate
+
+asc iap versions links localizations \
+  --version-id "IAP_VERSION_ID" \
+  --paginate
+```
+
+`versions`, `images`, and `localizations` accept `--limit`, `--next`, and
+`--paginate`. The singular `image` linkage accepts only `--version-id` plus
+output flags.
+
 ### Manage Review Screenshots
 
 Upload screenshots for App Review.
+
+The file must be a PNG or JPEG named `.png`, `.jpg`, or `.jpeg`. The create and
+update commands, and `asc iap import`, reject any other file before anything
+is uploaded. They also print a warning, and still upload, when the size matches
+no documented App Store screenshot size (such as 1290x2796 for iPhone; the
+warning names the nearest one), the image has an alpha channel, or the image
+data does not fully decode.
 
 ```bash  theme={null}
 # Create review screenshot
@@ -269,7 +388,29 @@ asc iap review-screenshots create \
   --file "./screenshot.png"
 
 # View review screenshot
-asc iap review-screenshots view --iap-id "IAP_ID"
+asc iap review-screenshots view \
+  --iap-id "IAP_ID" \
+  --iap-fields versions
+
+# Update an in-progress upload using the existing screenshot ID
+asc iap review-screenshots update \
+  --screenshot-id "SCREENSHOT_ID" \
+  --file "./replacement.png"
+
+# A completed screenshot cannot be replaced by update. Delete it explicitly,
+# then create the replacement (the delete command requires --confirm).
+asc iap review-screenshots delete \
+  --screenshot-id "SCREENSHOT_ID" \
+  --confirm
+asc iap review-screenshots create \
+  --iap-id "IAP_ID" \
+  --file "./replacement.png"
+
+# Finalize an upload reservation with the API-supported PATCH attributes
+asc iap review-screenshots update \
+  --screenshot-id "SCREENSHOT_ID" \
+  --uploaded true \
+  --checksum "MD5_HASH"
 
 # Delete review screenshot
 asc iap review-screenshots delete \
@@ -314,11 +455,48 @@ asc iap pricing availabilities view --id "AVAILABILITY_ID"
 
 Promote in-app purchases on your App Store product page.
 
+Promoted-purchase reads support the exact related-resource sparse fields from
+App Store Connect API 4.4.1. `--iap-fields` maps to
+`fields[inAppPurchases]`; `--subscription-fields` maps to
+`fields[subscriptions]`. Selecting either field set automatically includes its
+matching relationship.
+
+### List Promoted Purchases
+
+```bash  theme={null}
+asc iap promoted-purchases list \
+  --app "APP_ID" \
+  --iap-fields versions \
+  --subscription-fields versions
+```
+
 ### View Promoted Purchase
 
 ```bash  theme={null}
-asc iap promoted-purchases view --promoted-purchase-id "PROMO_ID"
+asc iap promoted-purchases view \
+  --promoted-purchase-id "PROMO_ID" \
+  --iap-fields versions \
+  --subscription-fields versions
+
+# Resolve the promoted purchase through its IAP relationship
+asc iap promoted-purchases view \
+  --iap-id "123456789" \
+  --iap-fields versions \
+  --subscription-fields versions
+
+# Resolve a product ID or exact current name inside an app
+asc iap promoted-purchases view \
+  --app "APP_ID" \
+  --iap-id "com.example.pro" \
+  --iap-fields versions
 ```
+
+Provide exactly one of `--promoted-purchase-id` or `--iap-id IAP_SELECTOR`.
+`IAP_SELECTOR` accepts an ASC resource ID, product ID, or exact current name.
+Product IDs and names require `--app` or `ASC_APP_ID`; a numeric ASC resource ID
+can be used directly without app context. Sparse-field flags cannot be combined
+with `--next` on list commands because the next-page URL already owns its query
+parameters.
 
 ### Create Promoted Purchase
 
@@ -371,15 +549,30 @@ Manage hosted content for in-app purchases.
 
 ```bash  theme={null}
 # View content status
-asc iap content view --iap-id "IAP_ID"
+asc iap content view \
+  --iap-id "IAP_ID" \
+  --iap-fields versions
 ```
 
 ## Submission
 
-Submit in-app purchases for review.
+Submit an in-app purchase version through a review submission. A review
+submission can contain up to 200 items, including app versions and other
+versioned resources.
 
 ```bash  theme={null}
-asc iap submit --iap-id "IAP_ID" --confirm
+asc review submissions-create \
+  --app "APP_ID" \
+  --platform IOS
+
+asc review items add \
+  --submission "SUBMISSION_ID" \
+  --item-type inAppPurchaseVersions \
+  --item-id "IAP_VERSION_ID"
+
+asc review submissions-submit \
+  --id "SUBMISSION_ID" \
+  --confirm
 ```
 
 **Requirements before submission:**
@@ -391,47 +584,133 @@ asc iap submit --iap-id "IAP_ID" --confirm
 
 ## Common Workflows
 
-### Create Complete IAP
+### Create a Complete, Version-Safe IAP
 
 ```bash  theme={null}
 #!/bin/bash
-# Create a fully configured in-app purchase
+set -euo pipefail
 
 APP_ID="123456789"
 PRODUCT_ID="com.example.app.premium"
+PRICE_POINT_ID="PRICE_POINT_ID"
+PROMOTIONAL_IMAGE="./promo.png"
+REVIEW_SCREENSHOT="./review.png"
 
-# 1. Create IAP
-IAP_RESPONSE=$(asc iap create \
-  --app "$APP_ID" \
-  --type NON_CONSUMABLE \
-  --ref-name "Premium Features" \
-  --product-id "$PRODUCT_ID" \
+# 1. Resolve the product by exact product ID, or create it once.
+IAP_LIST=$(asc iap list --app "$APP_ID" --paginate --output json)
+IAP_IDS=$(echo "$IAP_LIST" | jq -r --arg product "$PRODUCT_ID" \
+  '.data[] | select(.attributes.productId == $product) | .id')
+IAP_COUNT=$(printf '%s\n' "$IAP_IDS" | sed '/^$/d' | wc -l | tr -d ' ')
+
+case "$IAP_COUNT" in
+  0)
+    IAP_ID=$(asc iap create \
+      --app "$APP_ID" \
+      --type NON_CONSUMABLE \
+      --ref-name "Premium Features" \
+      --product-id "$PRODUCT_ID" \
+      --output json | jq -r '.data.id')
+    ;;
+  1) IAP_ID="$IAP_IDS" ;;
+  *) echo "Multiple IAPs matched $PRODUCT_ID; choose one explicitly." >&2; exit 1 ;;
+esac
+
+# 2. Reuse the sole version. Create only when none exists; never guess when
+# several versions exist because Apple provides no version DELETE endpoint.
+VERSION_LIST=$(asc iap versions list \
+  --iap-id "$IAP_ID" \
+  --paginate \
   --output json)
+VERSION_COUNT=$(echo "$VERSION_LIST" | jq '.data | length')
 
-IAP_ID=$(echo "$IAP_RESPONSE" | jq -r '.data.id')
+case "$VERSION_COUNT" in
+  0)
+    IAP_VERSION_ID=$(asc iap versions create \
+      --iap-id "$IAP_ID" \
+      --output json | jq -r '.data.id')
+    ;;
+  1) IAP_VERSION_ID=$(echo "$VERSION_LIST" | jq -r '.data[0].id') ;;
+  *) echo "Multiple IAP versions exist; choose the intended editable ID." >&2; exit 1 ;;
+esac
 
-# 2. Add localization
-asc iap localizations create \
+VERSION_STATE=$(asc iap versions view \
+  --version-id "$IAP_VERSION_ID" \
+  --output json | jq -r '.data.attributes.state')
+test "$VERSION_STATE" = "PREPARE_FOR_SUBMISSION" || {
+  echo "Version $IAP_VERSION_ID is not editable: $VERSION_STATE" >&2
+  exit 1
+}
+
+# 3. Reconcile the required locale. Never clear or empty the description.
+LOCALIZATIONS=$(asc iap versions localizations list \
+  --version-id "$IAP_VERSION_ID" \
+  --paginate \
+  --output json)
+LOCALIZATION_IDS=$(echo "$LOCALIZATIONS" | jq -r \
+  '.data[] | select(.attributes.locale == "en-US") | .id')
+LOCALIZATION_COUNT=$(printf '%s\n' "$LOCALIZATION_IDS" | sed '/^$/d' | wc -l | tr -d ' ')
+
+case "$LOCALIZATION_COUNT" in
+  0)
+    asc iap versions localizations create \
+      --version-id "$IAP_VERSION_ID" \
+      --locale "en-US" \
+      --name "Premium Features" \
+      --description "Unlock all premium features"
+    ;;
+  1)
+    asc iap versions localizations update \
+      --localization-id "$LOCALIZATION_IDS" \
+      --name "Premium Features" \
+      --description "Unlock all premium features"
+    ;;
+  *) echo "Multiple en-US localizations exist; resolve them explicitly." >&2; exit 1 ;;
+esac
+
+# 4. Upload version metadata and the product-level App Review screenshot.
+asc iap versions images create \
+  --version-id "$IAP_VERSION_ID" \
+  --file "$PROMOTIONAL_IMAGE"
+
+asc iap review-screenshots create \
   --iap-id "$IAP_ID" \
-  --locale "en-US" \
-  --name "Premium Features" \
-  --description "Unlock all premium features"
+  --file "$REVIEW_SCREENSHOT"
 
-# 3. Upload promotional image
-asc iap images create \
-  --iap-id "$IAP_ID" \
-  --file "./promo.png"
-
-# 4. Set availability
+# 5. Configure availability and pricing.
 asc iap pricing availability set \
   --iap-id "$IAP_ID" \
   --territories "USA,CAN,GBR,AUS"
 
-# 5. Configure pricing (requires price point ID)
-# See pricing documentation for details
+asc iap pricing schedules create \
+  --iap-id "$IAP_ID" \
+  --base-territory "USA" \
+  --prices "$PRICE_POINT_ID"
 
-echo "IAP created with ID: $IAP_ID"
+# 6. Add the version to a fresh review submission and submit it.
+SUBMISSION_ID=$(asc review submissions-create \
+  --app "$APP_ID" \
+  --platform IOS \
+  --output json | jq -r '.data.id')
+
+asc review items add \
+  --submission "$SUBMISSION_ID" \
+  --item-type inAppPurchaseVersions \
+  --item-id "$IAP_VERSION_ID"
+
+asc review submissions-submit \
+  --id "$SUBMISSION_ID" \
+  --confirm
+
+echo "Submitted IAP $IAP_ID using version $IAP_VERSION_ID"
 ```
+
+The workflow deliberately stops when several versions or same-locale resources
+exist. Select the intended IDs and resume rather than creating replacements.
+Image and review-screenshot uploads are writes; on a retry, inspect the current
+resources first and skip an upload that already succeeded. Price-schedule
+creation is also an unconditional write: if the script stops after that command
+succeeds, resume at step 6 instead of restarting the script and creating a
+second schedule.
 
 ### Bulk Update Availability
 

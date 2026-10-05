@@ -2,20 +2,20 @@
 
 > Manage App Store Connect webhooks for event notifications
 
-Manage webhooks in App Store Connect to receive real-time notifications about events like subscription changes, build processing, and review updates.
+Manage webhooks in App Store Connect to receive real-time notifications about events such as build processing and beta feedback updates.
 
 ## Quick Start
 
 ```bash  theme={null}
 asc webhooks list --app "APP_ID"
-asc webhooks create --app "APP_ID" --name "Build Updates" --url "https://example.com/webhook" --secret "secret123" --events "SUBSCRIPTION.CREATED,SUBSCRIPTION.UPDATED" --enabled true
+asc webhooks create --app "APP_ID" --name "Build Updates" --url "https://example.com/webhook" --secret "secret123" --events "BUILD_UPLOAD_STATE_UPDATED" --enabled true
 asc webhooks serve --port 8787 --dir ./webhook-events
 ```
 
 ## Subcommands
 
 * `list` - List webhooks for an app
-* `get` - Get a webhook by ID
+* `view` - View a webhook by ID
 * `create` - Create a webhook
 * `update` - Update a webhook
 * `delete` - Delete a webhook
@@ -44,7 +44,7 @@ asc webhooks list --app "APP_ID" --paginate
 * `--output` - Output format: `json`, `table`, `markdown`
 * `--pretty` - Pretty-print JSON output
 
-### webhooks get
+### webhooks view
 
 Get a webhook by ID:
 
@@ -68,7 +68,7 @@ asc webhooks create \
   --name "Build Updates" \
   --url "https://example.com/webhook" \
   --secret "secret123" \
-  --events "SUBSCRIPTION.CREATED,SUBSCRIPTION.UPDATED" \
+  --events "BUILD_UPLOAD_STATE_UPDATED" \
   --enabled true
 ```
 
@@ -158,8 +158,8 @@ Listening for webhook events on http://127.0.0.1:8787
 Files are written as `{timestamp}-{index}-{event-type}.json`:
 
 ```
-20260304T123456.789012345Z-000001-subscription_created.json
-20260304T123501.234567890Z-000002-subscription_updated.json
+20260304T123456.789012345Z-000001-build_upload_state_updated.json
+20260304T123501.234567890Z-000002-beta_feedback_crash_submission_created.json
 ```
 
 ### webhooks deliveries
@@ -167,7 +167,9 @@ Files are written as `{timestamp}-{index}-{event-type}.json`:
 List webhook deliveries:
 
 ```bash  theme={null}
+asc webhooks deliveries --webhook-id "WEBHOOK_ID"
 asc webhooks deliveries --webhook-id "WEBHOOK_ID" --created-after "2026-01-01T00:00:00Z"
+asc webhooks deliveries --webhook-id "WEBHOOK_ID" --created-after "2026-01-01T00:00:00Z" --created-before "2026-01-02T00:00:00Z"
 asc webhooks deliveries --webhook-id "WEBHOOK_ID" --limit 10
 asc webhooks deliveries --webhook-id "WEBHOOK_ID" --paginate
 ```
@@ -183,7 +185,7 @@ asc webhooks deliveries --webhook-id "WEBHOOK_ID" --paginate
 * `--output` - Output format: `json`, `table`, `markdown`
 * `--pretty` - Pretty-print JSON output
 
-**Note:** Either `--created-after` or `--created-before` is required (mutually exclusive).
+Both date filters are optional and can be combined to request a bounded range.
 
 ### webhooks deliveries links
 
@@ -233,15 +235,20 @@ asc webhooks ping --webhook-id "WEBHOOK_ID"
 
 ## Event Types
 
-Common webhook event types:
+Supported webhook event types:
 
-* `SUBSCRIPTION.CREATED`
-* `SUBSCRIPTION.UPDATED`
-* `SUBSCRIPTION.RENEWED`
-* `SUBSCRIPTION.EXPIRED`
-* `BUILD.PROCESSING`
-* `BUILD.PROCESSED`
-* `VERSION.REVIEW_STATUS_CHANGED`
+* `ALTERNATIVE_DISTRIBUTION_PACKAGE_AVAILABLE_UPDATED`
+* `ALTERNATIVE_DISTRIBUTION_PACKAGE_VERSION_CREATED`
+* `ALTERNATIVE_DISTRIBUTION_TERRITORY_AVAILABILITY_UPDATED`
+* `APP_STORE_VERSION_APP_VERSION_STATE_UPDATED`
+* `BACKGROUND_ASSET_VERSION_APP_STORE_RELEASE_STATE_UPDATED`
+* `BACKGROUND_ASSET_VERSION_EXTERNAL_BETA_RELEASE_STATE_UPDATED`
+* `BACKGROUND_ASSET_VERSION_INTERNAL_BETA_RELEASE_CREATED`
+* `BACKGROUND_ASSET_VERSION_STATE_UPDATED`
+* `BETA_FEEDBACK_CRASH_SUBMISSION_CREATED`
+* `BETA_FEEDBACK_SCREENSHOT_SUBMISSION_CREATED`
+* `BUILD_BETA_DETAIL_EXTERNAL_BUILD_STATE_UPDATED`
+* `BUILD_UPLOAD_STATE_UPDATED`
 
 See the [App Store Connect API documentation](https://developer.apple.com/documentation/appstoreconnectapi/app_store_connect_api_webhooks) for a complete list.
 
@@ -264,7 +271,7 @@ See the [App Store Connect API documentation](https://developer.apple.com/docume
      --name "Test Webhook" \
      --url "https://abc123.ngrok.io" \
      --secret "test-secret" \
-     --events "SUBSCRIPTION.CREATED" \
+     --events "BUILD_UPLOAD_STATE_UPDATED" \
      --enabled true
    ```
 

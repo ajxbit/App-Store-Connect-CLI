@@ -25,7 +25,7 @@ func BundleIDsAppCommand() *ffcli.Command {
 		LongHelp: `View the app linked to a bundle ID.
 
 Examples:
-  asc bundle-ids app get --id "BUNDLE_ID"`,
+  asc bundle-ids app view --id "BUNDLE_ID"`,
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
 		Subcommands: []*ffcli.Command{
@@ -39,31 +39,31 @@ Examples:
 
 // BundleIDsAppGetCommand returns the bundle ID app get subcommand.
 func BundleIDsAppGetCommand() *ffcli.Command {
-	fs := flag.NewFlagSet("get", flag.ExitOnError)
+	fs := flag.NewFlagSet("view", flag.ExitOnError)
 
-	id := fs.String("id", "", "Bundle ID")
+	id := shared.BindResourceIDFlag(fs, "id", "bundleIds", "Bundle ID")
 	output := shared.BindOutputFlags(fs)
 
 	return &ffcli.Command{
-		Name:       "get",
-		ShortUsage: "asc bundle-ids app get --id \"BUNDLE_ID\"",
-		ShortHelp:  "Get the app linked to a bundle ID.",
-		LongHelp: `Get the app linked to a bundle ID.
+		Name:       "view",
+		ShortUsage: "asc bundle-ids app view --id \"BUNDLE_ID\"",
+		ShortHelp:  "View the app linked to a bundle ID.",
+		LongHelp: `View the app linked to a bundle ID.
 
 Examples:
-  asc bundle-ids app get --id "BUNDLE_ID"`,
+  asc bundle-ids app view --id "BUNDLE_ID"`,
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
 			idValue := strings.TrimSpace(*id)
 			if idValue == "" {
 				fmt.Fprintln(os.Stderr, "Error: --id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--id")
 			}
 
 			client, err := shared.GetASCClient()
 			if err != nil {
-				return fmt.Errorf("bundle-ids app get: %w", err)
+				return fmt.Errorf("bundle-ids app view: %w", err)
 			}
 
 			requestCtx, cancel := shared.ContextWithTimeout(ctx)
@@ -71,7 +71,7 @@ Examples:
 
 			resp, err := client.GetBundleIDApp(requestCtx, idValue)
 			if err != nil {
-				return fmt.Errorf("bundle-ids app get: failed to fetch: %w", err)
+				return fmt.Errorf("bundle-ids app view: failed to fetch: %w", err)
 			}
 
 			return shared.PrintOutput(resp, *output.Output, *output.Pretty)
@@ -106,7 +106,7 @@ Examples:
 func BundleIDsProfilesListCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("list", flag.ExitOnError)
 
-	id := fs.String("id", "", "Bundle ID")
+	id := shared.BindResourceIDFlag(fs, "id", "bundleIds", "Bundle ID")
 	limit := fs.Int("limit", 0, "Maximum results per page (1-200)")
 	next := fs.String("next", "", "Fetch next page using a links.next URL")
 	paginate := fs.Bool("paginate", false, "Automatically fetch all pages (aggregate results)")
@@ -127,13 +127,13 @@ Examples:
 			idValue := strings.TrimSpace(*id)
 			if idValue == "" && strings.TrimSpace(*next) == "" {
 				fmt.Fprintln(os.Stderr, "Error: --id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--id")
 			}
 			if *limit != 0 && (*limit < 1 || *limit > 200) {
-				return fmt.Errorf("bundle-ids profiles list: --limit must be between 1 and 200")
+				return shared.UsageError("bundle-ids profiles list: --limit must be between 1 and 200")
 			}
 			if err := shared.ValidateNextURL(*next); err != nil {
-				return fmt.Errorf("bundle-ids profiles list: %w", err)
+				return shared.UsageErrorf("bundle-ids profiles list: %v", err)
 			}
 			if idValue == "" && strings.TrimSpace(*next) != "" {
 				derivedID, err := extractBundleIDFromNextURL(*next)
@@ -159,7 +159,7 @@ Examples:
 			if *paginate {
 				if idValue == "" {
 					fmt.Fprintln(os.Stderr, "Error: --id is required")
-					return flag.ErrHelp
+					return shared.MissingRequiredUsageError("--id")
 				}
 				paginateOpts := append(opts, asc.WithBundleIDProfilesLimit(200))
 				firstPage, err := client.GetBundleIDProfiles(requestCtx, idValue, paginateOpts...)

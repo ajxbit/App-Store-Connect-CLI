@@ -7,16 +7,19 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/x509"
+	"encoding/json"
 	"encoding/pem"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	rootcmd "github.com/rudrankriyam/App-Store-Connect-CLI/cmd"
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/auth"
 	authcli "github.com/rudrankriyam/App-Store-Connect-CLI/internal/cli/auth"
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/cli/shared"
@@ -80,23 +83,6 @@ func captureOutput(t *testing.T, fn func()) (string, string) {
 	os.Stderr = oldStderr
 
 	return stdout, stderr
-}
-
-func withNonTTYStdin(t *testing.T, fn func()) {
-	t.Helper()
-
-	oldStdin := os.Stdin
-	stdinFile, err := os.CreateTemp(t.TempDir(), "stdin")
-	if err != nil {
-		t.Fatalf("failed to create non-tty stdin file: %v", err)
-	}
-	defer func() {
-		os.Stdin = oldStdin
-		_ = stdinFile.Close()
-	}()
-
-	os.Stdin = stdinFile
-	fn()
 }
 
 func writeECDSAPEM(t *testing.T, path string) {
@@ -177,8 +163,43 @@ func TestCompletionZshPrintsScriptToStdout(t *testing.T) {
 	if stderr != "" {
 		t.Fatalf("expected empty stderr, got %q", stderr)
 	}
-	if strings.Contains(stdout, "offer-codes") || strings.Contains(stdout, "win-back-offers") || strings.Contains(stdout, "promoted-purchases") {
-		t.Fatalf("expected hidden deprecated root commands to be omitted from completion output, got %q", stdout)
+	completionRootGroup := func(variable string) string {
+		t.Helper()
+		prefix := variable + "=('"
+		start := strings.Index(stdout, prefix)
+		if start < 0 {
+			t.Fatalf("expected %s root completion data, got %q", variable, stdout)
+		}
+		group := stdout[start+len(prefix):]
+		end := strings.IndexByte(group, '\'')
+		if end < 0 {
+			t.Fatalf("expected terminated %s root completion data, got %q", variable, group)
+		}
+		return group[:end]
+	}
+	rootGroup := completionRootGroup("_ASC_COMPLETION_SUBCOMMAND_GROUPS")
+	if strings.Contains(rootGroup, "offer-codes") || strings.Contains(rootGroup, "win-back-offers") || strings.Contains(rootGroup, "promoted-purchases") {
+		t.Fatalf("expected hidden deprecated root commands to be omitted from root completions, got %q", rootGroup)
+	}
+	rootFlags := completionRootGroup("_ASC_COMPLETION_FLAG_GROUPS")
+	for _, expected := range []string{"--profile", "--report", "--version"} {
+		if !strings.Contains(rootFlags, expected) {
+			t.Fatalf("expected root flag completion metadata %q, got %q", expected, rootFlags)
+		}
+	}
+	rootValueFlags := completionRootGroup("_ASC_COMPLETION_VALUE_FLAG_GROUPS")
+	for _, expected := range []string{"--profile", "--report", "--report-file"} {
+		if !strings.Contains(rootValueFlags, expected) {
+			t.Fatalf("expected root value flag completion metadata %q, got %q", expected, rootValueFlags)
+		}
+	}
+	if strings.Contains(rootValueFlags, "--version") {
+		t.Fatalf("expected boolean root flag to be omitted from value flags, got %q", rootValueFlags)
+	}
+	for _, expected := range []string{"apps info", "builds list", "--bundle-id", "--processing-state"} {
+		if !strings.Contains(stdout, expected) {
+			t.Fatalf("expected nested command completion metadata %q, got %q", expected, stdout)
+		}
 	}
 }
 
@@ -732,7 +753,7 @@ func TestBuildBundlesValidationErrors(t *testing.T) {
 		{
 			name:    "build-bundles list missing build",
 			args:    []string{"build-bundles", "list"},
-			wantErr: "Error: --build is required",
+			wantErr: "Error: --build-id is required",
 		},
 		{
 			name:    "build-bundles file-sizes list missing id",
@@ -1060,51 +1081,6 @@ func TestIAPValidationErrors(t *testing.T) {
 			wantErr: "--confirm is required",
 		},
 		{
-			name:    "iap localizations list missing id",
-			args:    []string{"iap", "localizations", "list"},
-			wantErr: "--iap-id is required",
-		},
-		{
-			name:    "iap localizations create missing iap-id",
-			args:    []string{"iap", "localizations", "create", "--name", "Title", "--locale", "en-US"},
-			wantErr: "--iap-id is required",
-		},
-		{
-			name:    "iap localizations update missing localization-id",
-			args:    []string{"iap", "localizations", "update", "--name", "Title"},
-			wantErr: "--localization-id is required",
-		},
-		{
-			name:    "iap localizations delete missing confirm",
-			args:    []string{"iap", "localizations", "delete", "--localization-id", "LOC_ID"},
-			wantErr: "--confirm is required",
-		},
-		{
-			name:    "iap images list missing iap-id",
-			args:    []string{"iap", "images", "list"},
-			wantErr: "--iap-id is required",
-		},
-		{
-			name:    "iap images get missing image-id",
-			args:    []string{"iap", "images", "view"},
-			wantErr: "--image-id is required",
-		},
-		{
-			name:    "iap images create missing file",
-			args:    []string{"iap", "images", "create", "--iap-id", "IAP_ID"},
-			wantErr: "--file is required",
-		},
-		{
-			name:    "iap images update missing image-id",
-			args:    []string{"iap", "images", "update", "--file", "./image.png"},
-			wantErr: "--image-id is required",
-		},
-		{
-			name:    "iap images delete missing confirm",
-			args:    []string{"iap", "images", "delete", "--image-id", "IMG_ID"},
-			wantErr: "--confirm is required",
-		},
-		{
 			name:    "iap review-screenshots get missing ids",
 			args:    []string{"iap", "review-screenshots", "view"},
 			wantErr: "--iap-id or --screenshot-id is required",
@@ -1116,8 +1092,13 @@ func TestIAPValidationErrors(t *testing.T) {
 		},
 		{
 			name:    "iap review-screenshots update missing screenshot-id",
-			args:    []string{"iap", "review-screenshots", "update", "--file", "./review.png"},
+			args:    []string{"iap", "review-screenshots", "update", "--checksum", "HASH"},
 			wantErr: "--screenshot-id is required",
+		},
+		{
+			name:    "iap review-screenshots update missing update flags",
+			args:    []string{"iap", "review-screenshots", "update", "--screenshot-id", "SHOT_ID"},
+			wantErr: "at least one update flag is required",
 		},
 		{
 			name:    "iap review-screenshots delete missing confirm",
@@ -1244,11 +1225,6 @@ func TestIAPValidationErrors(t *testing.T) {
 			args:    []string{"iap", "promoted-purchases", "create", "--app", "APP_ID", "--product-id", "IAP_ID", "--product-type", "SUBSCRIPTION", "--visible-for-all-users", "true"},
 			wantErr: "--product-type is fixed to IN_APP_PURCHASE",
 		},
-		{
-			name:    "iap submit missing confirm",
-			args:    []string{"iap", "submit", "--iap-id", "IAP_ID"},
-			wantErr: "--confirm is required",
-		},
 	}
 
 	for _, test := range tests {
@@ -1273,30 +1249,6 @@ func TestIAPValidationErrors(t *testing.T) {
 				t.Fatalf("expected error %q, got %q", test.wantErr, stderr)
 			}
 		})
-	}
-}
-
-func TestIAPImagesListRejectsInvalidNextURL(t *testing.T) {
-	root := RootCommand("1.2.3")
-
-	stdout, stderr := captureOutput(t, func() {
-		if err := root.Parse([]string{"iap", "images", "list", "--iap-id", "IAP_ID", "--next", "not-a-url"}); err != nil {
-			t.Fatalf("parse error: %v", err)
-		}
-		err := root.Run(context.Background())
-		if err == nil {
-			t.Fatal("expected error, got nil")
-		}
-		if errors.Is(err, flag.ErrHelp) {
-			t.Fatalf("unexpected ErrHelp, got %v", err)
-		}
-	})
-
-	if stdout != "" {
-		t.Fatalf("expected empty stdout, got %q", stdout)
-	}
-	if stderr != "" {
-		t.Fatalf("expected empty stderr, got %q", stderr)
 	}
 }
 
@@ -1437,14 +1389,9 @@ func TestPricingValidationErrors(t *testing.T) {
 			wantErr: "Error: --id and --app are mutually exclusive",
 		},
 		{
-			name:    "pricing availability set missing available in new territories",
-			args:    []string{"pricing", "availability", "edit", "--app", "APP_ID", "--territory", "USA", "--available", "true"},
-			wantErr: "Error: --available-in-new-territories is required",
-		},
-		{
-			name:    "pricing availability create removed",
+			name:    "pricing availability create missing app",
 			args:    []string{"pricing", "availability", "create"},
-			wantErr: "Pricing availability commands operate on existing availability records.",
+			wantErr: "Error: --app is required",
 		},
 	}
 
@@ -1519,7 +1466,17 @@ func TestSubscriptionsValidationErrors(t *testing.T) {
 		{
 			name:    "subscriptions list missing group",
 			args:    []string{"subscriptions", "list"},
-			wantErr: "--group-id is required",
+			wantErr: "--group-id or --app is required",
+		},
+		{
+			name:    "subscriptions list rejects app with group",
+			args:    []string{"subscriptions", "list", "--group-id", "GROUP_ID", "--app", "APP_ID"},
+			wantErr: "--group-id and --app are mutually exclusive",
+		},
+		{
+			name:    "subscriptions list rejects app with next",
+			args:    []string{"subscriptions", "list", "--app", "APP_ID", "--next", "https://api.appstoreconnect.apple.com/v1/subscriptionGroups/GROUP_ID/subscriptions?cursor=NEXT"},
+			wantErr: "--next cannot be combined with --app",
 		},
 		{
 			name:    "subscriptions create missing group",
@@ -1629,7 +1586,7 @@ func TestSubscriptionsValidationErrors(t *testing.T) {
 		{
 			name:    "subscriptions pricing availability available-territories missing id",
 			args:    []string{"subscriptions", "pricing", "availability", "available-territories"},
-			wantErr: "--availability-id is required",
+			wantErr: "--availability-id or --subscription-id is required",
 		},
 		{
 			name:    "subscriptions review app-store-screenshot get missing id",
@@ -1672,49 +1629,19 @@ func TestSubscriptionsValidationErrors(t *testing.T) {
 			wantErr: "--renewal-type must be one of",
 		},
 		{
-			name:    "subscriptions localizations list missing subscription-id",
-			args:    []string{"subscriptions", "localizations", "list"},
-			wantErr: "--subscription-id is required",
-		},
-		{
-			name:    "subscriptions localizations create missing locale",
-			args:    []string{"subscriptions", "localizations", "create", "--subscription-id", "SUB_ID", "--name", "Pro"},
-			wantErr: "--locale is required",
-		},
-		{
-			name:    "subscriptions localizations update missing update flags",
-			args:    []string{"subscriptions", "localizations", "update", "--id", "LOC_ID"},
-			wantErr: "at least one update flag is required",
-		},
-		{
-			name:    "subscriptions localizations delete missing confirm",
-			args:    []string{"subscriptions", "localizations", "delete", "--id", "LOC_ID"},
-			wantErr: "--confirm is required",
-		},
-		{
-			name:    "subscriptions images list missing subscription-id",
-			args:    []string{"subscriptions", "images", "list"},
-			wantErr: "--subscription-id is required",
-		},
-		{
-			name:    "subscriptions images create missing file",
-			args:    []string{"subscriptions", "images", "create", "--subscription-id", "SUB_ID"},
-			wantErr: "--file is required",
-		},
-		{
-			name:    "subscriptions images update missing update flags",
-			args:    []string{"subscriptions", "images", "update", "--id", "IMAGE_ID"},
-			wantErr: "at least one update flag is required",
-		},
-		{
-			name:    "subscriptions images delete missing confirm",
-			args:    []string{"subscriptions", "images", "delete", "--id", "IMAGE_ID"},
-			wantErr: "--confirm is required",
-		},
-		{
 			name:    "subscriptions introductory-offers list missing subscription-id",
 			args:    []string{"subscriptions", "offers", "introductory", "list"},
 			wantErr: "--subscription-id is required",
+		},
+		{
+			name:    "subscriptions introductory-offers view missing subscription-id",
+			args:    []string{"subscriptions", "offers", "introductory", "view", "--id", "OFFER_ID"},
+			wantErr: "--subscription-id is required",
+		},
+		{
+			name:    "subscriptions introductory-offers view missing offer id",
+			args:    []string{"subscriptions", "offers", "introductory", "view", "--subscription-id", "SUB_ID"},
+			wantErr: "--id is required",
 		},
 		{
 			name:    "subscriptions introductory-offers create missing offer-duration",
@@ -1773,13 +1700,23 @@ func TestSubscriptionsValidationErrors(t *testing.T) {
 		},
 		{
 			name:    "subscriptions offer-codes create missing name",
-			args:    []string{"subscriptions", "offers", "offer-codes", "create", "--subscription-id", "SUB_ID", "--offer-eligibility", "STACK_WITH_INTRO_OFFERS", "--customer-eligibilities", "NEW", "--offer-duration", "ONE_MONTH", "--offer-mode", "FREE_TRIAL", "--number-of-periods", "1", "--prices", "PRICE_ID"},
+			args:    []string{"subscriptions", "offers", "offer-codes", "create", "--subscription-id", "SUB_ID", "--offer-eligibility", "STACK_WITH_INTRO_OFFERS", "--customer-eligibilities", "NEW", "--offer-duration", "ONE_MONTH", "--offer-mode", "PAY_AS_YOU_GO", "--number-of-periods", "1", "--prices", "PRICE_ID"},
 			wantErr: "--name is required",
 		},
 		{
 			name:    "subscriptions offer-codes create missing prices",
+			args:    []string{"subscriptions", "offers", "offer-codes", "create", "--subscription-id", "SUB_ID", "--name", "Spring", "--offer-eligibility", "STACK_WITH_INTRO_OFFERS", "--customer-eligibilities", "NEW", "--offer-duration", "ONE_MONTH", "--offer-mode", "PAY_AS_YOU_GO", "--number-of-periods", "1"},
+			wantErr: "--prices is required",
+		},
+		{
+			name:    "subscriptions offer-codes create free-trial missing prices",
 			args:    []string{"subscriptions", "offers", "offer-codes", "create", "--subscription-id", "SUB_ID", "--name", "Spring", "--offer-eligibility", "STACK_WITH_INTRO_OFFERS", "--customer-eligibilities", "NEW", "--offer-duration", "ONE_MONTH", "--offer-mode", "FREE_TRIAL", "--number-of-periods", "1"},
 			wantErr: "--prices is required",
+		},
+		{
+			name:    "subscriptions offer-codes create free-trial with price point rejected",
+			args:    []string{"subscriptions", "offers", "offer-codes", "create", "--subscription-id", "SUB_ID", "--name", "Spring", "--offer-eligibility", "STACK_WITH_INTRO_OFFERS", "--customer-eligibilities", "NEW", "--offer-duration", "ONE_MONTH", "--offer-mode", "FREE_TRIAL", "--number-of-periods", "1", "--prices", "USA:PRICE_ID"},
+			wantErr: "--prices for FREE_TRIAL must use TERRITORY entries without price point IDs",
 		},
 		{
 			name:    "subscriptions offer-codes update missing active",
@@ -1832,16 +1769,6 @@ func TestSubscriptionsValidationErrors(t *testing.T) {
 			wantErr: "--price-point-id is required",
 		},
 		{
-			name:    "subscriptions submit missing subscription-id",
-			args:    []string{"subscriptions", "review", "submit", "--confirm"},
-			wantErr: "--subscription-id is required",
-		},
-		{
-			name:    "subscriptions submit missing confirm",
-			args:    []string{"subscriptions", "review", "submit", "--subscription-id", "SUB_ID"},
-			wantErr: "--confirm is required",
-		},
-		{
 			name:    "subscriptions review-screenshots create missing file",
 			args:    []string{"subscriptions", "review", "screenshots", "create", "--subscription-id", "SUB_ID"},
 			wantErr: "--file is required",
@@ -1865,31 +1792,6 @@ func TestSubscriptionsValidationErrors(t *testing.T) {
 			name:    "subscriptions review screenshots get missing screenshot-id",
 			args:    []string{"subscriptions", "review", "screenshots", "view"},
 			wantErr: "--screenshot-id is required",
-		},
-		{
-			name:    "subscriptions review submit-group missing group-id",
-			args:    []string{"subscriptions", "review", "submit-group", "--confirm"},
-			wantErr: "--group-id is required",
-		},
-		{
-			name:    "subscriptions groups localizations list missing group-id",
-			args:    []string{"subscriptions", "groups", "localizations", "list"},
-			wantErr: "--group-id is required",
-		},
-		{
-			name:    "subscriptions groups localizations create missing locale",
-			args:    []string{"subscriptions", "groups", "localizations", "create", "--group-id", "GROUP_ID", "--name", "Premium"},
-			wantErr: "--locale is required",
-		},
-		{
-			name:    "subscriptions groups localizations update missing update flags",
-			args:    []string{"subscriptions", "groups", "localizations", "update", "--id", "LOC_ID"},
-			wantErr: "at least one update flag is required",
-		},
-		{
-			name:    "subscriptions groups localizations delete missing confirm",
-			args:    []string{"subscriptions", "groups", "localizations", "delete", "--id", "LOC_ID"},
-			wantErr: "--confirm is required",
 		},
 		{
 			name:    "apps subscription-grace-period get missing app",
@@ -2027,6 +1929,93 @@ func TestCertificatesValidationErrors(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestCertificatesCreateGenerateCSRFlagValidation(t *testing.T) {
+	tests := []struct {
+		name    string
+		args    []string
+		wantErr string
+	}{
+		{
+			name:    "generate csr missing key out value",
+			args:    []string{"certificates", "create", "--certificate-type", "IOS_DISTRIBUTION", "--generate-csr", "--key-out"},
+			wantErr: "flag needs an argument: -key-out",
+		},
+		{
+			name:    "generate csr invalid bool value",
+			args:    []string{"certificates", "create", "--certificate-type", "IOS_DISTRIBUTION", "--generate-csr=maybe", "--key-out", "./dist.key", "--csr-out", "./dist.csr"},
+			wantErr: "invalid boolean value",
+		},
+		{
+			name:    "generate csr missing csr out value",
+			args:    []string{"certificates", "create", "--certificate-type", "IOS_DISTRIBUTION", "--generate-csr", "--key-out", "./dist.key", "--csr-out"},
+			wantErr: "flag needs an argument: -csr-out",
+		},
+		{
+			name:    "generation only default key type still requires generate csr",
+			args:    []string{"certificates", "create", "--certificate-type", "IOS_DISTRIBUTION", "--csr", "./dist.csr", "--key-type", "rsa"},
+			wantErr: "--key-out, --csr-out, CSR subject flags, --key-type, --key-size, and --force require --generate-csr",
+		},
+		{
+			name:    "generation only flag mixed order still requires generate csr",
+			args:    []string{"certificates", "create", "--certificate-type", "IOS_DISTRIBUTION", "--key-out", "./dist.key", "--csr", "./dist.csr"},
+			wantErr: "--key-out, --csr-out, CSR subject flags, --key-type, --key-size, and --force require --generate-csr",
+		},
+		{
+			name:    "pass type certificate requires pass type id before reading csr",
+			args:    []string{"certificates", "create", "--csr", "./missing.csr", "--certificate-type", "PASS_TYPE_ID"},
+			wantErr: "--pass-type-id is required with --certificate-type PASS_TYPE_ID",
+		},
+		{
+			name:    "pass type certificate with nfc requires pass type id",
+			args:    []string{"certificates", "create", "--certificate-type", "PASS_TYPE_ID_WITH_NFC", "--csr", "./missing.csr"},
+			wantErr: "--pass-type-id is required with --certificate-type PASS_TYPE_ID_WITH_NFC",
+		},
+		{
+			name:    "pass type id rejects incompatible certificate type",
+			args:    []string{"certificates", "create", "--pass-type-id", "create", "--certificate-type", "IOS_DISTRIBUTION", "--csr", "./missing.csr"},
+			wantErr: "--pass-type-id can only be used with --certificate-type PASS_TYPE_ID or PASS_TYPE_ID_WITH_NFC",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			cmd := exec.Command(os.Args[0], append([]string{"-test.run=TestCertificatesCreateGenerateCSRFlagValidationHelper", "--"}, test.args...)...)
+			cmd.Env = append(os.Environ(), "ASC_CERT_CREATE_FLAG_HELPER=1")
+			stdout, err := cmd.Output()
+			stderr := ""
+			var exitErr *exec.ExitError
+			if errors.As(err, &exitErr) {
+				stderr = string(exitErr.Stderr)
+				if exitErr.ExitCode() != 2 {
+					t.Fatalf("expected exit code 2, got %d with stderr %q", exitErr.ExitCode(), stderr)
+				}
+			} else if err != nil {
+				t.Fatalf("helper command failed: %v", err)
+			} else {
+				t.Fatalf("expected exit code 2, got 0")
+			}
+			if string(stdout) != "" {
+				t.Fatalf("expected empty stdout, got %q", stdout)
+			}
+			if !strings.Contains(stderr, test.wantErr) {
+				t.Fatalf("expected error %q, got %q", test.wantErr, stderr)
+			}
+		})
+	}
+}
+
+func TestCertificatesCreateGenerateCSRFlagValidationHelper(t *testing.T) {
+	if os.Getenv("ASC_CERT_CREATE_FLAG_HELPER") != "1" {
+		return
+	}
+	for i, arg := range os.Args {
+		if arg == "--" {
+			os.Exit(rootcmd.Run(os.Args[i+1:], "1.2.3"))
+		}
+	}
+	os.Exit(2)
 }
 
 func TestDevicesListLimitValidation(t *testing.T) {
@@ -2193,18 +2182,6 @@ func TestAgeRatingValidationErrors(t *testing.T) {
 			wantHelp: false,
 		},
 		{
-			name:     "age-rating get removed",
-			args:     []string{"age-rating", "get"},
-			wantErr:  "Error: `asc age-rating get` was removed. Use `asc age-rating view` instead.",
-			wantHelp: true,
-		},
-		{
-			name:     "age-rating set removed",
-			args:     []string{"age-rating", "set", "--id", "AGE_ID"},
-			wantErr:  "Error: `asc age-rating set` was removed. Use `asc age-rating edit` instead.",
-			wantHelp: true,
-		},
-		{
 			name:     "age-rating edit conflicting targets",
 			args:     []string{"age-rating", "edit", "--app-info-id", "INFO_ID", "--version-id", "VERSION_ID"},
 			wantErr:  "only one of --app-info-id or --version-id is allowed",
@@ -2220,19 +2197,13 @@ func TestAgeRatingValidationErrors(t *testing.T) {
 			name:     "age-rating edit missing updates",
 			args:     []string{"age-rating", "edit", "--id", "AGE_ID"},
 			wantErr:  "at least one update flag is required",
-			wantHelp: false,
+			wantHelp: true,
 		},
 		{
 			name:     "age-rating edit invalid enum",
 			args:     []string{"age-rating", "edit", "--id", "AGE_ID", "--gambling-simulated", "BAD"},
 			wantErr:  "--gambling-simulated must be one of",
 			wantHelp: false,
-		},
-		{
-			name:     "age-rating get removed with conflicting targets",
-			args:     []string{"age-rating", "get", "--app-info-id", "INFO_ID", "--version-id", "VERSION_ID"},
-			wantErr:  "Error: `asc age-rating get` was removed. Use `asc age-rating view` instead.",
-			wantHelp: true,
 		},
 	}
 
@@ -2766,14 +2737,14 @@ func TestEncryptionValidationErrors(t *testing.T) {
 		},
 		{
 			name:     "encryption declarations assign-builds missing id",
-			args:     []string{"encryption", "declarations", "assign-builds", "--build", "BUILD_ID"},
+			args:     []string{"encryption", "declarations", "assign-builds", "--build-id", "BUILD_ID"},
 			wantErr:  "--id is required",
 			wantHelp: true,
 		},
 		{
 			name:     "encryption declarations assign-builds missing build",
 			args:     []string{"encryption", "declarations", "assign-builds", "--id", "DECL_ID"},
-			wantErr:  "--build is required",
+			wantErr:  "--build-id is required",
 			wantHelp: true,
 		},
 		{
@@ -2960,13 +2931,13 @@ func TestPerformanceValidationErrors(t *testing.T) {
 		{
 			name:     "performance metrics view missing build",
 			args:     []string{"performance", "metrics", "view"},
-			wantErr:  "--build is required",
+			wantErr:  "--build-id is required",
 			wantHelp: true,
 		},
 		{
 			name:     "performance diagnostics list missing build",
 			args:     []string{"performance", "diagnostics", "list"},
-			wantErr:  "--build is required",
+			wantErr:  "--build-id is required",
 			wantHelp: true,
 		},
 		{
@@ -2978,12 +2949,12 @@ func TestPerformanceValidationErrors(t *testing.T) {
 		{
 			name:     "performance download missing selection",
 			args:     []string{"performance", "download"},
-			wantErr:  "--app, --build, or --diagnostic-id is required",
+			wantErr:  "--app, --build-id, or --diagnostic-id is required",
 			wantHelp: true,
 		},
 		{
 			name:     "performance download mutually exclusive",
-			args:     []string{"performance", "download", "--app", "APP_ID", "--build", "BUILD_ID"},
+			args:     []string{"performance", "download", "--app", "APP_ID", "--build-id", "BUILD_ID"},
 			wantErr:  "mutually exclusive",
 			wantHelp: true,
 		},
@@ -3056,12 +3027,12 @@ func TestTestFlightBetaDetailsValidationErrors(t *testing.T) {
 		},
 		{
 			name:    "beta-details update missing id",
-			args:    []string{"testflight", "review", "edit"},
+			args:    []string{"testflight", "distribution", "edit"},
 			wantErr: "--id is required",
 		},
 		{
 			name:    "beta-details update missing updates",
-			args:    []string{"testflight", "review", "edit", "--id", "DETAIL_ID"},
+			args:    []string{"testflight", "distribution", "edit", "--id", "DETAIL_ID"},
 			wantErr: "at least one update flag is required",
 		},
 	}
@@ -3441,12 +3412,12 @@ func TestScreenshotsAndVideoPreviewsValidationErrors(t *testing.T) {
 		{
 			name:    "screenshots list missing localization",
 			args:    []string{"screenshots", "list"},
-			wantErr: "--version-localization is required",
+			wantErr: "choose a localization selector",
 		},
 		{
-			name:    "screenshots upload missing localization",
+			name:    "screenshots upload missing mode",
 			args:    []string{"screenshots", "upload", "--path", "./screenshots", "--device-type", "IPHONE_65"},
-			wantErr: "--version-localization is required",
+			wantErr: "choose an upload mode: --version-localization VERSION_LOCALIZATION_ID; (--app APP_ID or ASC_APP_ID) with --version VERSION or --version-id VERSION_ID; or --resume ARTIFACT_PATH",
 		},
 		{
 			name:    "screenshots validate missing path",
@@ -3549,11 +3520,11 @@ func TestBuildLocalizationsValidationErrors(t *testing.T) {
 		{
 			name:    "build-localizations list missing build",
 			args:    []string{"build-localizations", "list"},
-			wantErr: "--build is required",
+			wantErr: "--build-id is required",
 		},
 		{
 			name:    "build-localizations create missing locale",
-			args:    []string{"build-localizations", "create", "--build", "BUILD_ID"},
+			args:    []string{"build-localizations", "create", "--build-id", "BUILD_ID"},
 			wantErr: "--locale is required",
 		},
 		{
@@ -3727,9 +3698,10 @@ func TestPublishValidationErrors(t *testing.T) {
 	t.Setenv("ASC_APP_ID", "")
 
 	tests := []struct {
-		name    string
-		args    []string
-		wantErr string
+		name     string
+		args     []string
+		wantErr  string
+		wantExit int
 	}{
 		{
 			name:    "publish testflight missing app",
@@ -3739,12 +3711,33 @@ func TestPublishValidationErrors(t *testing.T) {
 		{
 			name:    "publish testflight missing ipa",
 			args:    []string{"publish", "testflight", "--app", "APP_123", "--group", "GROUP_ID"},
-			wantErr: "--ipa is required unless --build or --build-number is provided",
+			wantErr: "--ipa or --pkg is required unless --build-id or --build-number is provided",
 		},
 		{
 			name:    "publish testflight missing group",
 			args:    []string{"publish", "testflight", "--app", "APP_123", "--ipa", "app.ipa"},
 			wantErr: "Error: --group is required",
+		},
+		{
+			name:    "publish testflight upload only rejects group before notify",
+			args:    []string{"publish", "testflight", "--app", "APP_123", "--ipa", "app.ipa", "--upload-only", "--notify", "--group", "GROUP_ID"},
+			wantErr: "--group cannot be used with --upload-only",
+		},
+		{
+			name:    "publish testflight upload only rejects review submission",
+			args:    []string{"publish", "testflight", "--app", "APP_123", "--ipa", "app.ipa", "--upload-only", "--submit", "--confirm"},
+			wantErr: "--submit cannot be used with --upload-only",
+		},
+		{
+			name:    "publish testflight upload only requires upload source",
+			args:    []string{"publish", "testflight", "--app", "APP_123", "--build-number", "42", "--upload-only"},
+			wantErr: "--upload-only requires --ipa, --pkg, --workspace, or --project",
+		},
+		{
+			name:     "publish testflight upload only invalid value",
+			args:     []string{"publish", "testflight", "--app", "APP_123", "--ipa", "app.ipa", "--upload-only=maybe"},
+			wantErr:  `invalid boolean value "maybe" for -upload-only`,
+			wantExit: rootcmd.ExitUsage,
 		},
 		{
 			name:    "publish testflight test-notes missing locale",
@@ -3757,6 +3750,28 @@ func TestPublishValidationErrors(t *testing.T) {
 			wantErr: "Error: --test-notes is required with --locale",
 		},
 		{
+			name:    "publish testflight submit missing confirm",
+			args:    []string{"publish", "testflight", "--app", "APP_123", "--build-id", "BUILD_123", "--group", "GROUP_ID", "--submit"},
+			wantErr: "Error: --confirm is required with --submit",
+		},
+		{
+			name:     "publish testflight submit invalid value",
+			args:     []string{"publish", "testflight", "--app", "APP_123", "--build-id", "BUILD_123", "--group", "GROUP_ID", "--submit=maybe"},
+			wantErr:  `invalid boolean value "maybe" for -submit`,
+			wantExit: rootcmd.ExitUsage,
+		},
+		{
+			name:    "publish testflight confirm requires submit",
+			args:    []string{"publish", "testflight", "--app", "APP_123", "--build-id", "BUILD_123", "--group", "GROUP_ID", "--confirm"},
+			wantErr: "Error: --confirm requires --submit",
+		},
+		{
+			name:     "publish testflight confirm invalid value",
+			args:     []string{"publish", "testflight", "--app", "APP_123", "--build-id", "BUILD_123", "--group", "GROUP_ID", "--confirm=maybe"},
+			wantErr:  `invalid boolean value "maybe" for -confirm`,
+			wantExit: rootcmd.ExitUsage,
+		},
+		{
 			name:    "publish appstore missing app",
 			args:    []string{"publish", "appstore", "--ipa", "app.ipa", "--version", "1.0.0"},
 			wantErr: "Error: --app is required",
@@ -3764,7 +3779,7 @@ func TestPublishValidationErrors(t *testing.T) {
 		{
 			name:    "publish appstore missing ipa",
 			args:    []string{"publish", "appstore", "--app", "APP_123", "--version", "1.0.0"},
-			wantErr: "Error: --ipa is required",
+			wantErr: "Error: --ipa or --pkg is required",
 		},
 		{
 			name:    "publish appstore submit missing confirm",
@@ -3783,17 +3798,17 @@ func TestPublishValidationErrors(t *testing.T) {
 		},
 		{
 			name:    "publish testflight ipa and build mutually exclusive",
-			args:    []string{"publish", "testflight", "--app", "APP_123", "--ipa", "app.ipa", "--build", "BUILD_123", "--group", "GROUP_ID"},
-			wantErr: "--ipa and --build are mutually exclusive",
+			args:    []string{"publish", "testflight", "--app", "APP_123", "--ipa", "app.ipa", "--build-id", "BUILD_123", "--group", "GROUP_ID"},
+			wantErr: "--ipa and --build-id are mutually exclusive",
 		},
 		{
 			name:    "publish testflight build and build-number mutually exclusive without ipa",
-			args:    []string{"publish", "testflight", "--app", "APP_123", "--build", "BUILD_123", "--build-number", "42", "--group", "GROUP_ID"},
-			wantErr: "--build and --build-number are mutually exclusive when --ipa is not provided",
+			args:    []string{"publish", "testflight", "--app", "APP_123", "--build-id", "BUILD_123", "--build-number", "42", "--group", "GROUP_ID"},
+			wantErr: "--build-id and --build-number are mutually exclusive when --ipa is not provided",
 		},
 		{
 			name:    "publish testflight version without ipa",
-			args:    []string{"publish", "testflight", "--app", "APP_123", "--build", "BUILD_123", "--version", "1.2.3", "--group", "GROUP_ID"},
+			args:    []string{"publish", "testflight", "--app", "APP_123", "--build-id", "BUILD_123", "--version", "1.2.3", "--group", "GROUP_ID"},
 			wantErr: "--version is only supported when --ipa is provided",
 		},
 		{
@@ -3818,8 +3833,8 @@ func TestPublishValidationErrors(t *testing.T) {
 		},
 		{
 			name:    "publish testflight local build rejects build",
-			args:    []string{"publish", "testflight", "--app", "APP_123", "--workspace", "App.xcworkspace", "--scheme", "App", "--version", "1.2.3", "--build", "BUILD_123", "--group", "GROUP_ID"},
-			wantErr: "--build cannot be combined with --workspace or --project",
+			args:    []string{"publish", "testflight", "--app", "APP_123", "--workspace", "App.xcworkspace", "--scheme", "App", "--version", "1.2.3", "--build-id", "BUILD_123", "--group", "GROUP_ID"},
+			wantErr: "--build-id cannot be combined with --workspace or --project",
 		},
 		{
 			name:    "publish testflight local build only flag without selector",
@@ -3865,6 +3880,11 @@ func TestPublishValidationErrors(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
+			if test.wantExit != 0 {
+				assertUsageExit(t, test.args, test.wantErr)
+				return
+			}
+
 			root := RootCommand("1.2.3")
 			root.FlagSet.SetOutput(io.Discard)
 
@@ -3996,7 +4016,7 @@ func TestSubmitValidationErrors(t *testing.T) {
 		{
 			name:    "create removed",
 			args:    []string{"submit", "create", "--confirm"},
-			wantErr: "Error: `asc submit create` was removed. Use `asc publish appstore --submit` or `asc versions attach-build` + `asc review submissions-*` instead.",
+			wantErr: "Error: `asc submit create` was removed. Use `asc review submit` for already-uploaded builds, or `asc publish appstore --submit` for the full shipping path.",
 		},
 		{
 			name:    "preflight removed",
@@ -4050,13 +4070,13 @@ func TestVersionsValidationErrors(t *testing.T) {
 		},
 		{
 			name:    "attach missing version id",
-			args:    []string{"versions", "attach-build", "--build", "BUILD_123"},
-			wantErr: "Error: --version-id is required",
+			args:    []string{"versions", "attach-build", "--build-id", "BUILD_123"},
+			wantErr: "Error: --version-id or --version is required",
 		},
 		{
 			name:    "attach missing build",
 			args:    []string{"versions", "attach-build", "--version-id", "VERSION_123"},
-			wantErr: "Error: --build is required",
+			wantErr: "Error: --build-id, --build-number, or --latest is required",
 		},
 		{
 			name:    "release missing version id",
@@ -4244,7 +4264,7 @@ func TestAppsUpdateValidationErrors(t *testing.T) {
 		{
 			name:    "apps update missing fields",
 			args:    []string{"apps", "update", "--id", "APP_ID"},
-			wantErr: "Error: --bundle-id, --primary-locale, or --content-rights is required",
+			wantErr: "Error: at least one update field is required (--bundle-id, --primary-locale, --content-rights, --subscription-status-url, --sandbox-subscription-status-url)",
 		},
 		{
 			name:    "apps update invalid content rights",
@@ -4591,6 +4611,31 @@ func TestAppClipsValidationErrors(t *testing.T) {
 			wantErr: "Error: --is-powered-by is required",
 		},
 		{
+			name:    "advanced experiences create missing header image",
+			args:    []string{"app-clips", "advanced-experiences", "create", "--app-clip-id", "CLIP_ID", "--link", "https://example.com", "--default-language", "EN", "--is-powered-by", "--localization-id", "LOC_ID"},
+			wantErr: "Error: --header-image-id is required",
+		},
+		{
+			name:    "advanced experiences create missing localizations",
+			args:    []string{"app-clips", "advanced-experiences", "create", "--app-clip-id", "CLIP_ID", "--link", "https://example.com", "--default-language", "EN", "--is-powered-by", "--header-image-id", "IMAGE_ID", "--localization-id", " , "},
+			wantErr: "Error: provide --localization-id, --inline-localization, or both --language and --title",
+		},
+		{
+			name:    "advanced experiences create missing inline language",
+			args:    []string{"app-clips", "advanced-experiences", "create", "--app-clip-id", "CLIP_ID", "--link", "https://example.com", "--default-language", "EN", "--is-powered-by", "--header-image-id", "IMAGE_ID", "--title", "Order ahead"},
+			wantErr: "Error: --language is required when --title is set",
+		},
+		{
+			name:    "advanced experiences create missing inline title",
+			args:    []string{"app-clips", "advanced-experiences", "create", "--app-clip-id", "CLIP_ID", "--link", "https://example.com", "--default-language", "EN", "--is-powered-by", "--header-image-id", "IMAGE_ID", "--language", "EN"},
+			wantErr: "Error: --title is required when --language is set",
+		},
+		{
+			name:    "advanced experiences remove missing confirm",
+			args:    []string{"app-clips", "advanced-experiences", "delete", "--experience-id", "EXP_ID"},
+			wantErr: "Error: --confirm is required to remove",
+		},
+		{
 			name:    "advanced experience images create missing file",
 			args:    []string{"app-clips", "advanced-experiences", "images", "create", "--experience-id", "EXP_ID"},
 			wantErr: "Error: --file is required",
@@ -4604,6 +4649,21 @@ func TestAppClipsValidationErrors(t *testing.T) {
 			name:    "invocations list missing build bundle",
 			args:    []string{"app-clips", "invocations", "list"},
 			wantErr: "Error: --build-bundle-id is required",
+		},
+		{
+			name:    "invocations create missing localization source",
+			args:    []string{"app-clips", "invocations", "create", "--build-bundle-id", "BUNDLE_ID", "--url", "https://example.com/clip"},
+			wantErr: "Error: provide --localization-id or both --locale and --title",
+		},
+		{
+			name:    "invocations create missing locale for inline localization",
+			args:    []string{"app-clips", "invocations", "create", "--build-bundle-id", "BUNDLE_ID", "--url", "https://example.com/clip", "--title", "Try it"},
+			wantErr: "Error: --locale is required when --title is set",
+		},
+		{
+			name:    "invocations create missing title for inline localization",
+			args:    []string{"app-clips", "invocations", "create", "--build-bundle-id", "BUNDLE_ID", "--url", "https://example.com/clip", "--locale", "en-US"},
+			wantErr: "Error: --title is required when --locale is set",
 		},
 		{
 			name:    "domain status cache missing build bundle",
@@ -5223,12 +5283,107 @@ func TestAuthLoginSkipValidationBypassesJWT(t *testing.T) {
 	}
 }
 
+func TestAuthLoginIndividualKeyAllowsMissingIssuer(t *testing.T) {
+	tempDir := t.TempDir()
+	keyPath := filepath.Join(tempDir, "AuthKey.p8")
+	writeECDSAPEM(t, keyPath)
+	// With ASC_CONFIG_PATH set, a --local login warns that reads use the other
+	// file; clear it so stderr shows only credential-shape diagnostics.
+	t.Setenv("ASC_CONFIG_PATH", "")
+
+	workDir := t.TempDir()
+	previousDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("Getwd() error: %v", err)
+	}
+	if err := os.Chdir(workDir); err != nil {
+		t.Fatalf("Chdir() error: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = os.Chdir(previousDir)
+	})
+
+	root := RootCommand("1.2.3")
+	root.FlagSet.SetOutput(io.Discard)
+
+	_, stderr := captureOutput(t, func() {
+		if err := root.Parse([]string{
+			"auth", "login",
+			"--bypass-keychain",
+			"--local",
+			"--skip-validation",
+			"--key-type", "individual",
+			"--name", "IndividualKey",
+			"--key-id", "KEY123",
+			"--private-key", keyPath,
+		}); err != nil {
+			t.Fatalf("parse error: %v", err)
+		}
+		if err := root.Run(context.Background()); err != nil {
+			t.Fatalf("run error: %v", err)
+		}
+	})
+	if stderr != "" {
+		t.Fatalf("expected empty stderr, got %q", stderr)
+	}
+
+	configPath := filepath.Join(workDir, ".asc", "config.json")
+	cfg, err := config.LoadAt(configPath)
+	if err != nil {
+		t.Fatalf("LoadAt() error: %v", err)
+	}
+	if len(cfg.Keys) != 1 {
+		t.Fatalf("expected one stored key, got %d", len(cfg.Keys))
+	}
+	if cfg.Keys[0].IssuerID != "" {
+		t.Fatalf("issuer ID = %q, want empty", cfg.Keys[0].IssuerID)
+	}
+	if cfg.Keys[0].KeyType != config.CredentialKeyTypeIndividual {
+		t.Fatalf("key type = %q, want %q", cfg.Keys[0].KeyType, config.CredentialKeyTypeIndividual)
+	}
+	if cfg.KeyType != config.CredentialKeyTypeIndividual {
+		t.Fatalf("default key type = %q, want %q", cfg.KeyType, config.CredentialKeyTypeIndividual)
+	}
+
+	t.Setenv("ASC_BYPASS_KEYCHAIN", "1")
+	t.Setenv("ASC_CONFIG_PATH", configPath)
+	t.Setenv("ASC_KEY_ID", "")
+	t.Setenv("ASC_ISSUER_ID", "")
+	t.Setenv("ASC_PRIVATE_KEY_PATH", "")
+	t.Setenv("ASC_PRIVATE_KEY", "")
+	t.Setenv("ASC_PRIVATE_KEY_B64", "")
+
+	var statusCode int
+	statusStdout, statusStderr := captureOutput(t, func() {
+		statusCode = rootcmd.Run([]string{"auth", "status", "--output", "json"}, "1.2.3")
+	})
+	if statusCode != rootcmd.ExitSuccess {
+		t.Fatalf("auth status exit code = %d, want %d; stderr=%q", statusCode, rootcmd.ExitSuccess, statusStderr)
+	}
+	if statusStderr != "" {
+		t.Fatalf("expected auth status stderr to be empty, got %q", statusStderr)
+	}
+	var statusPayload struct {
+		Credentials []struct {
+			Name  string `json:"name"`
+			KeyID string `json:"keyId"`
+		} `json:"credentials"`
+	}
+	if err := json.Unmarshal([]byte(statusStdout), &statusPayload); err != nil {
+		t.Fatalf("failed to unmarshal auth status output: %v; stdout=%q", err, statusStdout)
+	}
+	if len(statusPayload.Credentials) != 1 || statusPayload.Credentials[0].Name != "IndividualKey" {
+		t.Fatalf("unexpected auth status credentials: %+v", statusPayload.Credentials)
+	}
+}
+
 func TestAuthLoginUsesEnvBypass(t *testing.T) {
 	tempDir := t.TempDir()
 	keyPath := filepath.Join(tempDir, "AuthKey.p8")
 	writeECDSAPEM(t, keyPath)
 
-	t.Setenv("ASC_CONFIG_PATH", filepath.Join(t.TempDir(), "config.json"))
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	t.Setenv("ASC_CONFIG_PATH", configPath)
 	t.Setenv("ASC_BYPASS_KEYCHAIN", "1")
 
 	root := RootCommand("1.2.3")
@@ -5250,12 +5405,12 @@ func TestAuthLoginUsesEnvBypass(t *testing.T) {
 		}
 	})
 
-	globalPath, err := config.GlobalPath()
+	cfg, err := config.LoadAt(configPath)
 	if err != nil {
-		t.Fatalf("GlobalPath() error: %v", err)
+		t.Fatalf("expected config to be written to ASC_CONFIG_PATH, got %v", err)
 	}
-	if _, err := os.Stat(globalPath); err != nil {
-		t.Fatalf("expected config to be written, got %v", err)
+	if len(cfg.Keys) != 1 || cfg.Keys[0].Name != "EnvKey" {
+		t.Fatalf("expected EnvKey in ASC_CONFIG_PATH config, got %+v", cfg.Keys)
 	}
 }
 
@@ -5648,11 +5803,6 @@ func TestAppEventsCreateValidationErrors(t *testing.T) {
 			name:    "missing name",
 			args:    []string{"app-events", "create", "--app", "APP_ID", "--event-type", "CHALLENGE", "--start", "2026-01-01T00:00:00Z", "--end", "2026-01-02T00:00:00Z"},
 			wantErr: "Error: --name is required",
-		},
-		{
-			name:    "missing event type",
-			args:    []string{"app-events", "create", "--app", "APP_ID", "--name", "Launch", "--start", "2026-01-01T00:00:00Z", "--end", "2026-01-02T00:00:00Z"},
-			wantErr: "Error: --event-type is required",
 		},
 		{
 			name:    "missing end time",

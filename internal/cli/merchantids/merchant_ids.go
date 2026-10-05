@@ -25,7 +25,7 @@ func MerchantIDsCommand() *ffcli.Command {
 
 Examples:
   asc merchant-ids list
-  asc merchant-ids get --merchant-id "MERCHANT_ID"
+  asc merchant-ids view --merchant-id "MERCHANT_ID"
   asc merchant-ids create --identifier "merchant.com.example" --name "Example"
   asc merchant-ids update --merchant-id "MERCHANT_ID" --name "New Name"
   asc merchant-ids delete --merchant-id "MERCHANT_ID" --confirm
@@ -76,17 +76,25 @@ Examples:
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
+			if err := shared.ValidateNextURL(*next); err != nil {
+				return shared.UsageErrorf("merchant-ids list: %v", err)
+			}
+			if err := shared.RejectNextFlagConflicts(
+				fs,
+				*next,
+				"merchant-ids list",
+				"identifier", "name", "sort", "fields", "certificate-fields", "include", "certificates-limit", "limit",
+			); err != nil {
+				return err
+			}
 			if *limit != 0 && (*limit < 1 || *limit > 200) {
-				return fmt.Errorf("merchant-ids list: --limit must be between 1 and 200")
+				return shared.UsageError("merchant-ids list: --limit must be between 1 and 200")
 			}
 			if *certificatesLimit != 0 && (*certificatesLimit < 1 || *certificatesLimit > 50) {
-				return fmt.Errorf("merchant-ids list: --certificates-limit must be between 1 and 50")
-			}
-			if err := shared.ValidateNextURL(*next); err != nil {
-				return fmt.Errorf("merchant-ids list: %w", err)
+				return shared.UsageError("merchant-ids list: --certificates-limit must be between 1 and 50")
 			}
 			if err := shared.ValidateSort(*sort, merchantIDSortValues...); err != nil {
-				return fmt.Errorf("merchant-ids list: %w", err)
+				return shared.UsageErrorf("merchant-ids list: %v", err)
 			}
 
 			fieldsValue, err := normalizeMerchantIDFields(*fields, "--fields")
@@ -163,9 +171,9 @@ Examples:
 
 // MerchantIDsGetCommand returns the merchant IDs get subcommand.
 func MerchantIDsGetCommand() *ffcli.Command {
-	fs := flag.NewFlagSet("get", flag.ExitOnError)
+	fs := flag.NewFlagSet("view", flag.ExitOnError)
 
-	merchantID := fs.String("merchant-id", "", "Merchant ID")
+	merchantID := shared.BindResourceIDFlag(fs, "merchant-id", "merchantIds", "Merchant ID")
 	fields := fs.String("fields", "", "Fields to include: "+strings.Join(merchantIDFieldsList(), ", "))
 	certificateFields := fs.String("certificate-fields", "", "Certificate fields to include: "+strings.Join(certificateFieldsList(), ", "))
 	include := fs.String("include", "", "Include related resources: "+strings.Join(merchantIDIncludeList(), ", "))
@@ -173,36 +181,36 @@ func MerchantIDsGetCommand() *ffcli.Command {
 	output := shared.BindOutputFlags(fs)
 
 	return &ffcli.Command{
-		Name:       "get",
-		ShortUsage: "asc merchant-ids get --merchant-id \"MERCHANT_ID\"",
-		ShortHelp:  "Get a merchant ID by ID.",
-		LongHelp: `Get a merchant ID by ID.
+		Name:       "view",
+		ShortUsage: "asc merchant-ids view --merchant-id \"MERCHANT_ID\"",
+		ShortHelp:  "View a merchant ID by ID.",
+		LongHelp: `View a merchant ID by ID.
 
 Examples:
-  asc merchant-ids get --merchant-id "MERCHANT_ID"`,
+  asc merchant-ids view --merchant-id "MERCHANT_ID"`,
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
 			merchantIDValue := strings.TrimSpace(*merchantID)
 			if merchantIDValue == "" {
 				fmt.Fprintln(os.Stderr, "Error: --merchant-id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--merchant-id")
 			}
 			if *certificatesLimit != 0 && (*certificatesLimit < 1 || *certificatesLimit > 50) {
-				return fmt.Errorf("merchant-ids get: --certificates-limit must be between 1 and 50")
+				return shared.UsageError("merchant-ids view: --certificates-limit must be between 1 and 50")
 			}
 
 			fieldsValue, err := normalizeMerchantIDFields(*fields, "--fields")
 			if err != nil {
-				return fmt.Errorf("merchant-ids get: %w", err)
+				return fmt.Errorf("merchant-ids view: %w", err)
 			}
 			certificateFieldsValue, err := normalizeCertificateFields(*certificateFields, "--certificate-fields")
 			if err != nil {
-				return fmt.Errorf("merchant-ids get: %w", err)
+				return fmt.Errorf("merchant-ids view: %w", err)
 			}
 			includeValue, err := normalizeMerchantIDInclude(*include, "--include")
 			if err != nil {
-				return fmt.Errorf("merchant-ids get: %w", err)
+				return fmt.Errorf("merchant-ids view: %w", err)
 			}
 			if len(certificateFieldsValue) > 0 && !shared.HasInclude(includeValue, "certificates") {
 				fmt.Fprintln(os.Stderr, "Error: --certificate-fields requires --include certificates")
@@ -215,7 +223,7 @@ Examples:
 
 			client, err := shared.GetASCClient()
 			if err != nil {
-				return fmt.Errorf("merchant-ids get: %w", err)
+				return fmt.Errorf("merchant-ids view: %w", err)
 			}
 
 			requestCtx, cancel := shared.ContextWithTimeout(ctx)
@@ -230,7 +238,7 @@ Examples:
 				asc.WithMerchantIDsCertificatesLimit(*certificatesLimit),
 			)
 			if err != nil {
-				return fmt.Errorf("merchant-ids get: failed to fetch: %w", err)
+				return fmt.Errorf("merchant-ids view: failed to fetch: %w", err)
 			}
 
 			return shared.PrintOutput(resp, *output.Output, *output.Pretty)
@@ -260,12 +268,12 @@ Examples:
 			identifierValue := strings.TrimSpace(*identifier)
 			if identifierValue == "" {
 				fmt.Fprintln(os.Stderr, "Error: --identifier is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--identifier")
 			}
 			nameValue := strings.TrimSpace(*name)
 			if nameValue == "" {
 				fmt.Fprintln(os.Stderr, "Error: --name is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--name")
 			}
 
 			client, err := shared.GetASCClient()
@@ -294,7 +302,7 @@ Examples:
 func MerchantIDsUpdateCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("update", flag.ExitOnError)
 
-	merchantID := fs.String("merchant-id", "", "Merchant ID")
+	merchantID := shared.BindResourceIDFlag(fs, "merchant-id", "merchantIds", "Merchant ID")
 	name := fs.String("name", "", "Merchant ID name")
 	clearName := fs.Bool("clear-name", false, "Clear the merchant ID name")
 	output := shared.BindOutputFlags(fs)
@@ -313,12 +321,12 @@ Examples:
 			merchantIDValue := strings.TrimSpace(*merchantID)
 			if merchantIDValue == "" {
 				fmt.Fprintln(os.Stderr, "Error: --merchant-id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--merchant-id")
 			}
 			nameValue := strings.TrimSpace(*name)
 			if nameValue == "" && !*clearName {
 				fmt.Fprintln(os.Stderr, "Error: --name is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--name")
 			}
 			if nameValue != "" && *clearName {
 				fmt.Fprintln(os.Stderr, "Error: --name cannot be used with --clear-name")
@@ -352,7 +360,7 @@ Examples:
 func MerchantIDsDeleteCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("delete", flag.ExitOnError)
 
-	merchantID := fs.String("merchant-id", "", "Merchant ID")
+	merchantID := shared.BindResourceIDFlag(fs, "merchant-id", "merchantIds", "Merchant ID")
 	confirm := fs.Bool("confirm", false, "Confirm deletion")
 	output := shared.BindOutputFlags(fs)
 
@@ -370,11 +378,11 @@ Examples:
 			merchantIDValue := strings.TrimSpace(*merchantID)
 			if merchantIDValue == "" {
 				fmt.Fprintln(os.Stderr, "Error: --merchant-id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--merchant-id")
 			}
 			if !*confirm {
 				fmt.Fprintln(os.Stderr, "Error: --confirm is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--confirm")
 			}
 
 			client, err := shared.GetASCClient()

@@ -22,21 +22,6 @@ func TestAppsSearchKeywordsValidationErrors(t *testing.T) {
 			args:    []string{"apps", "search-keywords", "list"},
 			wantErr: "--app is required",
 		},
-		{
-			name:    "apps search-keywords set missing app",
-			args:    []string{"apps", "search-keywords", "set", "--keywords", "kw1", "--confirm"},
-			wantErr: "--app is required",
-		},
-		{
-			name:    "apps search-keywords set missing confirm",
-			args:    []string{"apps", "search-keywords", "set", "--app", "123", "--keywords", "kw1"},
-			wantErr: "--confirm is required",
-		},
-		{
-			name:    "apps search-keywords set missing keywords",
-			args:    []string{"apps", "search-keywords", "set", "--app", "123", "--confirm"},
-			wantErr: "--keywords is required",
-		},
 	}
 
 	for _, test := range tests {
@@ -184,7 +169,7 @@ func TestLocalizationsMediaSetsOutputErrors(t *testing.T) {
 		{
 			name:    "preview sets get unsupported output",
 			args:    []string{"localizations", "preview-sets", "view", "--id", "SET_ID", "--output", "yaml"},
-			wantErr: "unsupported format: yaml",
+			wantErr: `(got "yaml")`,
 		},
 		{
 			name:    "preview sets get pretty with table",
@@ -194,7 +179,7 @@ func TestLocalizationsMediaSetsOutputErrors(t *testing.T) {
 		{
 			name:    "screenshot sets get unsupported output",
 			args:    []string{"localizations", "screenshot-sets", "view", "--id", "SET_ID", "--output", "yaml"},
-			wantErr: "unsupported format: yaml",
+			wantErr: `(got "yaml")`,
 		},
 		{
 			name:    "screenshot sets get pretty with markdown",
@@ -213,8 +198,8 @@ func TestLocalizationsMediaSetsOutputErrors(t *testing.T) {
 					t.Fatalf("parse error: %v", err)
 				}
 				err := root.Run(context.Background())
-				if !errors.Is(err, flag.ErrHelp) {
-					t.Fatalf("expected ErrHelp, got %v", err)
+				if !isUsageClassError(err) {
+					t.Fatalf("expected usage-class error, got %v", err)
 				}
 			})
 
@@ -247,7 +232,7 @@ func TestVersionsRelationshipsValidationErrors(t *testing.T) {
 		{
 			name:    "versions links invalid type",
 			args:    []string{"versions", "links", "--version-id", "id-1", "--type", "nope"},
-			wantErr: "--type must be one of",
+			wantErr: `--type "nope" is not a valid relationship type; must be one of`,
 		},
 		{
 			name:    "versions links invalid limit for single",

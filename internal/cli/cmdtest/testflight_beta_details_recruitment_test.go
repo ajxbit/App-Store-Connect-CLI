@@ -2,13 +2,20 @@ package cmdtest
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"io"
 	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/asc"
+	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/cli/shared"
 )
 
 func TestTestFlightDistributionViewOutputWithLimit(t *testing.T) {
@@ -110,32 +117,56 @@ func TestTestFlightDistributionEditOutput(t *testing.T) {
 	setupAuth(t)
 	t.Setenv("ASC_CONFIG_PATH", filepath.Join(t.TempDir(), "nonexistent.json"))
 
-	originalTransport := http.DefaultTransport
-	t.Cleanup(func() {
-		http.DefaultTransport = originalTransport
-	})
-
-	http.DefaultTransport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		if req.Method != http.MethodPatch {
 			t.Fatalf("expected PATCH, got %s", req.Method)
 		}
 		if req.URL.Path != "/v1/buildBetaDetails/detail-1" {
 			t.Fatalf("expected path /v1/buildBetaDetails/detail-1, got %s", req.URL.Path)
 		}
-		payload, err := io.ReadAll(req.Body)
-		if err != nil {
-			t.Fatalf("read body error: %v", err)
+		var payload struct {
+			Data struct {
+				Type       string         `json:"type"`
+				ID         string         `json:"id"`
+				Attributes map[string]any `json:"attributes"`
+			} `json:"data"`
 		}
-		if !strings.Contains(string(payload), `"autoNotifyEnabled":true`) {
-			t.Fatalf("expected autoNotifyEnabled in body, got %s", string(payload))
+		if err := json.NewDecoder(req.Body).Decode(&payload); err != nil {
+			t.Fatalf("decode body error: %v", err)
 		}
-		body := `{"data":{"type":"buildBetaDetails","id":"detail-1","attributes":{"autoNotifyEnabled":true}}}`
-		return &http.Response{
-			StatusCode: http.StatusOK,
-			Body:       io.NopCloser(strings.NewReader(body)),
-			Header:     http.Header{"Content-Type": []string{"application/json"}},
-		}, nil
+		if payload.Data.Type != "buildBetaDetails" || payload.Data.ID != "detail-1" {
+			t.Fatalf("unexpected resource linkage: %#v", payload.Data)
+		}
+		if len(payload.Data.Attributes) != 1 || payload.Data.Attributes["autoNotifyEnabled"] != true {
+			t.Fatalf("expected only autoNotifyEnabled=true, got %#v", payload.Data.Attributes)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"data":{"type":"buildBetaDetails","id":"detail-1","attributes":{"autoNotifyEnabled":true}}}`)
+	}))
+	t.Cleanup(server.Close)
+
+	serverURL, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatalf("parse server URL: %v", err)
+	}
+	transport := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		cloned := req.Clone(req.Context())
+		cloned.URL.Scheme = serverURL.Scheme
+		cloned.URL.Host = serverURL.Host
+		return server.Client().Transport.RoundTrip(cloned)
 	})
+	client, err := asc.NewClientWithHTTPClient(
+		"TEST_KEY",
+		"TEST_ISSUER",
+		os.Getenv("ASC_PRIVATE_KEY_PATH"),
+		&http.Client{Transport: transport},
+	)
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+	t.Cleanup(shared.SetASCClientFactoryForTesting(func() (*asc.Client, error) {
+		return client, nil
+	}))
 
 	root := RootCommand("1.2.3")
 	root.FlagSet.SetOutput(io.Discard)
@@ -154,6 +185,42 @@ func TestTestFlightDistributionEditOutput(t *testing.T) {
 	}
 	if !strings.Contains(stdout, `"id":"detail-1"`) {
 		t.Fatalf("expected detail id in output, got %q", stdout)
+	}
+}
+
+func TestTestFlightDistributionEditRejectsRemovedExternalTestingFlag(t *testing.T) {
+	clientFactoryCalled := false
+	t.Cleanup(shared.SetASCClientFactoryForTesting(func() (*asc.Client, error) {
+		clientFactoryCalled = true
+		return nil, errors.New("client factory must not be called")
+	}))
+
+	tests := []struct {
+		name string
+		args []string
+	}{
+		{
+			name: "enable",
+			args: []string{"testflight", "distribution", "edit", "--id", "detail-1", "--external-testing=true"},
+		},
+		{
+			name: "disable",
+			args: []string{"testflight", "distribution", "edit", "--id", "detail-1", "--external-testing=false"},
+		},
+		{
+			name: "mixed with supported update",
+			args: []string{"testflight", "distribution", "edit", "--id", "detail-1", "--auto-notify", "--external-testing", "true"},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			clientFactoryCalled = false
+			assertRemovedFlagGuidance(t, test.args, "--external-testing")
+			if clientFactoryCalled {
+				t.Fatal("expected removed flag to fail before client creation or HTTP")
+			}
+		})
 	}
 }
 

@@ -66,7 +66,7 @@ asc bundle-ids create --identifier "com.example.app" \
 Bundle IDs must follow these rules:
 
 * Use reverse DNS notation: `com.company.app`
-* Contain only alphanumeric characters (A-Z, a-z, 0-9), hyphens (-), and periods (.)
+* Contain only alphanumeric characters (A-Z, a-z, 0-9), hyphens (-), periods (.), and an optional terminal asterisk (*) for wildcard identifiers
 * Cannot start or end with a period
 * Cannot contain consecutive periods
 
@@ -97,6 +97,8 @@ asc bundle-ids create --identifier "com.example.*" \
 * Can only use `*` as the last component
 * Cannot use certain capabilities (Push Notifications, In-App Purchase, etc.)
 * Useful for app extensions and development
+
+Apple may normalize a wildcard created with `--platform IOS` to `UNIVERSAL` in the response; use the returned platform as authoritative.
 
 ## Update Bundle ID
 
@@ -145,6 +147,18 @@ asc bundle-ids profiles list --id "BUNDLE_ID"
 
 Manage app capabilities for a bundle ID.
 
+### Reconcile from entitlements
+
+Plan or apply the public-API capabilities implied by an entitlements file. Sub-feature settings already enabled, such as broadcast push, are kept. Unknown keys are a usage error unless `--ignore-unknown` is set.
+
+If an API write fails during `apply`, the command prints a partial receipt with `applied` and `failed` action statuses before exiting with an error. Inspect that receipt before retrying.
+If the plan requires a web-session capability, `apply` makes no API writes and exits with a receipt showing the manual command to run.
+
+```bash theme={null}
+asc bundle-ids capabilities reconcile plan --bundle "BUNDLE_ID" --entitlements ./App/App.entitlements
+asc bundle-ids capabilities reconcile apply --bundle "BUNDLE_ID" --entitlements ./App/App.entitlements --confirm
+```
+
 ### List Capabilities
 
 List all capabilities for a bundle ID:
@@ -168,7 +182,19 @@ asc bundle-ids capabilities add --bundle "BUNDLE_ID" \
 # Capability with settings (iCloud)
 asc bundle-ids capabilities add --bundle "BUNDLE_ID" \
   --capability ICLOUD \
-  --settings '[{"key":"ICLOUD_VERSION","options":[{"key":"XCODE_13","enabled":true}]}]'
+  --settings '[{"key":"ICLOUD_VERSION","options":[{"key":"XCODE_6","enabled":true}]}]'
+```
+
+`--if-exists fail|skip|update` (default `fail`) controls a 409 that reports the
+capability as already enabled: `skip` prints the existing capability unchanged
+and exits 0, and `update` applies `--settings` to it (without `--settings` it
+behaves like `skip`). Apple usually accepts a repeated add of an API-creatable
+capability as success, so the flag only engages when Apple reports the
+duplicate as a 409. Other 409s keep failing, including
+`ENTITY_ERROR.ATTRIBUTE.TYPE` for a capability type the API cannot create.
+
+```bash  theme={null}
+asc bundle-ids capabilities add --bundle "BUNDLE_ID" --capability ICLOUD --if-exists skip
 ```
 
 ### Common Capability Types
@@ -182,19 +208,24 @@ asc bundle-ids capabilities add --bundle "BUNDLE_ID" \
 * `SIRIKIT` - SiriKit
 * `PERSONAL_VPN` - Personal VPN
 * `NETWORK_EXTENSIONS` - Network Extensions
-* `HOTSPOT` - Hotspot Configuration
+* `HOT_SPOT` - Hotspot Configuration
 * `MULTIPATH` - Multipath networking
 * `NFC_TAG_READING` - NFC tag reading
 
-**Settings required:**
+**Capabilities with settings documented in Apple's current schema:**
 
 * `ICLOUD` - iCloud (CloudKit/Documents)
-* `APP_GROUPS` - App Groups
-* `ASSOCIATED_DOMAINS` - Associated Domains
 * `DATA_PROTECTION` - Data Protection
-* `HEALTHKIT` - HealthKit
-* `HOMEKIT` - HomeKit
-* `WIRELESS_ACCESSORY_CONFIGURATION` - Wireless Accessory
+* `APPLE_ID_AUTH` - Sign in with Apple consent
+
+The published schema lists `ICLOUD_VERSION`,
+`DATA_PROTECTION_PERMISSION_LEVEL`, and `APPLE_ID_AUTH_APP_CONSENT`, but Apple
+can return newer setting and option keys before they appear in that schema.
+`--settings` requires exact JSON field names and value types, then sends key
+strings and nonempty `allowedInstances` values unchanged. Current documented
+examples include `XCODE_5`, `XCODE_6`, `COMPLETE_PROTECTION`,
+`PROTECTED_UNLESS_OPEN`, `PROTECTED_UNTIL_FIRST_USER_AUTH`, and
+`PRIMARY_APP_CONSENT`.
 
 ### iCloud Capability
 
@@ -202,21 +233,23 @@ asc bundle-ids capabilities add --bundle "BUNDLE_ID" \
 # Enable iCloud with CloudKit
 asc bundle-ids capabilities add --bundle "BUNDLE_ID" \
   --capability ICLOUD \
-  --settings '[{"key":"ICLOUD_VERSION","options":[{"key":"XCODE_13","enabled":true}]}]'
+  --settings '[{"key":"ICLOUD_VERSION","options":[{"key":"XCODE_6","enabled":true}]}]'
 
 # Enable legacy iCloud (documents)
 asc bundle-ids capabilities add --bundle "BUNDLE_ID" \
   --capability ICLOUD \
-  --settings '[{"key":"ICLOUD_VERSION","options":[{"key":"XCODE_9","enabled":true}]}]'
+  --settings '[{"key":"ICLOUD_VERSION","options":[{"key":"XCODE_5","enabled":true}]}]'
 ```
 
 ### App Groups Capability
 
 ```bash  theme={null}
 asc bundle-ids capabilities add --bundle "BUNDLE_ID" \
-  --capability APP_GROUPS \
-  --settings '[{"key":"APP_GROUP_IDS","options":[{"key":"group.com.example.shared","enabled":true}]}]'
+  --capability APP_GROUPS
 ```
+
+App group membership is not configured through capability settings. Configure
+the group association separately in Certificates, Identifiers & Profiles.
 
 ### Update Capability
 
@@ -224,7 +257,7 @@ Modify capability settings:
 
 ```bash  theme={null}
 asc bundle-ids capabilities update --id "CAPABILITY_ID" \
-  --settings '[{"key":"ICLOUD_VERSION","options":[{"key":"XCODE_13","enabled":true}]}]'
+  --settings '[{"key":"ICLOUD_VERSION","options":[{"key":"XCODE_6","enabled":true}]}]'
 
 # Change capability type
 asc bundle-ids capabilities update --id "CAPABILITY_ID" \
@@ -264,7 +297,7 @@ asc bundle-ids capabilities add --bundle "BUNDLE_ID" \
 # 4. Add iCloud
 asc bundle-ids capabilities add --bundle "BUNDLE_ID" \
   --capability ICLOUD \
-  --settings '[{"key":"ICLOUD_VERSION","options":[{"key":"XCODE_13","enabled":true}]}]'
+  --settings '[{"key":"ICLOUD_VERSION","options":[{"key":"XCODE_6","enabled":true}]}]'
 
 # 5. Verify capabilities
 asc bundle-ids capabilities list --bundle "BUNDLE_ID" --output table
@@ -307,27 +340,26 @@ asc bundle-ids list --output json | grep "com.example.app"
 
 # 2. Add App Groups to main app
 asc bundle-ids capabilities add --bundle "MAIN_BUNDLE_ID" \
-  --capability APP_GROUPS \
-  --settings '[{"key":"APP_GROUP_IDS","options":[{"key":"group.com.example.shared","enabled":true}]}]'
+  --capability APP_GROUPS
 
 # 3. Add App Groups to widget
 asc bundle-ids capabilities add --bundle "WIDGET_BUNDLE_ID" \
-  --capability APP_GROUPS \
-  --settings '[{"key":"APP_GROUP_IDS","options":[{"key":"group.com.example.shared","enabled":true}]}]'
+  --capability APP_GROUPS
 
 # 4. Add App Groups to share extension
 asc bundle-ids capabilities add --bundle "SHARE_BUNDLE_ID" \
-  --capability APP_GROUPS \
-  --settings '[{"key":"APP_GROUP_IDS","options":[{"key":"group.com.example.shared","enabled":true}]}]'
+  --capability APP_GROUPS
 ```
 
 ### Associated Domains (Universal Links)
 
 ```bash  theme={null}
 asc bundle-ids capabilities add --bundle "BUNDLE_ID" \
-  --capability ASSOCIATED_DOMAINS \
-  --settings '[{"key":"ASSOCIATED_DOMAIN_IDS","options":[{"key":"applinks:example.com","enabled":true},{"key":"applinks:www.example.com","enabled":true}]}]'
+  --capability ASSOCIATED_DOMAINS
 ```
+
+Associated domain values are app entitlements and are not configured through
+the bundle ID capability settings payload.
 
 ### HealthKit and HomeKit
 
@@ -399,7 +431,7 @@ Error: Bundle identifier is invalid
 Ensure identifier:
 
 * Uses reverse DNS notation
-* Contains only alphanumeric, hyphens, periods
+* Contains only alphanumeric, hyphens, periods, and an optional terminal `*` for wildcard identifiers
 * Doesn't start/end with periods
 * No consecutive periods
 
@@ -411,13 +443,13 @@ JSON settings must be properly formatted:
 # Correct format
 asc bundle-ids capabilities add --bundle "BUNDLE_ID" \
   --capability ICLOUD \
-  --settings '[{"key":"ICLOUD_VERSION","options":[{"key":"XCODE_13","enabled":true}]}]'
+  --settings '[{"key":"ICLOUD_VERSION","options":[{"key":"XCODE_6","enabled":true}]}]'
 ```
 
 Validate JSON:
 
 ```bash  theme={null}
-echo '[{"key":"ICLOUD_VERSION","options":[{"key":"XCODE_13","enabled":true}]}]' | jq .
+echo '[{"key":"ICLOUD_VERSION","options":[{"key":"XCODE_6","enabled":true}]}]' | jq .
 ```
 
 ### Provisioning Profiles Invalid After Capability Change

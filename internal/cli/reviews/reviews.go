@@ -19,9 +19,7 @@ func ReviewsCommand() *ffcli.Command {
 
 	appID := fs.String("app", "", "App Store Connect app ID (or ASC_APP_ID env)")
 	output := shared.BindOutputFlags(fs)
-	stars := fs.Int("stars", 0, "Filter by star rating (1-5)")
-	territory := fs.String("territory", "", "Filter by territory (e.g., US, GBR)")
-	sort := fs.String("sort", "", "Sort by rating, -rating, createdDate, or -createdDate")
+	filters := BindReviewFilterFlags(fs)
 	limit := fs.Int("limit", 0, "Maximum results per page (1-200)")
 	next := fs.String("next", "", "Fetch next page using a links.next URL")
 	paginate := fs.Bool("paginate", false, "Automatically fetch all pages (aggregate results)")
@@ -40,15 +38,19 @@ When invoked with --app, lists reviews. Subcommands allow responding to reviews.
 Examples:
   asc reviews --app "123456789"
   asc reviews --app "123456789" --stars 1 --territory US
+  asc reviews --app "123456789" --stars 1,2
   asc reviews --app "123456789" --sort -createdDate --limit 5
+  asc reviews --app "123456789" --response-state unreplied --include-response
+  asc reviews --app "123456789" --only-unresponded
   asc reviews --next "<links.next>"
   asc reviews --app "123456789" --paginate
-  asc reviews get --id "REVIEW_ID"
+  asc reviews view --id "REVIEW_ID"
   asc reviews ratings --app "123456789"
   asc reviews ratings --app "123456789" --all
   asc reviews summarizations --app "123456789" --platform IOS --territory US
   asc reviews respond --review-id "REVIEW_ID" --response "Thanks!"
-  asc reviews response get --id "RESPONSE_ID"
+  asc reviews respond-batch --app "123456789" --file replies.json --dry-run
+  asc reviews response view --id "RESPONSE_ID"
   asc reviews response delete --id "RESPONSE_ID" --confirm
   asc reviews response for-review --review-id "REVIEW_ID"`,
 		FlagSet:   fs,
@@ -59,18 +61,27 @@ Examples:
 			ReviewsRatingsCommand(),
 			ReviewsSummarizationsCommand(),
 			ReviewsRespondCommand(),
+			ReviewsRespondBatchCommand(),
 			ReviewsResponseCommand(),
 		},
 		Exec: func(ctx context.Context, args []string) error {
-			// If no flags are set and no args, show help
+			if len(args) > 0 {
+				return shared.WithDiagnostic(shared.UsageErrorf("unexpected argument(s): %s", strings.Join(args, " ")), shared.DiagnosticInvalidInput, "")
+			}
+			if err := shared.ValidateNextURL(*next); err != nil {
+				return shared.WithDiagnostic(shared.NewValidationError(shared.UsageErrorf("reviews: %v", err)), shared.DiagnosticInvalidInput, "--next")
+			}
+			if err := ValidateReviewNextFlagConflicts(*next, fs, "app"); err != nil {
+				return err
+			}
+
 			resolvedAppID := shared.ResolveAppID(*appID)
 			if resolvedAppID == "" && strings.TrimSpace(*next) == "" {
-				fmt.Fprintf(os.Stderr, "Error: --app is required (or set ASC_APP_ID)\n\n")
-				return flag.ErrHelp
+				return shared.WithDiagnostic(shared.UsageError("--app is required (or set ASC_APP_ID)"), shared.DiagnosticRequiredInputMissing, "--app")
 			}
 
 			// Execute the list functionality directly
-			return executeReviewsList(ctx, resolvedAppID, *output.Output, *output.Pretty, *stars, *territory, *sort, *limit, *next, *paginate)
+			return executeReviewsList(ctx, resolvedAppID, *output.Output, *output.Pretty, filters, *limit, *next, *paginate)
 		},
 	}
 }
@@ -81,9 +92,7 @@ func ReviewsListCommand() *ffcli.Command {
 
 	appID := fs.String("app", "", "App Store Connect app ID (or ASC_APP_ID env)")
 	output := shared.BindOutputFlags(fs)
-	stars := fs.Int("stars", 0, "Filter by star rating (1-5)")
-	territory := fs.String("territory", "", "Filter by territory (e.g., US, GBR)")
-	sort := fs.String("sort", "", "Sort by rating, -rating, createdDate, or -createdDate")
+	filters := BindReviewFilterFlags(fs)
 	limit := fs.Int("limit", 0, "Maximum results per page (1-200)")
 	next := fs.String("next", "", "Fetch next page using a links.next URL")
 	paginate := fs.Bool("paginate", false, "Automatically fetch all pages (aggregate results)")
@@ -97,35 +106,42 @@ func ReviewsListCommand() *ffcli.Command {
 Examples:
   asc reviews list --app "123456789"
   asc reviews list --app "123456789" --stars 5
+  asc reviews list --app "123456789" --stars 1,2
   asc reviews list --app "123456789" --territory US --sort -createdDate
+  asc reviews list --app "123456789" --response-state unreplied --include-response
+  asc reviews list --app "123456789" --only-unresponded
   asc reviews list --next "<links.next>"
   asc reviews list --app "123456789" --paginate`,
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
+			if err := shared.ValidateNextURL(*next); err != nil {
+				return shared.WithDiagnostic(shared.NewValidationError(shared.UsageErrorf("reviews: %v", err)), shared.DiagnosticInvalidInput, "--next")
+			}
+			if err := ValidateReviewNextFlagConflicts(*next, fs, "app"); err != nil {
+				return err
+			}
 			resolvedAppID := shared.ResolveAppID(*appID)
 			if resolvedAppID == "" && strings.TrimSpace(*next) == "" {
 				fmt.Fprintf(os.Stderr, "Error: --app is required (or set ASC_APP_ID)\n\n")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--app")
 			}
 
-			return executeReviewsList(ctx, resolvedAppID, *output.Output, *output.Pretty, *stars, *territory, *sort, *limit, *next, *paginate)
+			return executeReviewsList(ctx, resolvedAppID, *output.Output, *output.Pretty, filters, *limit, *next, *paginate)
 		},
 	}
 }
 
-func executeReviewsList(ctx context.Context, appID, output string, pretty bool, stars int, territory, sort string, limit int, next string, paginate bool) error {
+func executeReviewsList(ctx context.Context, appID, output string, pretty bool, filters *ReviewFilterFlags, limit int, next string, paginate bool) error {
 	if limit != 0 && (limit < 1 || limit > 200) {
-		return fmt.Errorf("reviews: --limit must be between 1 and 200")
+		return shared.WithDiagnostic(shared.NewValidationError(shared.UsageError("reviews: --limit must be between 1 and 200")), shared.DiagnosticInvalidInput, "--limit")
 	}
-	if stars != 0 && (stars < 1 || stars > 5) {
-		return fmt.Errorf("reviews: --stars must be between 1 and 5")
+	filterOpts, err := filters.ReviewOptions()
+	if err != nil {
+		return err
 	}
 	if err := shared.ValidateNextURL(next); err != nil {
-		return fmt.Errorf("reviews: %w", err)
-	}
-	if err := shared.ValidateSort(sort, "rating", "-rating", "createdDate", "-createdDate"); err != nil {
-		return fmt.Errorf("reviews: %w", err)
+		return shared.WithDiagnostic(shared.NewValidationError(shared.UsageErrorf("reviews: %v", err)), shared.DiagnosticInvalidInput, "--next")
 	}
 
 	client, err := shared.GetASCClient()
@@ -136,19 +152,14 @@ func executeReviewsList(ctx context.Context, appID, output string, pretty bool, 
 	requestCtx, cancel := shared.ContextWithTimeout(ctx)
 	defer cancel()
 
-	opts := []asc.ReviewOption{
-		asc.WithRating(stars),
-		asc.WithTerritory(territory),
-		asc.WithLimit(limit),
-		asc.WithNextURL(next),
-	}
-	if strings.TrimSpace(sort) != "" {
-		opts = append(opts, asc.WithReviewSort(sort))
-	}
+	opts := make([]asc.ReviewOption, 0, len(filterOpts)+2)
+	opts = append(opts, filterOpts...)
+	opts = append(opts, asc.WithLimit(limit), asc.WithNextURL(next))
 
 	if paginate {
 		paginateOpts := append(opts, asc.WithLimit(200))
-		reviews, err := shared.PaginateWithSpinner(requestCtx,
+		reviews, err := shared.PaginateWithSpinner(
+			requestCtx,
 			func(ctx context.Context) (asc.PaginatedResponse, error) {
 				return client.GetReviews(ctx, appID, paginateOpts...)
 			},

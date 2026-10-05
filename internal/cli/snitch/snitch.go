@@ -21,12 +21,14 @@ import (
 
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/asc"
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/cli/shared"
+	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/readonly"
+	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/rootfs"
 )
 
 const (
 	githubTokenEnvVar    = "GITHUB_TOKEN"
 	githubTokenGHEnvVar  = "GH_TOKEN"
-	defaultOwner         = "rudrankriyam"
+	defaultOwner         = "rorkai"
 	defaultRepo          = "App-Store-Connect-CLI"
 	maxSearchResults     = 5
 	maxResponseBodyBytes = 8192
@@ -131,6 +133,10 @@ Examples:
 				ASCVersion:  version,
 				OS:          fmt.Sprintf("%s/%s", runtime.GOOS, runtime.GOARCH),
 			}
+			entry, redacted := redactLogEntry(entry)
+			if redacted {
+				fmt.Fprintln(os.Stderr, redactionNotice)
+			}
 
 			token := resolveGitHubToken()
 
@@ -142,7 +148,7 @@ Examples:
 					if errors.Is(err, flag.ErrHelp) {
 						return err
 					}
-					fmt.Fprintf(os.Stderr, "Warning: %v; continuing without preflight label validation.\n", err)
+					fmt.Fprintf(os.Stderr, "Warning: %s; continuing without preflight label validation.\n", asc.SanitizeTerminalText(err.Error()))
 					entry.Labels = dedupeLabels(entry.Labels)
 				} else {
 					entry.Labels = validatedLabels
@@ -161,7 +167,7 @@ Examples:
 				var err error
 				duplicates, err = searchIssues(requestCtx, token, issueTitle(entry))
 				if err != nil {
-					fmt.Fprintf(os.Stderr, "Warning: duplicate search failed: %v\n", err)
+					fmt.Fprintf(os.Stderr, "Warning: duplicate search failed: %s\n", asc.SanitizeTerminalText(err.Error()))
 				}
 			} else {
 				fmt.Fprintln(os.Stderr, "Note: skipping duplicate search because GITHUB_TOKEN or GH_TOKEN is not set.")
@@ -184,11 +190,11 @@ Examples:
 			}
 			if labels := issueLabels(entry); len(labels) > 0 {
 				if err := addIssueLabels(requestCtx, token, issue.Number, labels); err != nil {
-					fmt.Fprintf(os.Stderr, "Warning: issue created, but labels could not be applied: %v\n", err)
+					fmt.Fprintf(os.Stderr, "Warning: issue created, but labels could not be applied: %s\n", asc.SanitizeTerminalText(err.Error()))
 				}
 			}
 
-			fmt.Fprintf(os.Stderr, "Issue created: #%d %s\n", issue.Number, issue.HTMLURL)
+			fmt.Fprintf(os.Stderr, "Issue created: #%d %s\n", issue.Number, asc.SanitizeTerminalText(issue.HTMLURL))
 			result := map[string]any{
 				"number":   issue.Number,
 				"html_url": issue.HTMLURL,
@@ -280,7 +286,7 @@ Examples:
 				return shared.UsageError("snitch flush does not accept positional arguments; use --file PATH to specify a log file")
 			}
 
-			path := strings.TrimSpace(*logFile)
+			path := *logFile
 			if path == "" {
 				path = filepath.Join(".asc", "snitch.log")
 			}
@@ -297,6 +303,10 @@ Examples:
 			if len(entries) == 0 {
 				fmt.Fprintln(os.Stderr, "No local snitch entries found.")
 				return nil
+			}
+			entries, redacted := redactLogEntries(entries)
+			if redacted {
+				fmt.Fprintln(os.Stderr, redactionNotice)
 			}
 
 			fmt.Fprint(os.Stdout, formatLocalEntries(entries))
@@ -346,6 +356,7 @@ func resolveGitHubToken() string {
 }
 
 func issueTitle(e LogEntry) string {
+	e, _ = redactLogEntry(e)
 	prefix := ""
 	switch e.Severity {
 	case "friction":
@@ -357,6 +368,7 @@ func issueTitle(e LogEntry) string {
 }
 
 func issueBody(e LogEntry) string {
+	e, _ = redactLogEntry(e)
 	var b strings.Builder
 
 	b.WriteString("## Summary\n\n")
@@ -390,6 +402,7 @@ func issueBody(e LogEntry) string {
 }
 
 func issueLabels(e LogEntry) []string {
+	e, _ = redactLogEntry(e)
 	labels := []string{"asc-snitch"}
 	switch e.Severity {
 	case "bug":
@@ -408,7 +421,13 @@ func printPotentialDuplicates(duplicates []GitHubIssue) {
 
 	fmt.Fprintf(os.Stderr, "Potentially related issues (%d):\n", len(duplicates))
 	for _, dup := range duplicates {
-		fmt.Fprintf(os.Stderr, "  #%d %s\n       %s\n", dup.Number, dup.Title, dup.HTMLURL)
+		fmt.Fprintf(
+			os.Stderr,
+			"  #%d %s\n       %s\n",
+			dup.Number,
+			asc.SanitizeTerminalText(dup.Title),
+			asc.SanitizeTerminalText(dup.HTMLURL),
+		)
 	}
 	fmt.Fprintln(os.Stderr)
 }
@@ -419,11 +438,27 @@ func printPreview(entry LogEntry, dryRun bool) {
 	} else {
 		fmt.Fprintln(os.Stderr, "--- Preview only: rerun with --confirm to create issue ---")
 	}
-	fmt.Fprintf(os.Stderr, "Title: %s\n", issueTitle(entry))
+	fmt.Fprintf(os.Stderr, "Title: %s\n", asc.SanitizeTerminalText(issueTitle(entry)))
 	if labels := issueLabels(entry); len(labels) > 0 {
-		fmt.Fprintf(os.Stderr, "Labels: %s\n", strings.Join(labels, ", "))
+		fmt.Fprintf(os.Stderr, "Labels: %s\n", asc.SanitizeTerminalText(strings.Join(labels, ", ")))
 	}
-	fmt.Fprintf(os.Stderr, "Body:\n%s\n", issueBody(entry))
+	fmt.Fprintf(os.Stderr, "Body:\n%s\n", sanitizeTerminalBlock(issueBody(entry)))
+}
+
+// sanitizeTerminalBlock removes terminal control and bidi sequences from a
+// multi-line value while keeping the line structure that makes the block
+// readable. Line breaks the CLI itself writes stay intact; every other control
+// character is dropped.
+func sanitizeTerminalBlock(value string) string {
+	if !asc.HasInterpretedTerminalSequence(value) {
+		return value
+	}
+
+	lines := strings.Split(value, "\n")
+	for i, line := range lines {
+		lines[i] = asc.SanitizeTerminalText(line)
+	}
+	return strings.Join(lines, "\n")
 }
 
 func dedupeLabels(labels []string) []string {
@@ -513,6 +548,7 @@ func listRepoLabels(ctx context.Context, token string) ([]string, error) {
 }
 
 func validateRequestedLabels(ctx context.Context, token string, requested []string) ([]string, error) {
+	requested, _ = redactStringSlice(requested)
 	requested = dedupeLabels(requested)
 	if len(requested) == 0 {
 		return nil, nil
@@ -547,8 +583,40 @@ func validateRequestedLabels(ctx context.Context, token string, requested []stri
 	return validated, nil
 }
 
+// localLogRoot anchors snitch log access to the working directory so the
+// repository-controlled .asc directory and log file cannot redirect the log, and
+// falls back to the log's own parent for a log the operator placed elsewhere.
+func localLogRoot(path string) (rootfs.Root, string, error) {
+	if path == "" {
+		return rootfs.Root{}, "", fmt.Errorf("log path must not be empty")
+	}
+
+	absolute, err := filepath.Abs(path)
+	if err != nil {
+		return rootfs.Root{}, "", err
+	}
+	if cwd, cwdErr := os.Getwd(); cwdErr == nil {
+		if root, rootErr := rootfs.New(cwd); rootErr == nil {
+			if relative, relErr := filepath.Rel(root.Path(), absolute); relErr == nil {
+				if relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+					return root, relative, nil
+				}
+			}
+		}
+	}
+	root, err := rootfs.New(filepath.Dir(absolute))
+	if err != nil {
+		return rootfs.Root{}, "", err
+	}
+	return root, filepath.Base(absolute), nil
+}
+
 func readLocalLog(path string) ([]LogEntry, error) {
-	data, err := os.ReadFile(path)
+	root, name, err := localLogRoot(path)
+	if err != nil {
+		return nil, err
+	}
+	data, err := root.ReadFile(name)
 	if err != nil {
 		return nil, err
 	}
@@ -576,31 +644,35 @@ func readLocalLog(path string) ([]LogEntry, error) {
 	return entries, nil
 }
 
+// formatLocalEntries renders log entries for human review. The log file is
+// repository-controlled text, so every field is stripped of terminal control and
+// bidi sequences before printing; the file on disk keeps its original values.
 func formatLocalEntries(entries []LogEntry) string {
+	entries, _ = redactLogEntries(entries)
 	var b strings.Builder
 
 	for i, entry := range entries {
-		fmt.Fprintf(&b, "[%d] %s: %s\n", i+1, entry.Severity, entry.Description)
+		fmt.Fprintf(&b, "[%d] %s: %s\n", i+1, asc.SanitizeTerminalText(entry.Severity), asc.SanitizeTerminalText(entry.Description))
 		if !entry.Timestamp.IsZero() {
 			fmt.Fprintf(&b, "Timestamp: %s\n", entry.Timestamp.Format(time.RFC3339))
 		}
 		if entry.ASCVersion != "" {
-			fmt.Fprintf(&b, "ASC version: %s\n", entry.ASCVersion)
+			fmt.Fprintf(&b, "ASC version: %s\n", asc.SanitizeTerminalText(entry.ASCVersion))
 		}
 		if entry.OS != "" {
-			fmt.Fprintf(&b, "OS: %s\n", entry.OS)
+			fmt.Fprintf(&b, "OS: %s\n", asc.SanitizeTerminalText(entry.OS))
 		}
 		if entry.Repro != "" {
-			fmt.Fprintf(&b, "Reproduction:\n%s\n", entry.Repro)
+			fmt.Fprintf(&b, "Reproduction:\n%s\n", sanitizeTerminalBlock(entry.Repro))
 		}
 		if entry.Expected != "" {
-			fmt.Fprintf(&b, "Expected:\n%s\n", entry.Expected)
+			fmt.Fprintf(&b, "Expected:\n%s\n", sanitizeTerminalBlock(entry.Expected))
 		}
 		if entry.Actual != "" {
-			fmt.Fprintf(&b, "Actual:\n%s\n", entry.Actual)
+			fmt.Fprintf(&b, "Actual:\n%s\n", sanitizeTerminalBlock(entry.Actual))
 		}
 		if len(entry.Labels) > 0 {
-			fmt.Fprintf(&b, "Labels: %s\n", strings.Join(entry.Labels, ", "))
+			fmt.Fprintf(&b, "Labels: %s\n", asc.SanitizeTerminalText(strings.Join(entry.Labels, ", ")))
 		}
 		if i < len(entries)-1 {
 			b.WriteString("\n")
@@ -611,6 +683,7 @@ func formatLocalEntries(entries []LogEntry) string {
 }
 
 func searchIssues(ctx context.Context, token string, query string) ([]GitHubIssue, error) {
+	query, _ = redactSensitiveText(query)
 	// Search open issue titles first to reduce noisy matches from generic terms.
 	q := fmt.Sprintf("repo:%s/%s is:issue is:open in:title %q", defaultOwner, defaultRepo, strings.TrimSpace(query))
 	searchURL := fmt.Sprintf("%s/search/issues?q=%s&per_page=%d",
@@ -661,6 +734,9 @@ func createIssue(ctx context.Context, token string, entry LogEntry) (*GitHubIssu
 		return nil, err
 	}
 
+	if err := readonly.Check(ctx, http.MethodPost, readonly.Target(issueURL)); err != nil {
+		return nil, err
+	}
 	req, err := http.NewRequestWithContext(ctx, "POST", issueURL, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
@@ -689,6 +765,7 @@ func createIssue(ctx context.Context, token string, entry LogEntry) (*GitHubIssu
 }
 
 func addIssueLabels(ctx context.Context, token string, issueNumber int, labels []string) error {
+	labels, _ = redactStringSlice(labels)
 	if len(labels) == 0 {
 		return nil
 	}
@@ -710,6 +787,9 @@ func addIssueLabels(ctx context.Context, token string, issueNumber int, labels [
 		return err
 	}
 
+	if err := readonly.Check(ctx, http.MethodPost, readonly.Target(labelsURL)); err != nil {
+		return err
+	}
 	req, err := http.NewRequestWithContext(ctx, "POST", labelsURL, bytes.NewReader(body))
 	if err != nil {
 		return err
@@ -732,37 +812,37 @@ func addIssueLabels(ctx context.Context, token string, issueNumber int, labels [
 	return nil
 }
 
+// readGitHubAPIError embeds the GitHub response body in the returned error.
+// The body is attacker-influenced text that reaches stderr, so terminal control
+// and bidi sequences are removed here at the source.
 func readGitHubAPIError(resp *http.Response) error {
 	limited := io.LimitReader(resp.Body, maxResponseBodyBytes)
 	respBody, _ := io.ReadAll(limited)
-	return fmt.Errorf("GitHub returned %d: %s", resp.StatusCode, strings.TrimSpace(string(respBody)))
+	return fmt.Errorf("GitHub returned %d: %s", resp.StatusCode, asc.SanitizeTerminalText(strings.TrimSpace(string(respBody))))
 }
 
 func writeLocalLog(entry LogEntry) error {
+	entry, _ = redactLogEntry(entry)
 	dir := ".asc"
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	path := filepath.Join(dir, "snitch.log")
+
+	root, name, err := localLogRoot(path)
+	if err != nil {
+		return fmt.Errorf("snitch: %w", err)
+	}
+	if err := root.MkdirAll(filepath.Dir(name), 0o755); err != nil {
 		return fmt.Errorf("snitch: failed to create %s: %w", dir, err)
 	}
-
-	path := filepath.Join(dir, "snitch.log")
 
 	data, err := json.Marshal(entry)
 	if err != nil {
 		return fmt.Errorf("snitch: failed to marshal entry: %w", err)
 	}
 
-	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
-	if err != nil {
-		return fmt.Errorf("snitch: failed to open %s: %w", path, err)
-	}
-	defer f.Close()
-
-	if err := f.Chmod(0o600); err != nil {
-		return fmt.Errorf("snitch: failed to set secure permissions on %s: %w", path, err)
-	}
-
-	if _, err := f.Write(append(data, '\n')); err != nil {
-		return fmt.Errorf("snitch: failed to write entry: %w", err)
+	// AppendFile refuses a symlinked log and only tightens permissions on the
+	// descriptor it opened, so it can never chmod an external file.
+	if err := root.AppendFile(name, append(data, '\n'), 0o600); err != nil {
+		return fmt.Errorf("snitch: failed to append to %s: %w", path, err)
 	}
 
 	fmt.Fprintf(os.Stderr, "Friction logged to %s\n", path)

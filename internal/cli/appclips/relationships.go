@@ -17,7 +17,7 @@ import (
 func AppClipDefaultExperiencesRelationshipsCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("default-experiences-links", flag.ExitOnError)
 
-	appClipID := fs.String("app-clip-id", "", "App Clip ID")
+	appClipID := shared.BindResourceIDFlag(fs, "app-clip-id", "appClips", "App Clip ID")
 	limit := fs.Int("limit", 0, "Maximum results per page (1-200)")
 	next := fs.String("next", "", "Fetch next page using a links.next URL")
 	paginate := fs.Bool("paginate", false, "Automatically fetch all pages (aggregate results)")
@@ -36,16 +36,16 @@ Examples:
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
 			if *limit != 0 && (*limit < 1 || *limit > 200) {
-				return fmt.Errorf("app-clips default-experiences-links: --limit must be between 1 and 200")
+				return shared.UsageError("app-clips default-experiences-links: --limit must be between 1 and 200")
 			}
 			if err := shared.ValidateNextURL(*next); err != nil {
-				return fmt.Errorf("app-clips default-experiences-links: %w", err)
+				return shared.UsageErrorf("app-clips default-experiences-links: %v", err)
 			}
 
 			appClipValue := strings.TrimSpace(*appClipID)
 			if appClipValue == "" && strings.TrimSpace(*next) == "" {
 				fmt.Fprintln(os.Stderr, "Error: --app-clip-id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--app-clip-id")
 			}
 
 			client, err := shared.GetASCClient()
@@ -92,7 +92,7 @@ Examples:
 func AppClipAdvancedExperiencesRelationshipsCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("advanced-experiences-links", flag.ExitOnError)
 
-	appClipID := fs.String("app-clip-id", "", "App Clip ID")
+	appClipID := shared.BindResourceIDFlag(fs, "app-clip-id", "appClips", "App Clip ID")
 	limit := fs.Int("limit", 0, "Maximum results per page (1-200)")
 	next := fs.String("next", "", "Fetch next page using a links.next URL")
 	paginate := fs.Bool("paginate", false, "Automatically fetch all pages (aggregate results)")
@@ -111,16 +111,16 @@ Examples:
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
 			if *limit != 0 && (*limit < 1 || *limit > 200) {
-				return fmt.Errorf("app-clips advanced-experiences-links: --limit must be between 1 and 200")
+				return shared.UsageError("app-clips advanced-experiences-links: --limit must be between 1 and 200")
 			}
 			if err := shared.ValidateNextURL(*next); err != nil {
-				return fmt.Errorf("app-clips advanced-experiences-links: %w", err)
+				return shared.UsageErrorf("app-clips advanced-experiences-links: %v", err)
 			}
 
 			appClipValue := strings.TrimSpace(*appClipID)
 			if appClipValue == "" && strings.TrimSpace(*next) == "" {
 				fmt.Fprintln(os.Stderr, "Error: --app-clip-id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--app-clip-id")
 			}
 
 			client, err := shared.GetASCClient()

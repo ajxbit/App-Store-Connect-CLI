@@ -21,7 +21,7 @@ Date formats vary by report frequency:
 asc analytics sales --vendor "12345678" --type SALES --subtype SUMMARY --frequency DAILY --date "2024-01-15"
 
 # Monthly sales report
-asc analytics sales --vendor "12345678" --type SUBSCRIPTION --subtype DETAILED --frequency MONTHLY --date "2024-01"
+asc analytics sales --vendor "12345678" --type SALES --subtype SUMMARY --frequency MONTHLY --date "2024-01"
 ```
 
 ### Vendor Number
@@ -36,10 +36,10 @@ export ASC_VENDOR_NUMBER="12345678"
 
 ### Pagination Quirks
 
-Use `--paginate` with `asc analytics view --request-id ... --date ...` to avoid missing instances on later pages. Without pagination, you may only receive partial data.
+Use `--paginate` with `asc analytics view --request-id ... --processing-date ...` to avoid missing instances on later pages. Without pagination, you may only receive partial data. The CLI forwards `--processing-date` as the server-side `filter[processingDate]` value. The deprecated `--date` compatibility flag was removed in 4.0.0; use `--processing-date`.
 
 ```bash  theme={null}
-asc analytics view --request-id "REQUEST_ID" --date "2024-01-01" --paginate
+asc analytics view --request-id "REQUEST_ID" --processing-date "2024-01-01" --paginate
 ```
 
 ### Long-Running Operations
@@ -48,7 +48,7 @@ Long analytics runs may require raising `ASC_TIMEOUT`:
 
 ```bash  theme={null}
 export ASC_TIMEOUT=5m
-asc analytics view --request-id "REQUEST_ID" --date "2024-01-01" --paginate
+asc analytics view --request-id "REQUEST_ID" --processing-date "2024-01-01" --paginate
 ```
 
 ## Finance Reports

@@ -25,11 +25,11 @@ func GameCenterDetailsCommand() *ffcli.Command {
 
 Examples:
   asc game-center details list --app "APP_ID"
-  asc game-center details get --id "DETAIL_ID"
+  asc game-center details view --id "DETAIL_ID"
   asc game-center details create --app "APP_ID"
   asc game-center details update --id "DETAIL_ID" --game-center-group-id "GROUP_ID"
   asc game-center details app-versions list --id "DETAIL_ID"
-  asc game-center details group get --id "DETAIL_ID"
+  asc game-center details group view --id "DETAIL_ID"
   asc game-center details achievements-v2 list --id "DETAIL_ID"
   asc game-center details leaderboard-releases list --id "DETAIL_ID"
   asc game-center details metrics classic-matchmaking --id "DETAIL_ID" --granularity P1D`,
@@ -37,6 +37,7 @@ Examples:
 		UsageFunc: shared.DefaultUsageFunc,
 		Subcommands: []*ffcli.Command{
 			GameCenterDetailsListCommand(),
+			GameCenterBlockedPlayersCommand(),
 			GameCenterDetailsGetCommand(),
 			GameCenterDetailsCreateCommand(),
 			GameCenterDetailsUpdateCommand(),
@@ -61,9 +62,6 @@ func GameCenterDetailsListCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("list", flag.ExitOnError)
 
 	appID := fs.String("app", "", "App Store Connect app ID (or ASC_APP_ID env)")
-	limit := fs.Int("limit", 0, "Maximum results per page (1-200)")
-	next := fs.String("next", "", "Fetch next page using a links.next URL")
-	paginate := fs.Bool("paginate", false, "Automatically fetch all pages (aggregate results)")
 	output := shared.BindOutputFlags(fs)
 
 	return &ffcli.Command{
@@ -72,27 +70,17 @@ func GameCenterDetailsListCommand() *ffcli.Command {
 		ShortHelp:  "List Game Center details.",
 		LongHelp: `List Game Center details.
 
+Each app has at most one Game Center detail, so the lookup is not paginated.
+
 Examples:
-  asc game-center details list --app "APP_ID"
-  asc game-center details list --app "APP_ID" --paginate`,
+  asc game-center details list --app "APP_ID"`,
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
-			nextURL := strings.TrimSpace(*next)
-			if nextURL != "" {
-				return fmt.Errorf("game-center details list: --next is not supported")
-			}
-			if *paginate {
-				return fmt.Errorf("game-center details list: --paginate is not supported")
-			}
-			if *limit != 0 {
-				return fmt.Errorf("game-center details list: --limit is not supported")
-			}
-
 			resolvedAppID := shared.ResolveAppID(*appID)
-			if resolvedAppID == "" && nextURL == "" {
+			if resolvedAppID == "" {
 				fmt.Fprintln(os.Stderr, "Error: --app is required (or set ASC_APP_ID)")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--app")
 			}
 
 			client, err := shared.GetASCClient()
@@ -138,31 +126,31 @@ Examples:
 
 // GameCenterDetailsGetCommand returns the details get subcommand.
 func GameCenterDetailsGetCommand() *ffcli.Command {
-	fs := flag.NewFlagSet("get", flag.ExitOnError)
+	fs := flag.NewFlagSet("view", flag.ExitOnError)
 
-	detailID := fs.String("id", "", "Game Center detail ID")
+	detailID := shared.BindResourceIDFlag(fs, "id", "gameCenterDetails", "Game Center detail ID")
 	output := shared.BindOutputFlags(fs)
 
 	return &ffcli.Command{
-		Name:       "get",
-		ShortUsage: "asc game-center details get --id \"DETAIL_ID\"",
-		ShortHelp:  "Get a Game Center detail by ID.",
-		LongHelp: `Get a Game Center detail by ID.
+		Name:       "view",
+		ShortUsage: "asc game-center details view --id \"DETAIL_ID\"",
+		ShortHelp:  "View a Game Center detail by ID.",
+		LongHelp: `View a Game Center detail by ID.
 
 Examples:
-  asc game-center details get --id "DETAIL_ID"`,
+  asc game-center details view --id "DETAIL_ID"`,
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
 			id := strings.TrimSpace(*detailID)
 			if id == "" {
 				fmt.Fprintln(os.Stderr, "Error: --id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--id")
 			}
 
 			client, err := shared.GetASCClient()
 			if err != nil {
-				return fmt.Errorf("game-center details get: %w", err)
+				return fmt.Errorf("game-center details view: %w", err)
 			}
 
 			requestCtx, cancel := shared.ContextWithTimeout(ctx)
@@ -170,7 +158,7 @@ Examples:
 
 			resp, err := client.GetGameCenterDetail(requestCtx, id)
 			if err != nil {
-				return fmt.Errorf("game-center details get: failed to fetch: %w", err)
+				return fmt.Errorf("game-center details view: failed to fetch: %w", err)
 			}
 
 			return shared.PrintOutput(resp, *output.Output, *output.Pretty)
@@ -183,7 +171,6 @@ func GameCenterDetailsCreateCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("create", flag.ExitOnError)
 
 	appID := fs.String("app", "", "App Store Connect app ID (or ASC_APP_ID env)")
-	challengeEnabled := fs.String("challenge-enabled", "", "Deprecated: no longer supported by App Store Connect")
 	output := shared.BindOutputFlags(fs)
 
 	return &ffcli.Command{
@@ -200,13 +187,7 @@ Examples:
 			resolvedAppID := shared.ResolveAppID(*appID)
 			if resolvedAppID == "" {
 				fmt.Fprintln(os.Stderr, "Error: --app is required (or set ASC_APP_ID)")
-				return flag.ErrHelp
-			}
-
-			ceVal := strings.TrimSpace(*challengeEnabled)
-			if ceVal != "" {
-				fmt.Fprintln(os.Stderr, "Error: --challenge-enabled is deprecated and no longer supported by App Store Connect")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--app")
 			}
 
 			client, err := shared.GetASCClient()
@@ -231,10 +212,9 @@ Examples:
 func GameCenterDetailsUpdateCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("update", flag.ExitOnError)
 
-	detailID := fs.String("id", "", "Game Center detail ID")
-	challengeEnabled := fs.String("challenge-enabled", "", "Deprecated: no longer supported by App Store Connect")
-	gameCenterGroupID := fs.String("game-center-group-id", "", "Game Center group ID to associate")
-	defaultLeaderboardID := fs.String("default-leaderboard-id", "", "Default leaderboard ID")
+	detailID := shared.BindResourceIDFlag(fs, "id", "gameCenterDetails", "Game Center detail ID")
+	gameCenterGroupID := shared.BindResourceIDFlag(fs, "game-center-group-id", "gameCenterGroups", "Game Center group ID to associate")
+	defaultLeaderboardID := shared.BindResourceIDFlag(fs, "default-leaderboard-id", "gameCenterLeaderboards", "Default leaderboard ID")
 	output := shared.BindOutputFlags(fs)
 
 	return &ffcli.Command{
@@ -252,17 +232,11 @@ Examples:
 			id := strings.TrimSpace(*detailID)
 			if id == "" {
 				fmt.Fprintln(os.Stderr, "Error: --id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--id")
 			}
 
 			var rels *asc.GameCenterDetailUpdateRelationships
 			hasUpdate := false
-
-			ceVal := strings.TrimSpace(*challengeEnabled)
-			if ceVal != "" {
-				fmt.Fprintln(os.Stderr, "Error: --challenge-enabled is deprecated and no longer supported by App Store Connect")
-				return flag.ErrHelp
-			}
 
 			gcGroupID := strings.TrimSpace(*gameCenterGroupID)
 			if gcGroupID != "" {
@@ -294,7 +268,7 @@ Examples:
 
 			if !hasUpdate {
 				fmt.Fprintln(os.Stderr, "Error: at least one update flag is required (--game-center-group-id, --default-leaderboard-id)")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("")
 			}
 
 			client, err := shared.GetASCClient()
@@ -342,7 +316,7 @@ Examples:
 func GameCenterDetailsAppVersionsListCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("list", flag.ExitOnError)
 
-	detailID := fs.String("id", "", "Game Center detail ID")
+	detailID := shared.BindResourceIDFlag(fs, "id", "gameCenterDetails", "Game Center detail ID")
 	limit := fs.Int("limit", 0, "Maximum results per page (1-200)")
 	next := fs.String("next", "", "Fetch next page using a links.next URL")
 	paginate := fs.Bool("paginate", false, "Automatically fetch all pages (aggregate results)")
@@ -362,17 +336,17 @@ Examples:
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
 			if *limit != 0 && (*limit < 1 || *limit > 200) {
-				return fmt.Errorf("game-center details app-versions list: --limit must be between 1 and 200")
+				return shared.UsageError("game-center details app-versions list: --limit must be between 1 and 200")
 			}
 			if err := shared.ValidateNextURL(*next); err != nil {
-				return fmt.Errorf("game-center details app-versions list: %w", err)
+				return shared.UsageErrorf("game-center details app-versions list: %v", err)
 			}
 
 			id := strings.TrimSpace(*detailID)
 			nextURL := strings.TrimSpace(*next)
 			if id == "" && nextURL == "" {
 				fmt.Fprintln(os.Stderr, "Error: --id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--id")
 			}
 
 			client, err := shared.GetASCClient()
@@ -424,12 +398,12 @@ func GameCenterDetailsGroupCommand() *ffcli.Command {
 
 	return &ffcli.Command{
 		Name:       "group",
-		ShortUsage: "asc game-center details group get --id \"DETAIL_ID\"",
-		ShortHelp:  "Get the Game Center group for a detail.",
-		LongHelp: `Get the Game Center group for a detail.
+		ShortUsage: "asc game-center details group view --id \"DETAIL_ID\"",
+		ShortHelp:  "View the Game Center group for a detail.",
+		LongHelp: `View the Game Center group for a detail.
 
 Examples:
-  asc game-center details group get --id "DETAIL_ID"`,
+  asc game-center details group view --id "DETAIL_ID"`,
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
 		Subcommands: []*ffcli.Command{
@@ -443,31 +417,31 @@ Examples:
 
 // GameCenterDetailsGroupGetCommand returns the details group get subcommand.
 func GameCenterDetailsGroupGetCommand() *ffcli.Command {
-	fs := flag.NewFlagSet("get", flag.ExitOnError)
+	fs := flag.NewFlagSet("view", flag.ExitOnError)
 
-	detailID := fs.String("id", "", "Game Center detail ID")
+	detailID := shared.BindResourceIDFlag(fs, "id", "gameCenterDetails", "Game Center detail ID")
 	output := shared.BindOutputFlags(fs)
 
 	return &ffcli.Command{
-		Name:       "get",
-		ShortUsage: "asc game-center details group get --id \"DETAIL_ID\"",
-		ShortHelp:  "Get the Game Center group for a detail.",
-		LongHelp: `Get the Game Center group for a detail.
+		Name:       "view",
+		ShortUsage: "asc game-center details group view --id \"DETAIL_ID\"",
+		ShortHelp:  "View the Game Center group for a detail.",
+		LongHelp: `View the Game Center group for a detail.
 
 Examples:
-  asc game-center details group get --id "DETAIL_ID"`,
+  asc game-center details group view --id "DETAIL_ID"`,
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
 			id := strings.TrimSpace(*detailID)
 			if id == "" {
 				fmt.Fprintln(os.Stderr, "Error: --id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--id")
 			}
 
 			client, err := shared.GetASCClient()
 			if err != nil {
-				return fmt.Errorf("game-center details group get: %w", err)
+				return fmt.Errorf("game-center details group view: %w", err)
 			}
 
 			requestCtx, cancel := shared.ContextWithTimeout(ctx)
@@ -475,7 +449,7 @@ Examples:
 
 			resp, err := client.GetGameCenterDetailGameCenterGroup(requestCtx, id)
 			if err != nil {
-				return fmt.Errorf("game-center details group get: failed to fetch: %w", err)
+				return fmt.Errorf("game-center details group view: failed to fetch: %w", err)
 			}
 
 			return shared.PrintOutput(resp, *output.Output, *output.Pretty)
@@ -510,7 +484,7 @@ Examples:
 func GameCenterDetailsAchievementsV2ListCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("list", flag.ExitOnError)
 
-	detailID := fs.String("id", "", "Game Center detail ID")
+	detailID := shared.BindResourceIDFlag(fs, "id", "gameCenterDetails", "Game Center detail ID")
 	limit := fs.Int("limit", 0, "Maximum results per page (1-200)")
 	next := fs.String("next", "", "Fetch next page using a links.next URL")
 	paginate := fs.Bool("paginate", false, "Automatically fetch all pages (aggregate results)")
@@ -530,16 +504,16 @@ Examples:
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
 			if *limit != 0 && (*limit < 1 || *limit > 200) {
-				return fmt.Errorf("game-center details achievements-v2 list: --limit must be between 1 and 200")
+				return shared.UsageError("game-center details achievements-v2 list: --limit must be between 1 and 200")
 			}
 			if err := shared.ValidateNextURL(*next); err != nil {
-				return fmt.Errorf("game-center details achievements-v2 list: %w", err)
+				return shared.UsageErrorf("game-center details achievements-v2 list: %v", err)
 			}
 
 			id := strings.TrimSpace(*detailID)
 			if id == "" && strings.TrimSpace(*next) == "" {
 				fmt.Fprintln(os.Stderr, "Error: --id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--id")
 			}
 
 			client, err := shared.GetASCClient()
@@ -609,7 +583,7 @@ Examples:
 func GameCenterDetailsLeaderboardsV2ListCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("list", flag.ExitOnError)
 
-	detailID := fs.String("id", "", "Game Center detail ID")
+	detailID := shared.BindResourceIDFlag(fs, "id", "gameCenterDetails", "Game Center detail ID")
 	limit := fs.Int("limit", 0, "Maximum results per page (1-200)")
 	next := fs.String("next", "", "Fetch next page using a links.next URL")
 	paginate := fs.Bool("paginate", false, "Automatically fetch all pages (aggregate results)")
@@ -629,16 +603,16 @@ Examples:
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
 			if *limit != 0 && (*limit < 1 || *limit > 200) {
-				return fmt.Errorf("game-center details leaderboards-v2 list: --limit must be between 1 and 200")
+				return shared.UsageError("game-center details leaderboards-v2 list: --limit must be between 1 and 200")
 			}
 			if err := shared.ValidateNextURL(*next); err != nil {
-				return fmt.Errorf("game-center details leaderboards-v2 list: %w", err)
+				return shared.UsageErrorf("game-center details leaderboards-v2 list: %v", err)
 			}
 
 			id := strings.TrimSpace(*detailID)
 			if id == "" && strings.TrimSpace(*next) == "" {
 				fmt.Fprintln(os.Stderr, "Error: --id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--id")
 			}
 
 			client, err := shared.GetASCClient()
@@ -708,7 +682,7 @@ Examples:
 func GameCenterDetailsLeaderboardSetsV2ListCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("list", flag.ExitOnError)
 
-	detailID := fs.String("id", "", "Game Center detail ID")
+	detailID := shared.BindResourceIDFlag(fs, "id", "gameCenterDetails", "Game Center detail ID")
 	limit := fs.Int("limit", 0, "Maximum results per page (1-200)")
 	next := fs.String("next", "", "Fetch next page using a links.next URL")
 	paginate := fs.Bool("paginate", false, "Automatically fetch all pages (aggregate results)")
@@ -728,16 +702,16 @@ Examples:
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
 			if *limit != 0 && (*limit < 1 || *limit > 200) {
-				return fmt.Errorf("game-center details leaderboard-sets-v2 list: --limit must be between 1 and 200")
+				return shared.UsageError("game-center details leaderboard-sets-v2 list: --limit must be between 1 and 200")
 			}
 			if err := shared.ValidateNextURL(*next); err != nil {
-				return fmt.Errorf("game-center details leaderboard-sets-v2 list: %w", err)
+				return shared.UsageErrorf("game-center details leaderboard-sets-v2 list: %v", err)
 			}
 
 			id := strings.TrimSpace(*detailID)
 			if id == "" && strings.TrimSpace(*next) == "" {
 				fmt.Fprintln(os.Stderr, "Error: --id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--id")
 			}
 
 			client, err := shared.GetASCClient()
@@ -807,7 +781,7 @@ Examples:
 func GameCenterDetailsAchievementReleasesListCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("list", flag.ExitOnError)
 
-	detailID := fs.String("id", "", "Game Center detail ID")
+	detailID := shared.BindResourceIDFlag(fs, "id", "gameCenterDetails", "Game Center detail ID")
 	limit := fs.Int("limit", 0, "Maximum results per page (1-200)")
 	next := fs.String("next", "", "Fetch next page using a links.next URL")
 	paginate := fs.Bool("paginate", false, "Automatically fetch all pages (aggregate results)")
@@ -827,16 +801,16 @@ Examples:
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
 			if *limit != 0 && (*limit < 1 || *limit > 200) {
-				return fmt.Errorf("game-center details achievement-releases list: --limit must be between 1 and 200")
+				return shared.UsageError("game-center details achievement-releases list: --limit must be between 1 and 200")
 			}
 			if err := shared.ValidateNextURL(*next); err != nil {
-				return fmt.Errorf("game-center details achievement-releases list: %w", err)
+				return shared.UsageErrorf("game-center details achievement-releases list: %v", err)
 			}
 
 			id := strings.TrimSpace(*detailID)
 			if id == "" && strings.TrimSpace(*next) == "" {
 				fmt.Fprintln(os.Stderr, "Error: --id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--id")
 			}
 
 			client, err := shared.GetASCClient()
@@ -906,7 +880,7 @@ Examples:
 func GameCenterDetailsLeaderboardReleasesListCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("list", flag.ExitOnError)
 
-	detailID := fs.String("id", "", "Game Center detail ID")
+	detailID := shared.BindResourceIDFlag(fs, "id", "gameCenterDetails", "Game Center detail ID")
 	limit := fs.Int("limit", 0, "Maximum results per page (1-200)")
 	next := fs.String("next", "", "Fetch next page using a links.next URL")
 	paginate := fs.Bool("paginate", false, "Automatically fetch all pages (aggregate results)")
@@ -926,16 +900,16 @@ Examples:
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
 			if *limit != 0 && (*limit < 1 || *limit > 200) {
-				return fmt.Errorf("game-center details leaderboard-releases list: --limit must be between 1 and 200")
+				return shared.UsageError("game-center details leaderboard-releases list: --limit must be between 1 and 200")
 			}
 			if err := shared.ValidateNextURL(*next); err != nil {
-				return fmt.Errorf("game-center details leaderboard-releases list: %w", err)
+				return shared.UsageErrorf("game-center details leaderboard-releases list: %v", err)
 			}
 
 			id := strings.TrimSpace(*detailID)
 			if id == "" && strings.TrimSpace(*next) == "" {
 				fmt.Fprintln(os.Stderr, "Error: --id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--id")
 			}
 
 			client, err := shared.GetASCClient()
@@ -1005,7 +979,7 @@ Examples:
 func GameCenterDetailsLeaderboardSetReleasesListCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("list", flag.ExitOnError)
 
-	detailID := fs.String("id", "", "Game Center detail ID")
+	detailID := shared.BindResourceIDFlag(fs, "id", "gameCenterDetails", "Game Center detail ID")
 	limit := fs.Int("limit", 0, "Maximum results per page (1-200)")
 	next := fs.String("next", "", "Fetch next page using a links.next URL")
 	paginate := fs.Bool("paginate", false, "Automatically fetch all pages (aggregate results)")
@@ -1025,16 +999,16 @@ Examples:
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
 			if *limit != 0 && (*limit < 1 || *limit > 200) {
-				return fmt.Errorf("game-center details leaderboard-set-releases list: --limit must be between 1 and 200")
+				return shared.UsageError("game-center details leaderboard-set-releases list: --limit must be between 1 and 200")
 			}
 			if err := shared.ValidateNextURL(*next); err != nil {
-				return fmt.Errorf("game-center details leaderboard-set-releases list: %w", err)
+				return shared.UsageErrorf("game-center details leaderboard-set-releases list: %v", err)
 			}
 
 			id := strings.TrimSpace(*detailID)
 			if id == "" && strings.TrimSpace(*next) == "" {
 				fmt.Fprintln(os.Stderr, "Error: --id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--id")
 			}
 
 			client, err := shared.GetASCClient()
@@ -1106,7 +1080,7 @@ Examples:
 func GameCenterDetailsClassicMatchmakingCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("classic-matchmaking", flag.ExitOnError)
 
-	detailID := fs.String("id", "", "Game Center detail ID")
+	detailID := shared.BindResourceIDFlag(fs, "id", "gameCenterDetails", "Game Center detail ID")
 	granularity := fs.String("granularity", "", "Granularity (P1D, PT1H, PT15M)")
 	groupBy := fs.String("group-by", "", "Group by (comma-separated: result)")
 	filterResult := fs.String("filter-result", "", "Filter result (MATCHED, CANCELED, EXPIRED)")
@@ -1116,8 +1090,8 @@ func GameCenterDetailsClassicMatchmakingCommand() *ffcli.Command {
 	paginate := fs.Bool("paginate", false, "Automatically fetch all pages (aggregate results)")
 	output := shared.BindOutputFlags(fs)
 
-	return detailsMetricsCommand("classic-matchmaking", fs, detailID, granularity, groupBy, filterResult, sort, limit, next, paginate, output.Output, output.Pretty, func(ctx context.Context, id string, opts ...asc.GCMatchmakingMetricsOption) (*asc.GameCenterMetricsResponse, error) {
-		return ascClient().GetGameCenterDetailsClassicMatchmakingRequests(ctx, id, opts...)
+	return detailsMetricsCommand("classic-matchmaking", fs, detailID, granularity, groupBy, filterResult, sort, limit, next, paginate, output.Output, output.Pretty, func(client *asc.Client, ctx context.Context, id string, opts ...asc.GCMatchmakingMetricsOption) (*asc.GameCenterMetricsResponse, error) {
+		return client.GetGameCenterDetailsClassicMatchmakingRequests(ctx, id, opts...)
 	})
 }
 
@@ -1125,7 +1099,7 @@ func GameCenterDetailsClassicMatchmakingCommand() *ffcli.Command {
 func GameCenterDetailsRuleBasedMatchmakingCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("rule-based-matchmaking", flag.ExitOnError)
 
-	detailID := fs.String("id", "", "Game Center detail ID")
+	detailID := shared.BindResourceIDFlag(fs, "id", "gameCenterDetails", "Game Center detail ID")
 	granularity := fs.String("granularity", "", "Granularity (P1D, PT1H, PT15M)")
 	groupBy := fs.String("group-by", "", "Group by (comma-separated: result)")
 	filterResult := fs.String("filter-result", "", "Filter result (MATCHED, CANCELED, EXPIRED)")
@@ -1135,12 +1109,12 @@ func GameCenterDetailsRuleBasedMatchmakingCommand() *ffcli.Command {
 	paginate := fs.Bool("paginate", false, "Automatically fetch all pages (aggregate results)")
 	output := shared.BindOutputFlags(fs)
 
-	return detailsMetricsCommand("rule-based-matchmaking", fs, detailID, granularity, groupBy, filterResult, sort, limit, next, paginate, output.Output, output.Pretty, func(ctx context.Context, id string, opts ...asc.GCMatchmakingMetricsOption) (*asc.GameCenterMetricsResponse, error) {
-		return ascClient().GetGameCenterDetailsRuleBasedMatchmakingRequests(ctx, id, opts...)
+	return detailsMetricsCommand("rule-based-matchmaking", fs, detailID, granularity, groupBy, filterResult, sort, limit, next, paginate, output.Output, output.Pretty, func(client *asc.Client, ctx context.Context, id string, opts ...asc.GCMatchmakingMetricsOption) (*asc.GameCenterMetricsResponse, error) {
+		return client.GetGameCenterDetailsRuleBasedMatchmakingRequests(ctx, id, opts...)
 	})
 }
 
-func detailsMetricsCommand(name string, fs *flag.FlagSet, detailID *string, granularity *string, groupBy *string, filterResult *string, sort *string, limit *int, next *string, paginate *bool, output *string, pretty *bool, fetch func(ctx context.Context, id string, opts ...asc.GCMatchmakingMetricsOption) (*asc.GameCenterMetricsResponse, error)) *ffcli.Command {
+func detailsMetricsCommand(name string, fs *flag.FlagSet, detailID *string, granularity *string, groupBy *string, filterResult *string, sort *string, limit *int, next *string, paginate *bool, output *string, pretty *bool, fetch func(client *asc.Client, ctx context.Context, id string, opts ...asc.GCMatchmakingMetricsOption) (*asc.GameCenterMetricsResponse, error)) *ffcli.Command {
 	return &ffcli.Command{
 		Name:       name,
 		ShortUsage: "asc game-center details metrics " + name + " --id \"DETAIL_ID\" --granularity P1D",
@@ -1157,23 +1131,28 @@ Examples:
 	}
 }
 
-func runDetailsMetrics(ctx context.Context, name string, detailID *string, granularity *string, groupBy *string, filterResult *string, sort *string, limit *int, next *string, paginate *bool, output *string, pretty *bool, fetch func(ctx context.Context, id string, opts ...asc.GCMatchmakingMetricsOption) (*asc.GameCenterMetricsResponse, error)) error {
+func runDetailsMetrics(ctx context.Context, name string, detailID *string, granularity *string, groupBy *string, filterResult *string, sort *string, limit *int, next *string, paginate *bool, output *string, pretty *bool, fetch func(client *asc.Client, ctx context.Context, id string, opts ...asc.GCMatchmakingMetricsOption) (*asc.GameCenterMetricsResponse, error)) error {
 	if *limit != 0 && (*limit < 1 || *limit > 200) {
-		return fmt.Errorf("game-center details metrics %s: --limit must be between 1 and 200", name)
+		return shared.UsageErrorf("game-center details metrics %s: --limit must be between 1 and 200", name)
 	}
 	if err := shared.ValidateNextURL(*next); err != nil {
-		return fmt.Errorf("game-center details metrics %s: %w", name, err)
+		return shared.UsageErrorf("game-center details metrics %s: %v", name, err)
 	}
 
 	id := strings.TrimSpace(*detailID)
 	if id == "" && strings.TrimSpace(*next) == "" {
 		fmt.Fprintln(os.Stderr, "Error: --id is required")
-		return flag.ErrHelp
+		return shared.MissingRequiredUsageError("--id")
 	}
 	gran := strings.TrimSpace(*granularity)
 	if gran == "" && strings.TrimSpace(*next) == "" {
 		fmt.Fprintln(os.Stderr, "Error: --granularity is required")
-		return flag.ErrHelp
+		return shared.MissingRequiredUsageError("--granularity")
+	}
+
+	client, err := shared.GetASCClient()
+	if err != nil {
+		return fmt.Errorf("game-center details metrics %s: %w", name, err)
 	}
 
 	requestCtx, cancel := shared.ContextWithTimeout(ctx)
@@ -1190,13 +1169,13 @@ func runDetailsMetrics(ctx context.Context, name string, detailID *string, granu
 
 	if *paginate {
 		paginateOpts := append(opts, asc.WithGCMatchmakingMetricsLimit(200))
-		firstPage, err := fetch(requestCtx, id, paginateOpts...)
+		firstPage, err := fetch(client, requestCtx, id, paginateOpts...)
 		if err != nil {
 			return fmt.Errorf("game-center details metrics %s: failed to fetch: %w", name, err)
 		}
 
 		resp, err := asc.PaginateAll(requestCtx, firstPage, func(ctx context.Context, nextURL string) (asc.PaginatedResponse, error) {
-			return fetch(ctx, id, asc.WithGCMatchmakingMetricsNextURL(nextURL))
+			return fetch(client, ctx, id, asc.WithGCMatchmakingMetricsNextURL(nextURL))
 		})
 		if err != nil {
 			return fmt.Errorf("game-center details metrics %s: %w", name, err)
@@ -1205,7 +1184,7 @@ func runDetailsMetrics(ctx context.Context, name string, detailID *string, granu
 		return shared.PrintOutput(resp, *output, *pretty)
 	}
 
-	resp, err := fetch(requestCtx, id, opts...)
+	resp, err := fetch(client, requestCtx, id, opts...)
 	if err != nil {
 		return fmt.Errorf("game-center details metrics %s: failed to fetch: %w", name, err)
 	}

@@ -25,7 +25,7 @@ func GameCenterLeaderboardSetMembersCommand() *ffcli.Command {
 
 Examples:
   asc game-center leaderboard-sets members list --set-id "SET_ID"
-  asc game-center leaderboard-sets members set --set-id "SET_ID" --leaderboard-ids "id1,id2,id3"`,
+  asc game-center leaderboard-sets members set --set-id "SET_ID" --leaderboard-ids "id1,id2,id3" --confirm`,
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
 		Subcommands: []*ffcli.Command{
@@ -42,7 +42,7 @@ Examples:
 func GameCenterLeaderboardSetMembersListCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("list", flag.ExitOnError)
 
-	setID := fs.String("set-id", "", "Game Center leaderboard set ID")
+	setID := shared.BindResourceIDFlag(fs, "set-id", "gameCenterLeaderboardSets", "Game Center leaderboard set ID")
 	limit := fs.Int("limit", 0, "Maximum results per page (1-200)")
 	next := fs.String("next", "", "Fetch next page using a links.next URL")
 	paginate := fs.Bool("paginate", false, "Automatically fetch all pages (aggregate results)")
@@ -62,16 +62,16 @@ Examples:
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
 			if *limit != 0 && (*limit < 1 || *limit > 200) {
-				return fmt.Errorf("game-center leaderboard-sets members list: --limit must be between 1 and 200")
+				return shared.UsageError("game-center leaderboard-sets members list: --limit must be between 1 and 200")
 			}
 			if err := shared.ValidateNextURL(*next); err != nil {
-				return fmt.Errorf("game-center leaderboard-sets members list: %w", err)
+				return shared.UsageErrorf("game-center leaderboard-sets members list: %v", err)
 			}
 
 			id := strings.TrimSpace(*setID)
 			if id == "" && strings.TrimSpace(*next) == "" {
 				fmt.Fprintln(os.Stderr, "Error: --set-id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--set-id")
 			}
 
 			client, err := shared.GetASCClient()
@@ -118,32 +118,49 @@ Examples:
 func GameCenterLeaderboardSetMembersSetCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("set", flag.ExitOnError)
 
-	setID := fs.String("set-id", "", "Game Center leaderboard set ID")
-	leaderboardIDs := fs.String("leaderboard-ids", "", "Comma-separated list of leaderboard IDs to set as members")
+	setID := shared.BindResourceIDFlag(fs, "set-id", "gameCenterLeaderboardSets", "Game Center leaderboard set ID")
+	leaderboardIDs := shared.BindOnceCSVFlag(fs, "leaderboard-ids", "Comma-separated list of leaderboard IDs to set as members")
+	confirm := fs.Bool("confirm", false, "Confirm replacing all members (required)")
 	output := shared.BindOutputFlags(fs)
 
 	return &ffcli.Command{
 		Name:       "set",
-		ShortUsage: "asc game-center leaderboard-sets members set --set-id \"SET_ID\" --leaderboard-ids \"id1,id2,id3\"",
+		ShortUsage: "asc game-center leaderboard-sets members set --set-id \"SET_ID\" --leaderboard-ids \"id1,id2,id3\" --confirm",
 		ShortHelp:  "Replace all leaderboard members in a leaderboard set.",
 		LongHelp: `Replace all leaderboard members in a leaderboard set.
 
 This command replaces ALL members of a leaderboard set with the specified leaderboard IDs.
-To remove all members, pass an empty string for --leaderboard-ids.
+Because replacement can remove existing members, --confirm is required.
+To remove all members, pass an empty string for --leaderboard-ids with --confirm.
 
 Examples:
-  asc game-center leaderboard-sets members set --set-id "SET_ID" --leaderboard-ids "id1,id2,id3"
-  asc game-center leaderboard-sets members set --set-id "SET_ID" --leaderboard-ids ""`,
+  asc game-center leaderboard-sets members set --set-id "SET_ID" --leaderboard-ids "id1,id2,id3" --confirm
+  asc game-center leaderboard-sets members set --set-id "SET_ID" --leaderboard-ids "" --confirm`,
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
 			id := strings.TrimSpace(*setID)
 			if id == "" {
 				fmt.Fprintln(os.Stderr, "Error: --set-id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--set-id")
 			}
 
-			ids := shared.SplitUniqueCSV(*leaderboardIDs)
+			leaderboardIDsProvided := false
+			fs.Visit(func(flag *flag.Flag) {
+				if flag.Name == "leaderboard-ids" {
+					leaderboardIDsProvided = true
+				}
+			})
+			if !leaderboardIDsProvided {
+				fmt.Fprintln(os.Stderr, "Error: --leaderboard-ids is required")
+				return shared.MissingRequiredUsageError("--leaderboard-ids")
+			}
+
+			if err := validateGameCenterReplacementConfirm(fs, *confirm); err != nil {
+				return err
+			}
+
+			ids := shared.SplitUniqueCSV(leaderboardIDs.String())
 
 			client, err := shared.GetASCClient()
 			if err != nil {

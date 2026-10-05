@@ -33,7 +33,7 @@ type supportedLocalesResult struct {
 func LocalizationsSupportedLocalesCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("supported-locales", flag.ExitOnError)
 
-	versionID := fs.String("version", "", "App Store version ID (required)")
+	versionID := shared.BindResourceIDFlag(fs, "version", "appStoreVersions", "App Store version ID (required)")
 	output := shared.BindOutputFlags(fs)
 
 	return &ffcli.Command{
@@ -55,7 +55,7 @@ Examples:
 			vid := strings.TrimSpace(*versionID)
 			if vid == "" {
 				fmt.Fprintln(os.Stderr, "Error: --version is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--version")
 			}
 
 			client, err := shared.GetASCClient()

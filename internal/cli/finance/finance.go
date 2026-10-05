@@ -106,19 +106,19 @@ Examples:
 			vendorNumber := shared.ResolveVendorNumber(*vendor)
 			if vendorNumber == "" {
 				fmt.Fprintln(os.Stderr, "Error: --vendor is required (or set ASC_VENDOR_NUMBER)")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--vendor")
 			}
 			if strings.TrimSpace(*reportType) == "" {
 				fmt.Fprintln(os.Stderr, "Error: --report-type is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--report-type")
 			}
 			if strings.TrimSpace(*region) == "" {
 				fmt.Fprintln(os.Stderr, "Error: --region is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--region")
 			}
 			if strings.TrimSpace(*date) == "" {
 				fmt.Fprintln(os.Stderr, "Error: --date is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--date")
 			}
 
 			normalizedReportType, err := normalizeFinanceReportType(*reportType)
@@ -141,7 +141,7 @@ Examples:
 				return fmt.Errorf("finance reports: %w", err)
 			}
 
-			requestCtx, cancel := shared.ContextWithTimeout(ctx)
+			requestCtx, cancel := shared.ContextWithDownloadTimeout(ctx)
 			defer cancel()
 
 			download, err := client.DownloadFinanceReport(requestCtx, asc.FinanceReportParams{

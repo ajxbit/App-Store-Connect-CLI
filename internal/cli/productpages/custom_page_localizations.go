@@ -51,7 +51,7 @@ Examples:
 func CustomPageLocalizationsListCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("custom-page-localizations list", flag.ExitOnError)
 
-	versionID := fs.String("custom-page-version-id", "", "Custom product page version ID")
+	versionID := shared.BindResourceIDFlag(fs, "custom-page-version-id", "appCustomProductPageVersions", "Custom product page version ID")
 	limit := fs.Int("limit", 0, "Maximum results per page (1-200)")
 	next := fs.String("next", "", "Fetch next page using a links.next URL")
 	paginate := fs.Bool("paginate", false, "Automatically fetch all pages (aggregate results)")
@@ -70,16 +70,16 @@ Examples:
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
 			if *limit != 0 && (*limit < 1 || *limit > productPagesMaxLimit) {
-				return fmt.Errorf("custom-pages localizations list: --limit must be between 1 and %d", productPagesMaxLimit)
+				return shared.UsageErrorf("custom-pages localizations list: --limit must be between 1 and %d", productPagesMaxLimit)
 			}
 			if err := shared.ValidateNextURL(*next); err != nil {
-				return fmt.Errorf("custom-pages localizations list: %w", err)
+				return shared.UsageErrorf("custom-pages localizations list: %v", err)
 			}
 
 			trimmedID := strings.TrimSpace(*versionID)
 			if trimmedID == "" {
 				fmt.Fprintln(os.Stderr, "Error: --custom-page-version-id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--custom-page-version-id")
 			}
 
 			client, err := shared.GetASCClient()
@@ -124,31 +124,31 @@ Examples:
 
 // CustomPageLocalizationsGetCommand returns the custom page localizations get subcommand.
 func CustomPageLocalizationsGetCommand() *ffcli.Command {
-	fs := flag.NewFlagSet("custom-page-localizations get", flag.ExitOnError)
+	fs := flag.NewFlagSet("custom-page-localizations view", flag.ExitOnError)
 
-	localizationID := fs.String("localization-id", "", "Custom product page localization ID")
+	localizationID := shared.BindResourceIDFlag(fs, "localization-id", "appCustomProductPageLocalizations", "Custom product page localization ID")
 	output := shared.BindOutputFlags(fs)
 
 	return &ffcli.Command{
-		Name:       "get",
-		ShortUsage: "asc product-pages custom-pages localizations get --localization-id \"LOCALIZATION_ID\"",
-		ShortHelp:  "Get a custom product page localization by ID.",
-		LongHelp: `Get a custom product page localization by ID.
+		Name:       "view",
+		ShortUsage: "asc product-pages custom-pages localizations view --localization-id \"LOCALIZATION_ID\"",
+		ShortHelp:  "View a custom product page localization by ID.",
+		LongHelp: `View a custom product page localization by ID.
 
 Examples:
-  asc product-pages custom-pages localizations get --localization-id "LOCALIZATION_ID"`,
+  asc product-pages custom-pages localizations view --localization-id "LOCALIZATION_ID"`,
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
 			trimmedID := strings.TrimSpace(*localizationID)
 			if trimmedID == "" {
 				fmt.Fprintln(os.Stderr, "Error: --localization-id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--localization-id")
 			}
 
 			client, err := shared.GetASCClient()
 			if err != nil {
-				return fmt.Errorf("custom-pages localizations get: %w", err)
+				return fmt.Errorf("custom-pages localizations view: %w", err)
 			}
 
 			requestCtx, cancel := shared.ContextWithTimeout(ctx)
@@ -156,7 +156,7 @@ Examples:
 
 			resp, err := client.GetAppCustomProductPageLocalization(requestCtx, trimmedID)
 			if err != nil {
-				return fmt.Errorf("custom-pages localizations get: failed to fetch: %w", err)
+				return fmt.Errorf("custom-pages localizations view: failed to fetch: %w", err)
 			}
 
 			return shared.PrintOutput(resp, *output.Output, *output.Pretty)
@@ -168,7 +168,7 @@ Examples:
 func CustomPageLocalizationsCreateCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("custom-page-localizations create", flag.ExitOnError)
 
-	versionID := fs.String("custom-page-version-id", "", "Custom product page version ID")
+	versionID := shared.BindResourceIDFlag(fs, "custom-page-version-id", "appCustomProductPageVersions", "Custom product page version ID")
 	locale := fs.String("locale", "", "Localization locale (e.g., en-US)")
 	promotionalText := fs.String("promotional-text", "", "Promotional text")
 	output := shared.BindOutputFlags(fs)
@@ -188,13 +188,13 @@ Examples:
 			trimmedID := strings.TrimSpace(*versionID)
 			if trimmedID == "" {
 				fmt.Fprintln(os.Stderr, "Error: --custom-page-version-id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--custom-page-version-id")
 			}
 
 			localeValue := strings.TrimSpace(*locale)
 			if localeValue == "" {
 				fmt.Fprintln(os.Stderr, "Error: --locale is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--locale")
 			}
 
 			client, err := shared.GetASCClient()
@@ -219,7 +219,7 @@ Examples:
 func CustomPageLocalizationsUpdateCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("custom-page-localizations update", flag.ExitOnError)
 
-	localizationID := fs.String("localization-id", "", "Custom product page localization ID")
+	localizationID := shared.BindResourceIDFlag(fs, "localization-id", "appCustomProductPageLocalizations", "Custom product page localization ID")
 	promotionalText := fs.String("promotional-text", "", "Update promotional text")
 	output := shared.BindOutputFlags(fs)
 
@@ -237,13 +237,13 @@ Examples:
 			trimmedID := strings.TrimSpace(*localizationID)
 			if trimmedID == "" {
 				fmt.Fprintln(os.Stderr, "Error: --localization-id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--localization-id")
 			}
 
 			promoValue := strings.TrimSpace(*promotionalText)
 			if promoValue == "" {
 				fmt.Fprintln(os.Stderr, "Error: --promotional-text is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--promotional-text")
 			}
 
 			attrs := asc.AppCustomProductPageLocalizationUpdateAttributes{
@@ -272,7 +272,7 @@ Examples:
 func CustomPageLocalizationsDeleteCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("custom-page-localizations delete", flag.ExitOnError)
 
-	localizationID := fs.String("localization-id", "", "Custom product page localization ID")
+	localizationID := shared.BindResourceIDFlag(fs, "localization-id", "appCustomProductPageLocalizations", "Custom product page localization ID")
 	confirm := fs.Bool("confirm", false, "Confirm deletion")
 	output := shared.BindOutputFlags(fs)
 
@@ -290,11 +290,11 @@ Examples:
 			trimmedID := strings.TrimSpace(*localizationID)
 			if trimmedID == "" {
 				fmt.Fprintln(os.Stderr, "Error: --localization-id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--localization-id")
 			}
 			if !*confirm {
 				fmt.Fprintln(os.Stderr, "Error: --confirm is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--confirm")
 			}
 
 			client, err := shared.GetASCClient()

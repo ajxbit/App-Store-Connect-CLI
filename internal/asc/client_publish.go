@@ -2,10 +2,27 @@ package asc
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
 )
+
+type buildProcessingFailure struct {
+	build *BuildResponse
+	state string
+}
+
+func (e *buildProcessingFailure) Error() string {
+	return fmt.Sprintf("build processing failed: %s", e.state)
+}
+
+// IsBuildProcessingFailure reports whether err is WaitForBuildProcessing
+// stopping at a FAILED or INVALID processing state.
+func IsBuildProcessingFailure(err error) bool {
+	var processingFailure *buildProcessingFailure
+	return errors.As(err, &processingFailure)
+}
 
 // WaitForBuildProcessing polls a build until processing completes.
 func (c *Client) WaitForBuildProcessing(ctx context.Context, buildID string, pollInterval time.Duration) (*BuildResponse, error) {
@@ -17,7 +34,7 @@ func (c *Client) WaitForBuildProcessing(ctx context.Context, buildID string, pol
 		pollInterval = 30 * time.Second
 	}
 
-	return PollUntil(ctx, pollInterval, func(ctx context.Context) (*BuildResponse, bool, error) {
+	build, err := PollUntilTolerant(ctx, pollInterval, func(ctx context.Context) (*BuildResponse, bool, error) {
 		build, err := c.GetBuild(ctx, buildID)
 		if err != nil {
 			return nil, false, err
@@ -28,12 +45,17 @@ func (c *Client) WaitForBuildProcessing(ctx context.Context, buildID string, pol
 		case BuildProcessingStateValid:
 			return build, true, nil
 		case BuildProcessingStateFailed:
-			return nil, false, fmt.Errorf("build processing failed: %s", state)
+			return nil, false, &buildProcessingFailure{build: build, state: state}
 		case BuildProcessingStateInvalid:
-			return nil, false, fmt.Errorf("build processing failed: %s", state)
+			return nil, false, &buildProcessingFailure{build: build, state: state}
 		}
 		return nil, false, nil
-	})
+	}, PollOptions{Tolerate: IsTransientWaitError})
+	var processingFailure *buildProcessingFailure
+	if errors.As(err, &processingFailure) {
+		return processingFailure.build, err
+	}
+	return build, err
 }
 
 // FindOrCreateAppStoreVersion finds an existing app store version or creates one.
@@ -45,7 +67,8 @@ func (c *Client) FindOrCreateAppStoreVersion(ctx context.Context, appID, version
 		return nil, fmt.Errorf("app ID, version, and platform are required")
 	}
 
-	versions, err := c.GetAppStoreVersions(ctx, appID,
+	versions, err := c.GetAppStoreVersions(
+		ctx, appID,
 		WithAppStoreVersionsVersionStrings([]string{version}),
 		WithAppStoreVersionsPlatforms([]string{platformValue}),
 		WithAppStoreVersionsLimit(10),

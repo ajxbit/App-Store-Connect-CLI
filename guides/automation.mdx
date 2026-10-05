@@ -113,12 +113,27 @@ asc workflow validate
 * Passed via command line: `KEY:VALUE`
 * Override workflow environment
 
-Precedence (highest to lowest):
+Precedence for steps in the workflow you invoked (highest to lowest):
 
 1. Runtime parameters
 2. Workflow `env`
 3. Global `env`
 4. System environment
+
+Precedence for steps inside a called sub-workflow (highest to lowest):
+
+1. The calling step's `with`
+2. Runtime parameters
+3. Calling workflow's `env`
+4. Global `env`
+5. Called workflow's own `env`
+6. System environment
+
+A sub-workflow's own `env` is the lowest-priority map in its own scope, so it
+provides defaults the caller overrides. The calling step's `with` is the only
+source that outranks runtime parameters: a key hardcoded there cannot be
+overridden with `KEY:VALUE`. `with` values are literal — only
+`${steps.NAME.OUTPUT}` references are interpolated.
 
 ### Hooks
 
@@ -155,17 +170,32 @@ Execute shell commands:
 
 ### Conditional Steps
 
-Run only if a variable is set:
+`if` names a variable and runs the step only when that variable holds a truthy
+value: `1`, `true`, `yes`, `y`, or `on` (case-insensitive, surrounding
+whitespace ignored):
 
 ```json  theme={null}
 {
   "name": "optional_step",
-  "if": "BUILD_ID",
+  "if": "INSPECT_BUILD",
   "run": "asc builds info --build-id $BUILD_ID"
 }
 ```
 
-Skipped if `BUILD_ID` is empty or unset.
+Run it with `asc workflow run beta INSPECT_BUILD:true`. The variable is resolved
+from the workflow environment first (runtime parameters, `with`, workflow `env`,
+global `env`) and then from the process environment.
+
+Every other value is falsy, including an unset variable, an empty string, and
+any other non-empty value. `"if": "BUILD_ID"` with `BUILD_ID:abc123`, or
+`"if": "IPA_PATH"` with a path, always skips the step. Use `if` as a boolean
+feature flag, never as a "was this ID supplied?" check.
+
+<Warning>
+  A skipped step is not a failure: the run still reports `"status": "ok"` and
+  exits `0`, with `"status": "skipped"` on that entry in `steps[]`. A mutating
+  step gated on a non-boolean value never runs while CI stays green.
+</Warning>
 
 ### Sub-Workflow Steps
 
@@ -182,6 +212,38 @@ Call another workflow:
 
 The called workflow receives `EXTRA_VAR` in addition to its own environment.
 
+## Passing Data Between Steps
+
+Each step runs in its own shell, so a variable assigned inside one step is gone
+by the next one. `BUILD_ID=$(...)` in step 2 is **not** visible to step 3.
+
+To move a value forward, declare `outputs` on a step and reference them as
+`${steps.<step_name>.<OUTPUT_NAME>}`. The step must print JSON on stdout, so
+pass `--output json` to `asc` commands. Each output is a JSON path rooted at
+`$.` and may only walk object keys (no array indexes):
+
+```json  theme={null}
+{
+  "steps": [
+    {
+      "name": "resolve_build",
+      "run": "asc builds info --app $APP_ID --latest --platform IOS --output json",
+      "outputs": {
+        "BUILD_ID": "$.data.id"
+      }
+    },
+    {
+      "name": "distribute",
+      "run": "asc builds add-groups --build-id ${steps.resolve_build.BUILD_ID} --group \"$GROUP_NAME\""
+    }
+  ]
+}
+```
+
+Interpolated values are shell-quoted, and numbers keep the exact form the
+command emitted (a build number of `42` stays `42`). Declared outputs are also
+persisted in the run-state file, so never map a secret into `outputs`.
+
 ## Complete Workflow Examples
 
 ### Beta Distribution Workflow
@@ -195,7 +257,8 @@ The called workflow receives `EXTRA_VAR` in addition to its own environment.
     "beta": {
       "description": "Distribute latest build to TestFlight beta group",
       "env": {
-        "GROUP_NAME": "External Beta"
+        "GROUP_NAME": "External Beta",
+        "DISTRIBUTE": "false"
       },
       "steps": [
         {
@@ -203,29 +266,26 @@ The called workflow receives `EXTRA_VAR` in addition to its own environment.
           "run": "asc auth status"
         },
         {
-          "name": "get_latest_build",
-          "run": "asc builds list --app $APP_ID --sort -uploadedDate --limit 1 --output json > /tmp/latest_build.json"
-        },
-        {
-          "name": "extract_build_id",
-          "run": "BUILD_ID=$(jq -r '.data[0].id' /tmp/latest_build.json) && echo BUILD_ID=$BUILD_ID"
-        },
-        {
-          "name": "get_beta_group",
-          "run": "asc testflight groups list --app $APP_ID --output json > /tmp/groups.json"
-        },
-        {
-          "name": "extract_group_id",
-          "run": "GROUP_ID=$(jq -r '.data[] | select(.attributes.name == \"'$GROUP_NAME'\") | .id' /tmp/groups.json) && echo GROUP_ID=$GROUP_ID"
+          "name": "resolve_build",
+          "run": "asc builds info --app $APP_ID --latest --platform IOS --output json",
+          "outputs": {
+            "BUILD_ID": "$.data.id"
+          }
         },
         {
           "name": "add_build_to_group",
-          "if": "BUILD_ID",
-          "run": "asc builds add-groups --build-id $BUILD_ID --group $GROUP_ID"
+          "if": "DISTRIBUTE",
+          "run": "asc builds add-groups --build-id ${steps.resolve_build.BUILD_ID} --group \"$GROUP_NAME\"",
+          "retry": {
+            "max_attempts": 6,
+            "delay": "10s"
+          },
+          "timeout": "2m"
         },
         {
           "name": "notify_success",
-          "run": "echo Build distributed to $GROUP_NAME"
+          "if": "DISTRIBUTE",
+          "run": "echo Build ${steps.resolve_build.BUILD_ID} distributed to $GROUP_NAME"
         }
       ]
     }
@@ -234,6 +294,12 @@ The called workflow receives `EXTRA_VAR` in addition to its own environment.
 ```
 
 Run with:
+
+```bash  theme={null}
+asc workflow run beta DISTRIBUTE:true
+```
+
+Leave `DISTRIBUTE` off to resolve the latest build without touching the group:
 
 ```bash  theme={null}
 asc workflow run beta
@@ -246,7 +312,8 @@ asc workflow run beta
   "env": {
     "APP_ID": "123456789",
     "IPA_PATH": "./build/MyApp.ipa",
-    "PLATFORM": "IOS"
+    "PLATFORM": "IOS",
+    "SUBMIT": "false"
   },
   "before_all": "echo Starting submission workflow",
   "after_all": "echo Submission complete!",
@@ -260,8 +327,12 @@ asc workflow run beta
           "run": "asc localizations list --version $VERSION_ID --output json | jq -e '.data | length > 0'"
         },
         {
+          "name": "ensure_ipa",
+          "run": "test -f \"$IPA_PATH\""
+        },
+        {
           "name": "publish_release",
-          "if": "IPA_PATH",
+          "if": "SUBMIT",
           "run": "asc publish appstore --app $APP_ID --ipa $IPA_PATH --version $VERSION --submit --confirm"
         },
         {
@@ -277,6 +348,15 @@ asc workflow run beta
 Run with:
 
 ```bash  theme={null}
+asc workflow run release SUBMIT:true VERSION:1.0.0 VERSION_ID:abc123
+```
+
+`SUBMIT:true` is what makes `publish_release` execute. Gating it on `IPA_PATH`
+instead would skip the submission on every run, because `./build/MyApp.ipa` is
+not a truthy value. Presence of the file belongs in a real check such as the
+`ensure_ipa` step above. Drop `SUBMIT:true` for a metadata-only dry pass:
+
+```bash  theme={null}
 asc workflow run release VERSION:1.0.0 VERSION_ID:abc123
 ```
 
@@ -286,7 +366,9 @@ asc workflow run release VERSION:1.0.0 VERSION_ID:abc123
 {
   "env": {
     "APP_ID": "123456789",
-    "PLATFORM": "IOS"
+    "PLATFORM": "IOS",
+    "IPA_PATH": "./build/MyApp.ipa",
+    "SUBMIT": "false"
   },
   "before_all": "git fetch --tags && git status",
   "after_all": "echo Release workflow complete!",
@@ -315,11 +397,10 @@ asc workflow run release VERSION:1.0.0 VERSION_ID:abc123
       "steps": [
         {
           "name": "create_version",
-          "run": "asc versions create --app $APP_ID --version $VERSION --platform $PLATFORM"
-        },
-        {
-          "name": "get_version_id",
-          "run": "VERSION_ID=$(asc versions list --app $APP_ID --output json | jq -r '.data[] | select(.attributes.versionString == \"'$VERSION'\") | .id') && echo VERSION_ID=$VERSION_ID"
+          "run": "asc versions create --app $APP_ID --version $VERSION --platform $PLATFORM --output json",
+          "outputs": {
+            "VERSION_ID": "$.id"
+          }
         }
       ]
     },
@@ -329,11 +410,11 @@ asc workflow run release VERSION:1.0.0 VERSION_ID:abc123
       "steps": [
         {
           "name": "update_en_US",
-          "run": "asc localizations update --version $VERSION_ID --locale en-US --description \"$(cat metadata/en-US/description.txt)\" --keywords \"$(cat metadata/en-US/keywords.txt)\" --whats-new \"$(cat metadata/en-US/whats-new.txt)\""
+          "run": "asc localizations update --version ${steps.create_version.VERSION_ID} --locale en-US --description \"$(cat metadata/en-US/description.txt)\" --keywords \"$(cat metadata/en-US/keywords.txt)\" --whats-new \"$(cat metadata/en-US/whats-new.txt)\""
         },
         {
           "name": "update_es_ES",
-          "run": "asc localizations update --version $VERSION_ID --locale es-ES --description \"$(cat metadata/es-ES/description.txt)\" --keywords \"$(cat metadata/es-ES/keywords.txt)\" --whats-new \"$(cat metadata/es-ES/whats-new.txt)\""
+          "run": "asc localizations update --version ${steps.create_version.VERSION_ID} --locale es-ES --description \"$(cat metadata/es-ES/description.txt)\" --keywords \"$(cat metadata/es-ES/keywords.txt)\" --whats-new \"$(cat metadata/es-ES/whats-new.txt)\""
         }
       ]
     },
@@ -342,16 +423,12 @@ asc workflow run release VERSION:1.0.0 VERSION_ID:abc123
       "description": "Upload screenshots",
       "steps": [
         {
-          "name": "get_en_localization",
-          "run": "EN_LOC=$(asc localizations list --version $VERSION_ID --output json | jq -r '.data[] | select(.attributes.locale == \"en-US\") | .id') && echo EN_LOC=$EN_LOC"
-        },
-        {
           "name": "upload_iphone",
-          "run": "asc screenshots upload --version-localization $EN_LOC --path screenshots/en-US/iphone --device-type IPHONE_65"
+          "run": "asc screenshots upload --app $APP_ID --version-id ${steps.create_version.VERSION_ID} --path screenshots --device-type IPHONE_65"
         },
         {
           "name": "upload_ipad",
-          "run": "asc screenshots upload --version-localization $EN_LOC --path screenshots/en-US/ipad --device-type IPAD_PRO_3GEN_129"
+          "run": "asc screenshots upload --app $APP_ID --version-id ${steps.create_version.VERSION_ID} --path screenshots --device-type IPAD_PRO_3GEN_129"
         }
       ]
     },
@@ -365,6 +442,7 @@ asc workflow run release VERSION:1.0.0 VERSION_ID:abc123
         },
         {
           "name": "publish_appstore",
+          "if": "SUBMIT",
           "run": "asc publish appstore --app $APP_ID --ipa $IPA_PATH --version $VERSION --submit --confirm"
         }
       ]
@@ -376,8 +454,13 @@ asc workflow run release VERSION:1.0.0 VERSION_ID:abc123
 Run with:
 
 ```bash  theme={null}
-asc workflow run release VERSION:2.0.0
+asc workflow run release SUBMIT:true VERSION:2.0.0
 ```
+
+`create_version` declares `VERSION_ID` once, and every later sub-workflow reads
+it as `${steps.create_version.VERSION_ID}`. Step names that declare `outputs`
+must stay unique across workflows that can run together, which is why the
+producer is named once and referenced everywhere else.
 
 ## CI/CD Integration
 
@@ -401,7 +484,7 @@ jobs:
       
       - name: Install asc CLI
         run: |
-          curl -fsSL https://raw.githubusercontent.com/rudrankriyam/App-Store-Connect-CLI/main/install.sh | bash
+          curl -fsSL https://raw.githubusercontent.com/rorkai/App-Store-Connect-CLI/main/install.sh | bash
       
       - name: Configure credentials
         env:
@@ -413,8 +496,10 @@ jobs:
           echo "Credentials configured"
       
       - name: Run release workflow
+        env:
+          VERSION: ${{ github.event.inputs.version }}
         run: |
-          asc workflow run release VERSION:${{ github.event.inputs.version }}
+          asc workflow run release "VERSION:$VERSION"
       
       - name: Upload workflow output
         uses: actions/upload-artifact@v3
@@ -434,7 +519,7 @@ release:production:
   tags:
     - linux
   script:
-    - curl -fsSL https://raw.githubusercontent.com/rudrankriyam/App-Store-Connect-CLI/main/install.sh | bash
+    - curl -fsSL https://raw.githubusercontent.com/rorkai/App-Store-Connect-CLI/main/install.sh | bash
     - asc workflow run release VERSION:$VERSION
   variables:
     VERSION: "1.0.0"
@@ -542,7 +627,16 @@ asc workflow run beta --pretty
   * Avoid hardcoding secrets—use environment variables
   * In CI/CD, use encrypted secrets for credentials
   * Don't run untrusted workflows on PRs with access to secrets
+  * Set `ASC_READ_ONLY=1` for audit, reporting, and agent sessions that must never write
 </Warning>
+
+### Read-only runs
+
+Export `ASC_READ_ONLY=1` (or pass the global `--read-only` flag) when a workflow, CI job, or agent session is only allowed to inspect App Store Connect. Every command still runs, but any `POST`, `PATCH`, `PUT`, or `DELETE` is refused before it leaves the process with exit code `6`. This is enforced in the HTTP clients, not per command, so it holds for every command in the workflow, and workflow steps inherit the mode as `ASC_READ_ONLY=1` so a nested `asc` call is refused too. Steps that call other tools are outside the guarantee. See [Read-only mode](/concepts/read-only-mode).
+
+```bash  theme={null}
+ASC_READ_ONLY=1 asc workflow run audit
+```
 
 ### Safe Practices
 

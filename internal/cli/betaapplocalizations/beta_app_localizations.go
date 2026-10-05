@@ -76,7 +76,7 @@ Examples:
 			resolvedAppID := shared.ResolveAppID(*appID)
 			if resolvedAppID == "" && strings.TrimSpace(*next) == "" {
 				fmt.Fprintf(os.Stderr, "Error: --app is required (or set ASC_APP_ID)\n\n")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--app")
 			}
 
 			locales := shared.SplitCSV(*locale)
@@ -131,31 +131,31 @@ Examples:
 
 // BetaAppLocalizationsGetCommand returns the get subcommand.
 func BetaAppLocalizationsGetCommand() *ffcli.Command {
-	fs := flag.NewFlagSet("get", flag.ExitOnError)
+	fs := flag.NewFlagSet("view", flag.ExitOnError)
 
-	id := fs.String("id", "", "Beta app localization ID")
+	id := shared.BindResourceIDFlag(fs, "id", "betaAppLocalizations", "Beta app localization ID")
 	output := shared.BindOutputFlags(fs)
 
 	return &ffcli.Command{
-		Name:       "get",
-		ShortUsage: "asc beta-app-localizations get --id \"LOCALIZATION_ID\"",
-		ShortHelp:  "Get a beta app localization by ID.",
-		LongHelp: `Get a beta app localization by ID.
+		Name:       "view",
+		ShortUsage: "asc beta-app-localizations view --id \"LOCALIZATION_ID\"",
+		ShortHelp:  "View a beta app localization by ID.",
+		LongHelp: `View a beta app localization by ID.
 
 Examples:
-  asc beta-app-localizations get --id "LOCALIZATION_ID"`,
+  asc beta-app-localizations view --id "LOCALIZATION_ID"`,
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
 			idValue := strings.TrimSpace(*id)
 			if idValue == "" {
 				fmt.Fprintln(os.Stderr, "Error: --id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--id")
 			}
 
 			client, err := shared.GetASCClient()
 			if err != nil {
-				return fmt.Errorf("beta-app-localizations get: %w", err)
+				return fmt.Errorf("beta-app-localizations view: %w", err)
 			}
 
 			requestCtx, cancel := shared.ContextWithTimeout(ctx)
@@ -163,7 +163,7 @@ Examples:
 
 			resp, err := client.GetBetaAppLocalization(requestCtx, idValue)
 			if err != nil {
-				return fmt.Errorf("beta-app-localizations get: failed to fetch: %w", err)
+				return fmt.Errorf("beta-app-localizations view: failed to fetch: %w", err)
 			}
 
 			return shared.PrintOutput(resp, *output.Output, *output.Pretty)
@@ -199,13 +199,13 @@ Examples:
 			resolvedAppID := shared.ResolveAppID(*appID)
 			if resolvedAppID == "" {
 				fmt.Fprintf(os.Stderr, "Error: --app is required (or set ASC_APP_ID)\n\n")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--app")
 			}
 
 			localeValue := strings.TrimSpace(*locale)
 			if localeValue == "" {
 				fmt.Fprintln(os.Stderr, "Error: --locale is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--locale")
 			}
 			if err := shared.ValidateBuildLocalizationLocale(localeValue); err != nil {
 				return fmt.Errorf("beta-app-localizations create: %w", err)
@@ -253,7 +253,7 @@ Examples:
 func BetaAppLocalizationsUpdateCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("update", flag.ExitOnError)
 
-	id := fs.String("id", "", "Beta app localization ID")
+	id := shared.BindResourceIDFlag(fs, "id", "betaAppLocalizations", "Beta app localization ID")
 	description := fs.String("description", "", "Beta app description")
 	feedbackEmail := fs.String("feedback-email", "", "Feedback email")
 	marketingURL := fs.String("marketing-url", "", "Marketing URL")
@@ -276,7 +276,7 @@ Examples:
 			idValue := strings.TrimSpace(*id)
 			if idValue == "" {
 				fmt.Fprintln(os.Stderr, "Error: --id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--id")
 			}
 
 			visited := map[string]bool{}
@@ -291,7 +291,7 @@ Examples:
 				visited["tv-os-privacy-policy"]
 			if !hasUpdates {
 				fmt.Fprintln(os.Stderr, "Error: at least one update flag is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("")
 			}
 
 			attrs := asc.BetaAppLocalizationUpdateAttributes{}
@@ -338,7 +338,7 @@ Examples:
 func BetaAppLocalizationsDeleteCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("delete", flag.ExitOnError)
 
-	id := fs.String("id", "", "Beta app localization ID")
+	id := shared.BindResourceIDFlag(fs, "id", "betaAppLocalizations", "Beta app localization ID")
 	confirm := fs.Bool("confirm", false, "Confirm deletion")
 	output := shared.BindOutputFlags(fs)
 
@@ -356,11 +356,11 @@ Examples:
 			idValue := strings.TrimSpace(*id)
 			if idValue == "" {
 				fmt.Fprintln(os.Stderr, "Error: --id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--id")
 			}
 			if !*confirm {
 				fmt.Fprintln(os.Stderr, "Error: --confirm is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--confirm")
 			}
 
 			client, err := shared.GetASCClient()

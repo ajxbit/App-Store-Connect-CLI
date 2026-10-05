@@ -11,6 +11,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	rootcmd "github.com/rudrankriyam/App-Store-Connect-CLI/cmd"
 )
 
 func writeWorkflowJSON(t *testing.T, dir, content string) string {
@@ -49,8 +51,14 @@ func TestWorkflow_ShowsHelp(t *testing.T) {
 	if !strings.Contains(stderr, "${steps.resolve_build.BUILD_ID}") {
 		t.Fatalf("expected help to document step output references, got %q", stderr)
 	}
+	if !strings.Contains(stderr, "Output-producing step names only need to stay unique across workflows that can execute together in the same run graph.") {
+		t.Fatalf("expected help to explain output-producing step name scoping, got %q", stderr)
+	}
 	if !strings.Contains(stderr, `"BUILD_ID": "$.data.id"`) {
 		t.Fatalf("expected help example to extract build IDs from $.data.id, got %q", stderr)
+	}
+	if !strings.Contains(stderr, `"max_attempts": 6`) || !strings.Contains(stderr, `"timeout": "2m"`) {
+		t.Fatalf("expected help to document bounded run-step retry and timeout, got %q", stderr)
 	}
 	if !strings.Contains(stderr, "WORKFLOWS.md") {
 		t.Fatalf("expected help to link workflow docs, got %q", stderr)
@@ -480,6 +488,9 @@ func TestWorkflowRun_Valid_WithJSONCComments(t *testing.T) {
 }
 
 func TestWorkflowValidate_ValidFile(t *testing.T) {
+	// Workflow validation is JSON-only even when the global default prefers tables.
+	t.Setenv("ASC_DEFAULT_OUTPUT", "table")
+
 	dir := t.TempDir()
 	path := writeWorkflowJSON(t, dir, `{
 		"workflows": {
@@ -505,6 +516,191 @@ func TestWorkflowValidate_ValidFile(t *testing.T) {
 	}
 	if result["valid"] != true {
 		t.Fatalf("expected valid=true, got %v", result["valid"])
+	}
+}
+
+func TestWorkflowValidate_ExplicitJSONOutput(t *testing.T) {
+	dir := t.TempDir()
+	path := writeWorkflowJSON(t, dir, `{
+		"workflows": {
+			"beta": {"steps": ["echo hello"]}
+		}
+	}`)
+
+	var code int
+	stdout, stderr := captureOutput(t, func() {
+		code = rootcmd.Run([]string{
+			"workflow", "validate",
+			"--file", path,
+			"--output", "json",
+		}, "1.2.3")
+	})
+
+	if code != rootcmd.ExitSuccess {
+		t.Fatalf("exit code = %d, want %d; stderr=%q", code, rootcmd.ExitSuccess, stderr)
+	}
+	if stderr != "" {
+		t.Fatalf("expected empty stderr, got %q", stderr)
+	}
+	if strings.Contains(stdout, "\n  ") {
+		t.Fatalf("expected minified JSON when stdout is piped, got %q", stdout)
+	}
+
+	var result struct {
+		Valid bool `json:"valid"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &result); err != nil {
+		t.Fatalf("expected JSON stdout, got %q: %v", stdout, err)
+	}
+	if !result.Valid {
+		t.Fatalf("expected valid=true, got %q", stdout)
+	}
+}
+
+func TestWorkflowValidate_HelpDocumentsJSONOutput(t *testing.T) {
+	var code int
+	stdout, stderr := captureOutput(t, func() {
+		code = rootcmd.Run([]string{"workflow", "validate", "--help"}, "1.2.3")
+	})
+
+	if code != rootcmd.ExitSuccess {
+		t.Fatalf("exit code = %d, want %d", code, rootcmd.ExitSuccess)
+	}
+	if stderr != "" {
+		t.Fatalf("expected empty stderr, got %q", stderr)
+	}
+	for _, want := range []string{
+		"--output",
+		"Output format: json",
+		"asc workflow validate --output json",
+	} {
+		if !strings.Contains(stdout, want) {
+			t.Fatalf("expected help to contain %q, got %q", want, stdout)
+		}
+	}
+}
+
+func TestWorkflowValidate_SearchDocumentsJSONOutput(t *testing.T) {
+	var code int
+	stdout, stderr := captureOutput(t, func() {
+		code = rootcmd.Run([]string{"search", "--output", "json", "workflow validate"}, "1.2.3")
+	})
+
+	if code != rootcmd.ExitSuccess {
+		t.Fatalf("exit code = %d, want %d; stderr=%q", code, rootcmd.ExitSuccess, stderr)
+	}
+	if stderr != "" {
+		t.Fatalf("expected empty stderr, got %q", stderr)
+	}
+
+	var result struct {
+		Results []struct {
+			Command  string   `json:"command"`
+			Examples []string `json:"examples"`
+		} `json:"results"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &result); err != nil {
+		t.Fatalf("expected JSON search output, got %q: %v", stdout, err)
+	}
+	for _, item := range result.Results {
+		if item.Command != "asc workflow validate" {
+			continue
+		}
+		for _, example := range item.Examples {
+			if example == "asc workflow validate --output json" {
+				return
+			}
+		}
+		t.Fatalf("workflow validate search result missing explicit JSON example: %#v", item.Examples)
+	}
+	t.Fatal("search result missing asc workflow validate")
+}
+
+func TestWorkflowValidate_UnsupportedOutputExitsWithUsageCode(t *testing.T) {
+	for _, format := range []string{"table", "markdown"} {
+		t.Run(format, func(t *testing.T) {
+			var code int
+			stdout, stderr := captureOutput(t, func() {
+				code = rootcmd.Run([]string{
+					"workflow", "validate",
+					"--file", "/definitely/missing/workflow.json",
+					"--output", format,
+				}, "1.2.3")
+			})
+
+			if code != rootcmd.ExitUsage {
+				t.Fatalf("exit code = %d, want %d", code, rootcmd.ExitUsage)
+			}
+			if stdout != "" {
+				t.Fatalf("expected empty stdout, got %q", stdout)
+			}
+			if !strings.Contains(stderr, `(got "`+format+`")`) {
+				t.Fatalf("expected standard output validation error, got %q", stderr)
+			}
+			if strings.Contains(stderr, "read workflow") {
+				t.Fatalf("expected output validation before file I/O, got %q", stderr)
+			}
+		})
+	}
+}
+
+func TestWorkflowValidate_InvalidWorkflowWithExplicitJSONExitsWithErrorCode(t *testing.T) {
+	dir := t.TempDir()
+	path := writeWorkflowJSON(t, dir, `{
+		"workflows": {
+			"beta": {"steps": []}
+		}
+	}`)
+
+	var code int
+	stdout, stderr := captureOutput(t, func() {
+		code = rootcmd.Run([]string{
+			"workflow", "validate",
+			"--output", "json",
+			"--file", path,
+		}, "1.2.3")
+	})
+
+	if code != rootcmd.ExitError {
+		t.Fatalf("exit code = %d, want %d; stderr=%q", code, rootcmd.ExitError, stderr)
+	}
+	if stderr != "" {
+		t.Fatalf("expected structured validation failure only on stdout, got stderr %q", stderr)
+	}
+
+	var result struct {
+		Valid  bool  `json:"valid"`
+		Errors []any `json:"errors"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &result); err != nil {
+		t.Fatalf("expected JSON stdout, got %q: %v", stdout, err)
+	}
+	if result.Valid || len(result.Errors) == 0 {
+		t.Fatalf("expected valid=false with errors, got %q", stdout)
+	}
+}
+
+func TestWorkflowValidate_MalformedWorkflowWithExplicitJSONExitsWithErrorCode(t *testing.T) {
+	dir := t.TempDir()
+	path := writeWorkflowJSON(t, dir, `{not valid json`)
+
+	var code int
+	stdout, stderr := captureOutput(t, func() {
+		code = rootcmd.Run([]string{
+			"workflow", "validate",
+			"--file", path,
+			"--output", "json",
+		}, "1.2.3")
+	})
+
+	if code != rootcmd.ExitError {
+		t.Fatalf("exit code = %d, want %d; stderr=%q", code, rootcmd.ExitError, stderr)
+	}
+	if stdout != "" {
+		t.Fatalf("expected empty stdout when the workflow cannot be parsed, got %q", stdout)
+	}
+	if !strings.Contains(stderr, "parse workflow JSON") {
+		t.Fatalf("expected workflow parse error on stderr, got %q", stderr)
 	}
 }
 
@@ -1622,7 +1818,7 @@ func TestWorkflowValidate_Pretty(t *testing.T) {
 	root.FlagSet.SetOutput(io.Discard)
 
 	stdout, _ := captureOutput(t, func() {
-		if err := root.Parse([]string{"workflow", "validate", "--pretty", "--file", path}); err != nil {
+		if err := root.Parse([]string{"workflow", "validate", "--output", "json", "--pretty", "--file", path}); err != nil {
 			t.Fatalf("parse error: %v", err)
 		}
 		if err := root.Run(context.Background()); err != nil {
@@ -1640,5 +1836,132 @@ func TestWorkflowValidate_Pretty(t *testing.T) {
 	}
 	if result["valid"] != true {
 		t.Fatalf("expected valid=true, got %v", result["valid"])
+	}
+}
+
+func TestWorkflowValidate_AllowsDuplicateOutputProducerNamesAcrossIndependentWorkflows(t *testing.T) {
+	dir := t.TempDir()
+	path := writeWorkflowJSON(t, dir, `{
+		"workflows": {
+			"testflight_beta": {
+				"steps": [
+					{
+						"name": "archive",
+						"run": "printf '{\"buildId\":\"beta\"}'",
+						"outputs": {
+							"BUILD_ID": "$.buildId"
+						}
+					}
+				]
+			},
+			"appstore_release": {
+				"steps": [
+					{
+						"name": "archive",
+						"run": "printf '{\"buildId\":\"release\"}'",
+						"outputs": {
+							"BUILD_ID": "$.buildId"
+						}
+					}
+				]
+			}
+		}
+	}`)
+
+	root := RootCommand("1.2.3")
+	root.FlagSet.SetOutput(io.Discard)
+
+	stdout, _ := captureOutput(t, func() {
+		if err := root.Parse([]string{"workflow", "validate", "--file", path}); err != nil {
+			t.Fatalf("parse error: %v", err)
+		}
+		if err := root.Run(context.Background()); err != nil {
+			t.Fatalf("run error: %v", err)
+		}
+	})
+
+	var result map[string]any
+	if err := json.Unmarshal([]byte(stdout), &result); err != nil {
+		t.Fatalf("expected valid JSON, got %q: %v", stdout, err)
+	}
+	if result["valid"] != true {
+		t.Fatalf("expected valid=true, got %v", result["valid"])
+	}
+}
+
+func TestWorkflowValidate_RejectsDuplicateOutputProducerNamesInSameRunGraph(t *testing.T) {
+	dir := t.TempDir()
+	path := writeWorkflowJSON(t, dir, `{
+		"workflows": {
+			"ship": {
+				"steps": [
+					{"workflow": "testflight_beta"},
+					{"workflow": "appstore_release"}
+				]
+			},
+			"testflight_beta": {
+				"steps": [
+					{
+						"name": "archive",
+						"run": "printf '{\"buildId\":\"beta\"}'",
+						"outputs": {
+							"BUILD_ID": "$.buildId"
+						}
+					}
+				]
+			},
+			"appstore_release": {
+				"steps": [
+					{
+						"name": "archive",
+						"run": "printf '{\"buildId\":\"release\"}'",
+						"outputs": {
+							"BUILD_ID": "$.buildId"
+						}
+					}
+				]
+			}
+		}
+	}`)
+
+	root := RootCommand("1.2.3")
+	root.FlagSet.SetOutput(io.Discard)
+
+	stdout, _ := captureOutput(t, func() {
+		if err := root.Parse([]string{"workflow", "validate", "--file", path}); err != nil {
+			t.Fatalf("parse error: %v", err)
+		}
+		err := root.Run(context.Background())
+		if err == nil {
+			t.Fatal("expected validation failure")
+		}
+		if _, ok := errors.AsType[ReportedError](err); !ok {
+			t.Fatalf("expected ReportedError, got %T: %v", err, err)
+		}
+	})
+
+	var result map[string]any
+	if err := json.Unmarshal([]byte(stdout), &result); err != nil {
+		t.Fatalf("expected valid JSON, got %q: %v", stdout, err)
+	}
+	if result["valid"] != false {
+		t.Fatalf("expected valid=false, got %v", result["valid"])
+	}
+	errs, ok := result["errors"].([]any)
+	if !ok || len(errs) == 0 {
+		t.Fatalf("expected validation errors, got %T: %v", result["errors"], result["errors"])
+	}
+	foundDuplicate := false
+	for _, entry := range errs {
+		errMap, ok := entry.(map[string]any)
+		if !ok {
+			t.Fatalf("expected error entry object, got %T: %v", entry, entry)
+		}
+		if errMap["code"] == "duplicate_output_producer_name" {
+			foundDuplicate = true
+		}
+	}
+	if !foundDuplicate {
+		t.Fatalf("expected duplicate_output_producer_name error, got %v", errs)
 	}
 }

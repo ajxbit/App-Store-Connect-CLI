@@ -4,6 +4,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"net/url"
 	"os"
 	"strings"
 
@@ -25,7 +26,7 @@ func PassTypeIDCertificatesCommand() *ffcli.Command {
 
 Examples:
   asc pass-type-ids certificates list --pass-type-id "PASS_ID"
-  asc pass-type-ids certificates get --pass-type-id "PASS_ID"`,
+  asc pass-type-ids certificates view --pass-type-id "PASS_ID"`,
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
 		Subcommands: []*ffcli.Command{
@@ -42,7 +43,7 @@ Examples:
 func PassTypeIDCertificatesListCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("list", flag.ExitOnError)
 
-	passTypeID := fs.String("pass-type-id", "", "Pass type ID")
+	passTypeID := shared.BindResourceIDFlag(fs, "pass-type-id", "passTypeIds", "Pass type ID (required unless --next is provided)")
 	displayName := fs.String("display-name", "", "Filter by display name(s), comma-separated")
 	certificateType := fs.String("certificate-type", "", "Filter by certificate type(s), comma-separated")
 	serialNumber := fs.String("serial-number", "", "Filter by serial number(s), comma-separated")
@@ -56,29 +57,42 @@ func PassTypeIDCertificatesListCommand() *ffcli.Command {
 
 	return &ffcli.Command{
 		Name:       "list",
-		ShortUsage: "asc pass-type-ids certificates list --pass-type-id \"PASS_ID\" [flags]",
+		ShortUsage: "asc pass-type-ids certificates list [--pass-type-id \"PASS_ID\"] [--next \"URL\"] [flags]",
 		ShortHelp:  "List certificates for a pass type ID.",
 		LongHelp: `List certificates for a pass type ID.
 
 Examples:
   asc pass-type-ids certificates list --pass-type-id "PASS_ID"
+  asc pass-type-ids certificates list --next "https://api.appstoreconnect.apple.com/v1/passTypeIds/PASS_ID/certificates?cursor=CURSOR"
   asc pass-type-ids certificates list --pass-type-id "PASS_ID" --paginate`,
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
 			passTypeIDValue := strings.TrimSpace(*passTypeID)
-			if passTypeIDValue == "" {
-				fmt.Fprintln(os.Stderr, "Error: --pass-type-id is required")
-				return flag.ErrHelp
-			}
 			if *limit != 0 && (*limit < 1 || *limit > 200) {
-				return fmt.Errorf("pass-type-ids certificates list: --limit must be between 1 and 200")
+				return shared.UsageError("pass-type-ids certificates list: --limit must be between 1 and 200")
 			}
 			if err := shared.ValidateNextURL(*next); err != nil {
-				return fmt.Errorf("pass-type-ids certificates list: %w", err)
+				return shared.UsageErrorf("pass-type-ids certificates list: %v", err)
+			}
+			if strings.TrimSpace(*next) != "" {
+				derivedID, err := passTypeIDFromCertificatesNextURL(*next, false)
+				if err != nil {
+					return shared.UsageErrorf("pass-type-ids certificates list: %v", err)
+				}
+				if passTypeIDValue != "" && passTypeIDValue != derivedID {
+					return shared.UsageError("pass-type-ids certificates list: --pass-type-id must match the pass type ID in --next")
+				}
+				if passTypeIDValue == "" {
+					passTypeIDValue = derivedID
+				}
+			}
+			if passTypeIDValue == "" {
+				fmt.Fprintln(os.Stderr, "Error: --pass-type-id is required unless --next is provided")
+				return shared.MissingRequiredUsageError("--pass-type-id")
 			}
 			if err := shared.ValidateSort(*sort, passTypeIDCertificatesSortList()...); err != nil {
-				return fmt.Errorf("pass-type-ids certificates list: %w", err)
+				return shared.UsageErrorf("pass-type-ids certificates list: %v", err)
 			}
 
 			fieldsValue, err := normalizeCertificateFields(*fields, "--fields")
@@ -148,43 +162,56 @@ Examples:
 	}
 }
 
-// PassTypeIDCertificatesGetCommand returns the certificates get subcommand.
+// PassTypeIDCertificatesGetCommand returns the certificates view subcommand.
 func PassTypeIDCertificatesGetCommand() *ffcli.Command {
-	fs := flag.NewFlagSet("get", flag.ExitOnError)
+	fs := flag.NewFlagSet("view", flag.ExitOnError)
 
-	passTypeID := fs.String("pass-type-id", "", "Pass type ID")
+	passTypeID := shared.BindResourceIDFlag(fs, "pass-type-id", "passTypeIds", "Pass type ID (required unless --next is provided)")
 	limit := fs.Int("limit", 0, "Maximum results per page (1-200)")
 	next := fs.String("next", "", "Fetch next page using a links.next URL")
 	paginate := fs.Bool("paginate", false, "Automatically fetch all pages (aggregate results)")
 	output := shared.BindOutputFlags(fs)
 
 	return &ffcli.Command{
-		Name:       "get",
-		ShortUsage: "asc pass-type-ids certificates get --pass-type-id \"PASS_ID\" [flags]",
-		ShortHelp:  "Get certificate relationships for a pass type ID.",
-		LongHelp: `Get certificate relationships for a pass type ID.
+		Name:       "view",
+		ShortUsage: "asc pass-type-ids certificates view [--pass-type-id \"PASS_ID\"] [--next \"URL\"] [flags]",
+		ShortHelp:  "View certificate relationships for a pass type ID.",
+		LongHelp: `View certificate relationships for a pass type ID.
 
 Examples:
-  asc pass-type-ids certificates get --pass-type-id "PASS_ID"
-  asc pass-type-ids certificates get --pass-type-id "PASS_ID" --paginate`,
+  asc pass-type-ids certificates view --pass-type-id "PASS_ID"
+  asc pass-type-ids certificates view --next "https://api.appstoreconnect.apple.com/v1/passTypeIds/PASS_ID/relationships/certificates?cursor=CURSOR"
+  asc pass-type-ids certificates view --pass-type-id "PASS_ID" --paginate`,
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
 			passTypeIDValue := strings.TrimSpace(*passTypeID)
-			if passTypeIDValue == "" {
-				fmt.Fprintln(os.Stderr, "Error: --pass-type-id is required")
-				return flag.ErrHelp
-			}
 			if *limit != 0 && (*limit < 1 || *limit > 200) {
-				return fmt.Errorf("pass-type-ids certificates get: --limit must be between 1 and 200")
+				return shared.UsageError("pass-type-ids certificates view: --limit must be between 1 and 200")
 			}
 			if err := shared.ValidateNextURL(*next); err != nil {
-				return fmt.Errorf("pass-type-ids certificates get: %w", err)
+				return shared.UsageErrorf("pass-type-ids certificates view: %v", err)
+			}
+			if strings.TrimSpace(*next) != "" {
+				derivedID, err := passTypeIDFromCertificatesNextURL(*next, true)
+				if err != nil {
+					return shared.UsageErrorf("pass-type-ids certificates view: %v", err)
+				}
+				if passTypeIDValue != "" && passTypeIDValue != derivedID {
+					return shared.UsageError("pass-type-ids certificates view: --pass-type-id must match the pass type ID in --next")
+				}
+				if passTypeIDValue == "" {
+					passTypeIDValue = derivedID
+				}
+			}
+			if passTypeIDValue == "" {
+				fmt.Fprintln(os.Stderr, "Error: --pass-type-id is required unless --next is provided")
+				return shared.MissingRequiredUsageError("--pass-type-id")
 			}
 
 			client, err := shared.GetASCClient()
 			if err != nil {
-				return fmt.Errorf("pass-type-ids certificates get: %w", err)
+				return fmt.Errorf("pass-type-ids certificates view: %w", err)
 			}
 
 			requestCtx, cancel := shared.ContextWithTimeout(ctx)
@@ -199,14 +226,14 @@ Examples:
 				paginateOpts := append(opts, asc.WithLinkagesLimit(200))
 				firstPage, err := client.GetPassTypeIDCertificatesRelationships(requestCtx, passTypeIDValue, paginateOpts...)
 				if err != nil {
-					return fmt.Errorf("pass-type-ids certificates get: failed to fetch: %w", err)
+					return fmt.Errorf("pass-type-ids certificates view: failed to fetch: %w", err)
 				}
 
 				paginated, err := asc.PaginateAll(requestCtx, firstPage, func(ctx context.Context, nextURL string) (asc.PaginatedResponse, error) {
 					return client.GetPassTypeIDCertificatesRelationships(ctx, passTypeIDValue, asc.WithLinkagesNextURL(nextURL))
 				})
 				if err != nil {
-					return fmt.Errorf("pass-type-ids certificates get: %w", err)
+					return fmt.Errorf("pass-type-ids certificates view: %w", err)
 				}
 
 				return shared.PrintOutput(paginated, *output.Output, *output.Pretty)
@@ -214,10 +241,39 @@ Examples:
 
 			resp, err := client.GetPassTypeIDCertificatesRelationships(requestCtx, passTypeIDValue, opts...)
 			if err != nil {
-				return fmt.Errorf("pass-type-ids certificates get: failed to fetch: %w", err)
+				return fmt.Errorf("pass-type-ids certificates view: failed to fetch: %w", err)
 			}
 
 			return shared.PrintOutput(resp, *output.Output, *output.Pretty)
 		},
 	}
+}
+
+func passTypeIDFromCertificatesNextURL(nextURL string, relationship bool) (string, error) {
+	parsed, err := url.Parse(strings.TrimSpace(nextURL))
+	if err != nil {
+		return "", fmt.Errorf("invalid --next URL")
+	}
+
+	parts := strings.Split(strings.Trim(parsed.EscapedPath(), "/"), "/")
+	wantParts := 4
+	if relationship {
+		wantParts = 5
+	}
+	if len(parts) != wantParts || parts[0] != "v1" || parts[1] != "passTypeIds" {
+		return "", fmt.Errorf("--next must target the pass type ID certificates endpoint")
+	}
+	if relationship {
+		if parts[3] != "relationships" || parts[4] != "certificates" {
+			return "", fmt.Errorf("--next must target the pass type ID certificate relationships endpoint")
+		}
+	} else if parts[3] != "certificates" {
+		return "", fmt.Errorf("--next must target the pass type ID certificates endpoint")
+	}
+
+	passTypeID, err := url.PathUnescape(parts[2])
+	if err != nil || strings.TrimSpace(passTypeID) == "" || strings.Contains(passTypeID, "/") {
+		return "", fmt.Errorf("--next must contain a valid pass type ID")
+	}
+	return passTypeID, nil
 }

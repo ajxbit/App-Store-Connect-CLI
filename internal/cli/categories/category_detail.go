@@ -15,31 +15,31 @@ import (
 
 // CategoriesGetCommand returns the category get subcommand.
 func CategoriesGetCommand() *ffcli.Command {
-	fs := flag.NewFlagSet("categories get", flag.ExitOnError)
+	fs := flag.NewFlagSet("categories view", flag.ExitOnError)
 
-	categoryID := fs.String("category-id", "", "App category ID")
+	categoryID := shared.BindResourceIDFlag(fs, "category-id", "appCategories", "App category ID")
 	output := shared.BindOutputFlags(fs)
 
 	return &ffcli.Command{
-		Name:       "get",
-		ShortUsage: "asc categories get --category-id \"CATEGORY_ID\"",
-		ShortHelp:  "Get an App Store category by ID.",
-		LongHelp: `Get an App Store category by ID.
+		Name:       "view",
+		ShortUsage: "asc categories view --category-id \"CATEGORY_ID\"",
+		ShortHelp:  "View an App Store category by ID.",
+		LongHelp: `View an App Store category by ID.
 
 Examples:
-  asc categories get --category-id "GAMES"`,
+  asc categories view --category-id "GAMES"`,
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
 			trimmedID := strings.TrimSpace(*categoryID)
 			if trimmedID == "" {
 				fmt.Fprintln(os.Stderr, "Error: --category-id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--category-id")
 			}
 
 			client, err := shared.GetASCClient()
 			if err != nil {
-				return fmt.Errorf("categories get: %w", err)
+				return fmt.Errorf("categories view: %w", err)
 			}
 
 			requestCtx, cancel := shared.ContextWithTimeout(ctx)
@@ -47,7 +47,7 @@ Examples:
 
 			resp, err := client.GetAppCategory(requestCtx, trimmedID)
 			if err != nil {
-				return fmt.Errorf("categories get: %w", err)
+				return fmt.Errorf("categories view: %w", err)
 			}
 
 			return shared.PrintOutput(resp, *output.Output, *output.Pretty)
@@ -59,7 +59,7 @@ Examples:
 func CategoriesParentCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("categories parent", flag.ExitOnError)
 
-	categoryID := fs.String("category-id", "", "App category ID")
+	categoryID := shared.BindResourceIDFlag(fs, "category-id", "appCategories", "App category ID")
 	output := shared.BindOutputFlags(fs)
 
 	return &ffcli.Command{
@@ -76,7 +76,7 @@ Examples:
 			trimmedID := strings.TrimSpace(*categoryID)
 			if trimmedID == "" {
 				fmt.Fprintln(os.Stderr, "Error: --category-id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--category-id")
 			}
 
 			client, err := shared.GetASCClient()
@@ -101,7 +101,7 @@ Examples:
 func CategoriesSubcategoriesCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("categories subcategories", flag.ExitOnError)
 
-	categoryID := fs.String("category-id", "", "App category ID")
+	categoryID := shared.BindResourceIDFlag(fs, "category-id", "appCategories", "App category ID")
 	limit := fs.Int("limit", 0, "Maximum results per page (1-200)")
 	next := fs.String("next", "", "Fetch next page using a links.next URL")
 	paginate := fs.Bool("paginate", false, "Automatically fetch all pages (aggregate results)")
@@ -119,19 +119,22 @@ Examples:
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
+			if err := shared.ValidateNextURL(*next); err != nil {
+				return shared.UsageErrorf("categories subcategories: %v", err)
+			}
+			if err := rejectCategorySubcategoriesNextFlagConflicts(fs, *next, "category-id", "limit"); err != nil {
+				return err
+			}
 			if *limit != 0 && (*limit < 1 || *limit > 200) {
 				fmt.Fprintln(os.Stderr, "Error: --limit must be between 1 and 200")
 				return flag.ErrHelp
-			}
-			if err := shared.ValidateNextURL(*next); err != nil {
-				return fmt.Errorf("categories subcategories: %w", err)
 			}
 
 			trimmedID := strings.TrimSpace(*categoryID)
 			trimmedNext := strings.TrimSpace(*next)
 			if trimmedID == "" && trimmedNext == "" {
 				fmt.Fprintln(os.Stderr, "Error: --category-id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--category-id")
 			}
 
 			client, err := shared.GetASCClient()
@@ -170,4 +173,20 @@ Examples:
 			return shared.PrintOutput(resp, *output.Output, *output.Pretty)
 		},
 	}
+}
+
+func rejectCategorySubcategoriesNextFlagConflicts(fs *flag.FlagSet, next string, names ...string) error {
+	if strings.TrimSpace(next) == "" {
+		return nil
+	}
+	provided := make(map[string]struct{}, len(names))
+	fs.Visit(func(f *flag.Flag) {
+		provided[f.Name] = struct{}{}
+	})
+	for _, name := range names {
+		if _, ok := provided[name]; ok {
+			return shared.UsageErrorf("categories subcategories: --next cannot be combined with --%s", name)
+		}
+	}
+	return nil
 }

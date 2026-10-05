@@ -40,7 +40,7 @@ Examples:
 func AppEventLocalizationScreenshotsListCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("localizations screenshots list", flag.ExitOnError)
 
-	localizationID := fs.String("localization-id", "", "App event localization ID")
+	localizationID := shared.BindResourceIDFlag(fs, "localization-id", "appEventLocalizations", "App event localization ID")
 	limit := fs.Int("limit", 0, "Maximum results per page (1-200)")
 	next := fs.String("next", "", "Fetch next page using a links.next URL")
 	paginate := fs.Bool("paginate", false, "Automatically fetch all pages (aggregate results)")
@@ -59,16 +59,16 @@ Examples:
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
 			if *limit != 0 && (*limit < 1 || *limit > 200) {
-				return fmt.Errorf("app-events localizations screenshots list: --limit must be between 1 and 200")
+				return shared.UsageError("app-events localizations screenshots list: --limit must be between 1 and 200")
 			}
 			if err := shared.ValidateNextURL(*next); err != nil {
-				return fmt.Errorf("app-events localizations screenshots list: %w", err)
+				return shared.UsageErrorf("app-events localizations screenshots list: %v", err)
 			}
 
 			id := strings.TrimSpace(*localizationID)
 			if id == "" && strings.TrimSpace(*next) == "" {
 				fmt.Fprintln(os.Stderr, "Error: --localization-id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--localization-id")
 			}
 
 			client, err := shared.GetASCClient()
@@ -138,7 +138,7 @@ Examples:
 func AppEventLocalizationVideoClipsListCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("localizations video-clips list", flag.ExitOnError)
 
-	localizationID := fs.String("localization-id", "", "App event localization ID")
+	localizationID := shared.BindResourceIDFlag(fs, "localization-id", "appEventLocalizations", "App event localization ID")
 	limit := fs.Int("limit", 0, "Maximum results per page (1-200)")
 	next := fs.String("next", "", "Fetch next page using a links.next URL")
 	paginate := fs.Bool("paginate", false, "Automatically fetch all pages (aggregate results)")
@@ -157,16 +157,16 @@ Examples:
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
 			if *limit != 0 && (*limit < 1 || *limit > 200) {
-				return fmt.Errorf("app-events localizations video-clips list: --limit must be between 1 and 200")
+				return shared.UsageError("app-events localizations video-clips list: --limit must be between 1 and 200")
 			}
 			if err := shared.ValidateNextURL(*next); err != nil {
-				return fmt.Errorf("app-events localizations video-clips list: %w", err)
+				return shared.UsageErrorf("app-events localizations video-clips list: %v", err)
 			}
 
 			id := strings.TrimSpace(*localizationID)
 			if id == "" && strings.TrimSpace(*next) == "" {
 				fmt.Fprintln(os.Stderr, "Error: --localization-id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--localization-id")
 			}
 
 			client, err := shared.GetASCClient()
@@ -213,7 +213,7 @@ Examples:
 func AppEventLocalizationScreenshotsRelationshipsCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("localizations screenshots-links", flag.ExitOnError)
 
-	localizationID := fs.String("localization-id", "", "App event localization ID")
+	localizationID := shared.BindResourceIDFlag(fs, "localization-id", "appEventLocalizations", "App event localization ID")
 	limit := fs.Int("limit", 0, "Maximum results per page (1-200)")
 	next := fs.String("next", "", "Fetch next page using a links.next URL")
 	paginate := fs.Bool("paginate", false, "Automatically fetch all pages (aggregate results)")
@@ -232,16 +232,16 @@ Examples:
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
 			if *limit != 0 && (*limit < 1 || *limit > 200) {
-				return fmt.Errorf("app-events localizations screenshots-links: --limit must be between 1 and 200")
+				return shared.UsageError("app-events localizations screenshots-links: --limit must be between 1 and 200")
 			}
 			if err := shared.ValidateNextURL(*next); err != nil {
-				return fmt.Errorf("app-events localizations screenshots-links: %w", err)
+				return shared.UsageErrorf("app-events localizations screenshots-links: %v", err)
 			}
 
 			id := strings.TrimSpace(*localizationID)
 			if id == "" && strings.TrimSpace(*next) == "" {
 				fmt.Fprintln(os.Stderr, "Error: --localization-id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--localization-id")
 			}
 
 			client, err := shared.GetASCClient()
@@ -288,7 +288,7 @@ Examples:
 func AppEventLocalizationVideoClipsRelationshipsCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("localizations video-clips-links", flag.ExitOnError)
 
-	localizationID := fs.String("localization-id", "", "App event localization ID")
+	localizationID := shared.BindResourceIDFlag(fs, "localization-id", "appEventLocalizations", "App event localization ID")
 	limit := fs.Int("limit", 0, "Maximum results per page (1-200)")
 	next := fs.String("next", "", "Fetch next page using a links.next URL")
 	paginate := fs.Bool("paginate", false, "Automatically fetch all pages (aggregate results)")
@@ -307,16 +307,16 @@ Examples:
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
 			if *limit != 0 && (*limit < 1 || *limit > 200) {
-				return fmt.Errorf("app-events localizations video-clips-links: --limit must be between 1 and 200")
+				return shared.UsageError("app-events localizations video-clips-links: --limit must be between 1 and 200")
 			}
 			if err := shared.ValidateNextURL(*next); err != nil {
-				return fmt.Errorf("app-events localizations video-clips-links: %w", err)
+				return shared.UsageErrorf("app-events localizations video-clips-links: %v", err)
 			}
 
 			id := strings.TrimSpace(*localizationID)
 			if id == "" && strings.TrimSpace(*next) == "" {
 				fmt.Fprintln(os.Stderr, "Error: --localization-id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--localization-id")
 			}
 
 			client, err := shared.GetASCClient()

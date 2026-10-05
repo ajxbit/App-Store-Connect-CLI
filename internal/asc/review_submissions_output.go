@@ -12,11 +12,11 @@ func reviewSubmissionsRows(resp *ReviewSubmissionsResponse) ([]string, [][]strin
 		appID := reviewSubmissionAppID(item.Relationships)
 		itemCount := reviewSubmissionItemCount(item.Relationships)
 		rows = append(rows, []string{
-			item.ID,
-			sanitizeTerminal(string(item.Attributes.SubmissionState)),
-			sanitizeTerminal(string(item.Attributes.Platform)),
-			sanitizeTerminal(item.Attributes.SubmittedDate),
-			sanitizeTerminal(appID),
+			SanitizeTerminalText(item.ID),
+			SanitizeTerminalText(string(item.Attributes.SubmissionState)),
+			SanitizeTerminalText(string(item.Attributes.Platform)),
+			SanitizeTerminalText(item.Attributes.SubmittedDate),
+			SanitizeTerminalText(appID),
 			itemCount,
 		})
 	}
@@ -30,11 +30,11 @@ func reviewSubmissionItemsRows(resp *ReviewSubmissionItemsResponse) ([]string, [
 		itemType, itemID := reviewSubmissionItemTarget(item.Relationships)
 		submissionID := reviewSubmissionItemSubmissionID(item.Relationships)
 		rows = append(rows, []string{
-			item.ID,
-			sanitizeTerminal(item.Attributes.State),
-			sanitizeTerminal(itemType),
-			sanitizeTerminal(itemID),
-			sanitizeTerminal(submissionID),
+			SanitizeTerminalText(item.ID),
+			SanitizeTerminalText(item.Attributes.State),
+			SanitizeTerminalText(itemType),
+			SanitizeTerminalText(itemID),
+			SanitizeTerminalText(submissionID),
 		})
 	}
 	return headers, rows
@@ -66,13 +66,14 @@ func reviewSubmissionItemTarget(rel *ReviewSubmissionItemRelationships) (string,
 	}
 
 	for _, relationship := range []*Relationship{
+		rel.InAppPurchaseVersion,
+		rel.SubscriptionVersion,
+		rel.SubscriptionGroupVersion,
 		rel.AppStoreVersion,
 		rel.AppCustomProductPageVersion,
-		rel.AppCustomProductPage,
 		rel.AppEvent,
 		rel.AppStoreVersionExperiment,
 		rel.AppStoreVersionExperimentV2,
-		rel.AppStoreVersionExperimentTreatment,
 		rel.BackgroundAssetVersion,
 		rel.GameCenterAchievementVersion,
 		rel.GameCenterActivityVersion,
@@ -88,9 +89,8 @@ func reviewSubmissionItemTarget(rel *ReviewSubmissionItemRelationships) (string,
 	return "", ""
 }
 
-func reviewSubmissionItemSubmissionID(rel *ReviewSubmissionItemRelationships) string {
-	if rel == nil || rel.ReviewSubmission == nil {
-		return ""
-	}
-	return rel.ReviewSubmission.Data.ID
+// reviewSubmissionItemSubmissionID preserves the existing table column even though
+// API 4.4.1 no longer exposes a reviewSubmission relationship on item responses.
+func reviewSubmissionItemSubmissionID(_ *ReviewSubmissionItemRelationships) string {
+	return ""
 }

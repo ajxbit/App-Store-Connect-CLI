@@ -35,6 +35,13 @@ func TestVersionsCommand_PrefersViewAndRemovesLegacyGet(t *testing.T) {
 	}
 }
 
+func TestVersionsListIncludeFlagIsRegistered(t *testing.T) {
+	includeFlag := VersionsListCommand().FlagSet.Lookup("include")
+	if includeFlag == nil {
+		t.Fatal("include flag is not registered")
+	}
+}
+
 func TestFetchOptionalBuild_NotFound(t *testing.T) {
 	resp, err := fetchOptionalBuild(context.Background(), "VERSION_ID", func(ctx context.Context, versionID string) (*asc.BuildResponse, error) {
 		return nil, &asc.APIError{Code: "NOT_FOUND", Title: "Not Found"}
@@ -130,6 +137,41 @@ func TestSplitCompatAppStoreVersionIncludes(t *testing.T) {
 	}
 	if apiIncludes[0] != "appStoreReviewDetail" || apiIncludes[1] != "routingAppCoverage" {
 		t.Fatalf("unexpected API includes: %v", apiIncludes)
+	}
+}
+
+func TestNormalizeAppStoreVersionReleaseType(t *testing.T) {
+	tests := []struct {
+		input string
+		want  string
+	}{
+		{input: "", want: ""},
+		{input: "manual", want: "MANUAL"},
+		{input: "AFTER_APPROVAL", want: "AFTER_APPROVAL"},
+		{input: " scheduled ", want: "SCHEDULED"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.input, func(t *testing.T) {
+			got, err := normalizeAppStoreVersionReleaseType(test.input)
+			if err != nil {
+				t.Fatalf("normalizeAppStoreVersionReleaseType() error = %v", err)
+			}
+			if got != test.want {
+				t.Fatalf("normalizeAppStoreVersionReleaseType() = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
+func TestNormalizeAppStoreVersionReleaseTypeRejectsUnknown(t *testing.T) {
+	for _, input := range []string{"IMMEDIATE", "   "} {
+		t.Run(input, func(t *testing.T) {
+			_, err := normalizeAppStoreVersionReleaseType(input)
+			if err == nil || !strings.Contains(err.Error(), "--release-type must be one of: MANUAL, AFTER_APPROVAL, SCHEDULED") {
+				t.Fatalf("expected release type error, got %v", err)
+			}
+		})
 	}
 }
 

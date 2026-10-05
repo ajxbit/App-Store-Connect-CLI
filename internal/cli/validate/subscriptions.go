@@ -2,23 +2,32 @@ package validate
 
 import (
 	"context"
-	"errors"
 	"flag"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 
 	"github.com/peterbourgon/ff/v3/ffcli"
 
+	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/asc"
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/cli/shared"
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/validation"
 )
+
+var fetchPricingTerritoriesFn = fetchPricingTerritories
 
 type validateSubscriptionsOptions struct {
 	AppID  string
 	Strict bool
 	Output string
 	Pretty bool
+}
+
+// SubscriptionsOptions configures a non-printing subscription readiness report.
+type SubscriptionsOptions struct {
+	AppID  string
+	Strict bool
 }
 
 // ValidateSubscriptionsCommand returns the asc validate subscriptions subcommand.
@@ -32,13 +41,14 @@ func ValidateSubscriptionsCommand() *ffcli.Command {
 	return &ffcli.Command{
 		Name:       "subscriptions",
 		ShortUsage: "asc validate subscriptions --app \"APP_ID\" [flags]",
-		ShortHelp:  "Validate subscription review readiness and promotional image guidance.",
+		ShortHelp:  "Validate subscription metadata, screenshot delivery, pricing, and availability.",
 		LongHelp: `Validate review readiness for auto-renewable subscriptions.
 
-This command is conservative: it emits warnings for subscriptions that need
-review attention or are missing promotional images Apple uses for App Store
-promotion, offer-code redemption pages, and win-back offers. Use --strict to
-gate on warnings in CI.
+For subscriptions in MISSING_METADATA, this command inspects group and
+subscription localizations, App Review screenshot delivery, availability, and
+the complete App Store pricing matrix. It also emits advisory guidance for promotional images Apple
+uses for App Store promotion, offer-code redemption pages, and win-back offers.
+Use --strict to gate on warnings in CI.
 
 Examples:
   asc validate subscriptions --app "APP_ID"
@@ -50,7 +60,7 @@ Examples:
 			resolvedAppID := shared.ResolveAppID(*appID)
 			if resolvedAppID == "" {
 				fmt.Fprintln(os.Stderr, "Error: --app is required (or set ASC_APP_ID)")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--app")
 			}
 
 			return runValidateSubscriptions(ctx, validateSubscriptionsOptions{
@@ -69,30 +79,80 @@ func runValidateSubscriptions(ctx context.Context, opts validateSubscriptionsOpt
 		return fmt.Errorf("validate subscriptions: %w", err)
 	}
 
-	requestCtx, cancel := shared.ContextWithTimeout(ctx)
-	defer func() { cancel() }()
-
-	refreshRequestCtx := func() {
-		cancel()
-		requestCtx, cancel = shared.ContextWithTimeout(ctx)
+	report, err := buildSubscriptionsReport(ctx, client, SubscriptionsOptions{
+		AppID:  opts.AppID,
+		Strict: opts.Strict,
+	})
+	if err != nil {
+		return err
 	}
 
+	if err := shared.PrintOutput(&report, opts.Output, opts.Pretty); err != nil {
+		return err
+	}
+
+	if report.Summary.Blocking > 0 {
+		return shared.NewValidationReportedError(fmt.Errorf("validate subscriptions: found %d blocking issue(s)", report.Summary.Blocking))
+	}
+
+	return nil
+}
+
+// BuildSubscriptionsReport fetches live subscription state and returns the same
+// structured report emitted by `asc validate subscriptions` without printing it.
+func BuildSubscriptionsReport(ctx context.Context, opts SubscriptionsOptions) (validation.SubscriptionsReport, error) {
+	client, err := clientFactory()
+	if err != nil {
+		return validation.SubscriptionsReport{}, fmt.Errorf("validate subscriptions: %w", err)
+	}
+	return buildSubscriptionsReport(ctx, client, opts)
+}
+
+func buildSubscriptionsReport(ctx context.Context, client *asc.Client, opts SubscriptionsOptions) (validation.SubscriptionsReport, error) {
+	ctx = withReadinessRequestGate(ctx)
 	pricingCoverageSkipReason := ""
-	_, appAvailableTerritories, availableTerritories, err := fetchAvailableTerritoryDetailsFn(requestCtx, client, opts.AppID)
-	if err != nil {
-		if reason, ok := availabilityCheckSkipReason(err); ok {
-			pricingCoverageSkipReason = reason
-			if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
-				refreshRequestCtx()
+	appAvailabilityCoverageSkipReason := ""
+	var appAvailableTerritories []string
+	availableTerritories := 0
+	var pricingTerritories []string
+	var subs []validation.Subscription
+	if err := runReadinessTasks(
+		ctx,
+		func(taskCtx context.Context) error {
+			_, territories, count, fetchErr := fetchAvailableTerritoryDetailsFn(taskCtx, client, opts.AppID)
+			if fetchErr != nil {
+				if reason, ok := availabilityCheckSkipReason(fetchErr); ok {
+					appAvailabilityCoverageSkipReason = reason
+					return nil
+				}
+				return fmt.Errorf("validate subscriptions: %w", fetchErr)
 			}
-		} else {
-			return fmt.Errorf("validate subscriptions: %w", err)
-		}
-	}
-
-	subs, err := fetchSubscriptionsFn(ctx, client, opts.AppID)
-	if err != nil {
-		return fmt.Errorf("validate subscriptions: %w", err)
+			appAvailableTerritories = territories
+			availableTerritories = count
+			return nil
+		},
+		func(taskCtx context.Context) error {
+			territories, fetchErr := fetchPricingTerritoriesFn(taskCtx, client)
+			if fetchErr != nil {
+				if reason, ok := pricingTerritoryCheckSkipReason(fetchErr); ok {
+					pricingCoverageSkipReason = reason
+					return nil
+				}
+				return fmt.Errorf("validate subscriptions: %w", fetchErr)
+			}
+			pricingTerritories = territories
+			return nil
+		},
+		func(taskCtx context.Context) error {
+			var fetchErr error
+			subs, fetchErr = fetchSubscriptionsFn(taskCtx, client, opts.AppID)
+			if fetchErr != nil {
+				return fmt.Errorf("validate subscriptions: %w", fetchErr)
+			}
+			return nil
+		},
+	); err != nil {
+		return validation.SubscriptionsReport{}, err
 	}
 
 	buildCount := 0
@@ -101,10 +161,10 @@ func runValidateSubscriptions(ctx context.Context, opts validateSubscriptionsOpt
 	var buildStatus metadataCheckStatus
 	for _, sub := range subs {
 		if strings.EqualFold(strings.TrimSpace(sub.State), "MISSING_METADATA") {
-			refreshRequestCtx()
-			buildCount, buildStatus, err = fetchAppBuildCountFn(requestCtx, client, opts.AppID)
+			var err error
+			buildCount, buildStatus, err = fetchAppBuildCountFn(ctx, client, opts.AppID)
 			if err != nil {
-				return fmt.Errorf("validate subscriptions: %w", err)
+				return validation.SubscriptionsReport{}, fmt.Errorf("validate subscriptions: %w", err)
 			}
 			buildCheckSkipped = !buildStatus.Verified
 			buildCheckSkipReason = buildStatus.SkipReason
@@ -112,29 +172,55 @@ func runValidateSubscriptions(ctx context.Context, opts validateSubscriptionsOpt
 		}
 	}
 
-	// No further network calls use the request-scoped timeout context beyond this point.
-	// Cancel it eagerly so slow report rendering cannot race the refreshed context into
-	// DeadlineExceeded after the build probe already succeeded.
-	cancel()
-
 	report := validation.ValidateSubscriptions(validation.SubscriptionsInput{
-		AppID:                     opts.AppID,
-		Subscriptions:             subs,
-		AvailableTerritories:      availableTerritories,
-		AppAvailableTerritories:   appAvailableTerritories,
-		PricingCoverageSkipReason: pricingCoverageSkipReason,
-		AppBuildCount:             buildCount,
-		BuildCheckSkipped:         buildCheckSkipped,
-		BuildCheckSkipReason:      buildCheckSkipReason,
+		AppID:                             opts.AppID,
+		Subscriptions:                     subs,
+		AvailableTerritories:              availableTerritories,
+		AppAvailableTerritories:           appAvailableTerritories,
+		AppAvailabilityCoverageSkipReason: appAvailabilityCoverageSkipReason,
+		PricingTerritories:                pricingTerritories,
+		PricingTerritoryCount:             len(pricingTerritories),
+		PricingCoverageSkipReason:         pricingCoverageSkipReason,
+		AppBuildCount:                     buildCount,
+		BuildCheckSkipped:                 buildCheckSkipped,
+		BuildCheckSkipReason:              buildCheckSkipReason,
 	}, opts.Strict)
 
-	if err := shared.PrintOutput(&report, opts.Output, opts.Pretty); err != nil {
-		return err
-	}
+	return report, nil
+}
 
-	if report.Summary.Blocking > 0 {
-		return shared.NewReportedError(fmt.Errorf("validate subscriptions: found %d blocking issue(s)", report.Summary.Blocking))
+func fetchPricingTerritories(ctx context.Context, client *asc.Client) ([]string, error) {
+	firstPage, err := doReadinessRequest(ctx, func(requestCtx context.Context) (*asc.TerritoriesResponse, error) {
+		return client.GetTerritories(requestCtx, asc.WithTerritoriesLimit(200))
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch App Store pricing territories: %w", err)
 	}
-
-	return nil
+	allPages, err := asc.PaginateAll(ctx, firstPage, func(_ context.Context, nextURL string) (asc.PaginatedResponse, error) {
+		return doReadinessRequest(ctx, func(requestCtx context.Context) (asc.PaginatedResponse, error) {
+			return client.GetTerritories(requestCtx, asc.WithTerritoriesNextURL(nextURL))
+		})
+	})
+	if err != nil {
+		return nil, fmt.Errorf("paginate App Store pricing territories: %w", err)
+	}
+	typed, ok := allPages.(*asc.TerritoriesResponse)
+	if !ok {
+		return nil, fmt.Errorf("unexpected pricing territories response type %T", allPages)
+	}
+	seen := make(map[string]struct{}, len(typed.Data))
+	territories := make([]string, 0, len(typed.Data))
+	for _, territory := range typed.Data {
+		id := strings.ToUpper(strings.TrimSpace(territory.ID))
+		if id == "" {
+			continue
+		}
+		if _, exists := seen[id]; exists {
+			continue
+		}
+		seen[id] = struct{}{}
+		territories = append(territories, id)
+	}
+	sort.Strings(territories)
+	return territories, nil
 }

@@ -13,14 +13,37 @@ import (
 	"strings"
 	"testing"
 
+	rootcmd "github.com/rudrankriyam/App-Store-Connect-CLI/cmd"
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/asc"
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/cli/validate"
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/validation"
+	webcore "github.com/rudrankriyam/App-Store-Connect-CLI/internal/web"
 )
+
+type validateDeepWebFixture struct {
+	privacy       *webcore.AppDataUsagesPublishState
+	subscriptions []webcore.ReviewSubscription
+	agreements    *asc.WebAgreementsStatusResult
+}
+
+func (f *validateDeepWebFixture) GetAppDataUsagesPublishState(context.Context, string) (*webcore.AppDataUsagesPublishState, error) {
+	return f.privacy, nil
+}
+
+func (f *validateDeepWebFixture) ListReviewSubscriptions(context.Context, string) ([]webcore.ReviewSubscription, error) {
+	return f.subscriptions, nil
+}
+
+func (f *validateDeepWebFixture) GetAgreementsStatus(context.Context) (*asc.WebAgreementsStatusResult, error) {
+	return f.agreements, nil
+}
 
 type validateFixture struct {
 	app                        string
+	appStatus                  int
 	versions                   string
+	versionsByQuery            map[string]string
+	versionsStatusByQuery      map[string]int
 	version                    string
 	appInfos                   string
 	appInfoLocs                string
@@ -31,10 +54,16 @@ type validateFixture struct {
 	build                      string
 	priceSchedule              string
 	waitForPriceScheduleCtx    bool
+	baseTerritory              string
+	manualPrices               string
+	manualPricesStatus         int
+	manualPricesBody           string
 	availabilityV2             string
 	availabilityV2Status       int
 	territories                string
 	territoriesByQuery         map[string]string
+	pricingTerritories         string
+	pricingTerritoriesByQuery  map[string]string
 	screenshotSets             map[string]string
 	screenshotsBySet           map[string]string
 	subscriptionGroups         string
@@ -53,6 +82,7 @@ type validateFixture struct {
 	subscriptionGroupsStatus   int
 	iaps                       string
 	iapsStatus                 int
+	requestObserver            func(*http.Request)
 }
 
 func newValidateTestClient(t *testing.T, fixture validateFixture) *asc.Client {
@@ -63,6 +93,9 @@ func newValidateTestClient(t *testing.T, fixture validateFixture) *asc.Client {
 	writeECDSAPEM(t, keyPath)
 
 	transport := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		if fixture.requestObserver != nil {
+			fixture.requestObserver(req)
+		}
 		if req.Method != http.MethodGet {
 			return jsonResponse(http.StatusMethodNotAllowed, `{"errors":[{"status":405}]}`)
 		}
@@ -70,8 +103,22 @@ func newValidateTestClient(t *testing.T, fixture validateFixture) *asc.Client {
 		path := req.URL.Path
 		switch {
 		case path == "/v1/apps/app-1":
+			if fixture.appStatus != 0 {
+				return jsonResponse(fixture.appStatus, fixture.app)
+			}
 			return jsonResponse(http.StatusOK, fixture.app)
 		case path == "/v1/apps/app-1/appStoreVersions":
+			queryKey := appStoreVersionsQueryKey(req.URL.Query())
+			if status, ok := fixture.versionsStatusByQuery[queryKey]; ok {
+				body := fixture.versionsByQuery[queryKey]
+				if body == "" {
+					body = apiErrorJSONForStatus(status)
+				}
+				return jsonResponse(status, body)
+			}
+			if body, ok := fixture.versionsByQuery[queryKey]; ok {
+				return jsonResponse(http.StatusOK, body)
+			}
 			if fixture.versions != "" {
 				return jsonResponse(http.StatusOK, fixture.versions)
 			}
@@ -110,6 +157,23 @@ func newValidateTestClient(t *testing.T, fixture validateFixture) *asc.Client {
 				return jsonResponse(http.StatusOK, fixture.priceSchedule)
 			}
 			return jsonResponse(http.StatusNotFound, `{"errors":[{"code":"NOT_FOUND","title":"Not Found","detail":"resource not found"}]}`)
+		case strings.HasPrefix(path, "/v1/appPriceSchedules/") && strings.HasSuffix(path, "/baseTerritory"):
+			if fixture.baseTerritory != "" {
+				return jsonResponse(http.StatusOK, fixture.baseTerritory)
+			}
+			return jsonResponse(http.StatusOK, `{"data":{"type":"territories","id":"USA","attributes":{"currency":"USD"}}}`)
+		case strings.HasPrefix(path, "/v1/appPriceSchedules/") && strings.HasSuffix(path, "/manualPrices"):
+			if fixture.manualPricesStatus != 0 {
+				body := fixture.manualPricesBody
+				if body == "" {
+					body = apiErrorJSONForStatus(fixture.manualPricesStatus)
+				}
+				return jsonResponse(fixture.manualPricesStatus, body)
+			}
+			if fixture.manualPrices != "" {
+				return jsonResponse(http.StatusOK, fixture.manualPrices)
+			}
+			return jsonResponse(http.StatusOK, validateFreeManualPricesBody)
 		case path == "/v1/apps/app-1/appAvailabilityV2":
 			if fixture.availabilityV2Status != 0 {
 				return jsonResponse(fixture.availabilityV2Status, fixture.availabilityV2)
@@ -118,6 +182,14 @@ func newValidateTestClient(t *testing.T, fixture validateFixture) *asc.Client {
 				return jsonResponse(http.StatusOK, fixture.availabilityV2)
 			}
 			return jsonResponse(http.StatusNotFound, `{"errors":[{"code":"NOT_FOUND","title":"Not Found","detail":"resource not found"}]}`)
+		case path == "/v1/territories":
+			if body, ok := fixture.pricingTerritoriesByQuery[req.URL.RawQuery]; ok {
+				return jsonResponse(http.StatusOK, body)
+			}
+			if fixture.pricingTerritories != "" {
+				return jsonResponse(http.StatusOK, fixture.pricingTerritories)
+			}
+			return jsonResponse(http.StatusOK, `{"data":[],"links":{"next":""}}`)
 		case strings.HasPrefix(path, "/v2/appAvailabilities/") && strings.HasSuffix(path, "/territoryAvailabilities"):
 			if body, ok := fixture.territoriesByQuery[req.URL.RawQuery]; ok {
 				return jsonResponse(http.StatusOK, body)
@@ -216,6 +288,18 @@ func newValidateTestClient(t *testing.T, fixture validateFixture) *asc.Client {
 	return client
 }
 
+// appStoreVersionsQueryKey reduces an app store versions list query to the
+// filters that matter for fixtures, in a fixed order.
+func appStoreVersionsQueryKey(query url.Values) string {
+	parts := make([]string, 0, 4)
+	for _, name := range []string{"filter[appStoreState]", "filter[appVersionState]", "filter[platform]", "filter[versionString]"} {
+		if value := query.Get(name); value != "" {
+			parts = append(parts, name+"="+value)
+		}
+	}
+	return strings.Join(parts, "&")
+}
+
 func jsonResponse(status int, body string) (*http.Response, error) {
 	return &http.Response{
 		Status:     fmt.Sprintf("%d %s", status, http.StatusText(status)),
@@ -249,20 +333,23 @@ func hasCheckWithID(checks []validation.CheckResult, id string) bool {
 	return false
 }
 
+const validateFreeManualPricesBody = `{"data":[{"type":"appPrices","id":"price-usa","attributes":{"manual":true,"startDate":"2026-01-01"},"relationships":{"appPricePoint":{"data":{"type":"appPricePoints","id":"point-free"}},"territory":{"data":{"type":"territories","id":"USA"}}}}],"included":[{"type":"appPricePoints","id":"point-free","attributes":{"customerPrice":"0.00","proceeds":"0.00"}}],"links":{"next":""}}`
+
 func validValidateFixture() validateFixture {
 	return validateFixture{
-		app:             `{"data":{"type":"apps","id":"app-1","attributes":{"primaryLocale":"en-US","contentRightsDeclaration":"DOES_NOT_USE_THIRD_PARTY_CONTENT"}}}`,
-		versions:        `{"data":[{"type":"appStoreVersions","id":"ver-1","attributes":{"platform":"IOS","versionString":"1.0","copyright":"2026 Test Company"}}]}`,
-		version:         `{"data":{"type":"appStoreVersions","id":"ver-1","attributes":{"platform":"IOS","versionString":"1.0","appVersionState":"PREPARE_FOR_SUBMISSION","copyright":"2026 Test Company"},"relationships":{"app":{"data":{"type":"apps","id":"app-1"}}}}}`,
-		appInfos:        `{"data":[{"type":"appInfos","id":"info-1","attributes":{"state":"PREPARE_FOR_SUBMISSION"}}]}`,
-		appInfoLocs:     `{"data":[{"type":"appInfoLocalizations","id":"info-loc-1","attributes":{"locale":"en-US","name":"My App","subtitle":"Subtitle","privacyPolicyUrl":"https://example.com/privacy"}}]}`,
-		versionLocs:     fmt.Sprintf(`{"data":[{"type":"appStoreVersionLocalizations","id":"ver-loc-1","attributes":{"locale":"en-US","description":"Description. Terms of Use: %s","keywords":"keyword","whatsNew":"Notes","promotionalText":"Promo","supportUrl":"https://support.example.com","marketingUrl":"https://marketing.example.com"}}]}`, validation.AppleStandardEULAURL),
-		reviewDetails:   `{"data":{"type":"appStoreReviewDetails","id":"review-detail-1","attributes":{"contactFirstName":"A","contactLastName":"B","contactEmail":"a@example.com","contactPhone":"123","demoAccountName":"","demoAccountPassword":"","demoAccountRequired":false,"notes":"Review notes"}}}`,
-		primaryCategory: `{"data":{"type":"appCategories","id":"cat-1"}}`,
-		build:           `{"data":{"type":"builds","id":"build-1","attributes":{"version":"1.0","processingState":"VALID","expired":false,"usesNonExemptEncryption":false}}}`,
-		priceSchedule:   `{"data":{"type":"appPriceSchedules","id":"sched-1","attributes":{}}}`,
-		availabilityV2:  `{"data":{"type":"appAvailabilities","id":"avail-1","attributes":{"availableInNewTerritories":true}}}`,
-		territories:     `{"data":[{"type":"territoryAvailabilities","id":"ta-1","attributes":{"available":true}}]}`,
+		app:                `{"data":{"type":"apps","id":"app-1","attributes":{"primaryLocale":"en-US","contentRightsDeclaration":"DOES_NOT_USE_THIRD_PARTY_CONTENT"}}}`,
+		versions:           `{"data":[{"type":"appStoreVersions","id":"ver-1","attributes":{"platform":"IOS","versionString":"1.0","copyright":"2026 Test Company"}}]}`,
+		version:            `{"data":{"type":"appStoreVersions","id":"ver-1","attributes":{"platform":"IOS","versionString":"1.0","appVersionState":"PREPARE_FOR_SUBMISSION","copyright":"2026 Test Company"},"relationships":{"app":{"data":{"type":"apps","id":"app-1"}}}}}`,
+		appInfos:           `{"data":[{"type":"appInfos","id":"info-1","attributes":{"state":"PREPARE_FOR_SUBMISSION"}}]}`,
+		appInfoLocs:        `{"data":[{"type":"appInfoLocalizations","id":"info-loc-1","attributes":{"locale":"en-US","name":"My App","subtitle":"Subtitle","privacyPolicyUrl":"https://example.com/privacy"}}]}`,
+		versionLocs:        fmt.Sprintf(`{"data":[{"type":"appStoreVersionLocalizations","id":"ver-loc-1","attributes":{"locale":"en-US","description":"Description. Terms of Use: %s","keywords":"keyword","whatsNew":"Notes","promotionalText":"Promo","supportUrl":"https://support.example.com","marketingUrl":"https://marketing.example.com"}}]}`, validation.AppleStandardEULAURL),
+		reviewDetails:      `{"data":{"type":"appStoreReviewDetails","id":"review-detail-1","attributes":{"contactFirstName":"A","contactLastName":"B","contactEmail":"a@example.com","contactPhone":"+1 555 010 1234","demoAccountName":"","demoAccountPassword":"","demoAccountRequired":false,"notes":"Review notes"}}}`,
+		primaryCategory:    `{"data":{"type":"appCategories","id":"cat-1"}}`,
+		build:              `{"data":{"type":"builds","id":"build-1","attributes":{"version":"1.0","processingState":"VALID","expired":false,"usesNonExemptEncryption":false}}}`,
+		priceSchedule:      `{"data":{"type":"appPriceSchedules","id":"sched-1","attributes":{}}}`,
+		availabilityV2:     `{"data":{"type":"appAvailabilities","id":"avail-1","attributes":{"availableInNewTerritories":true}}}`,
+		territories:        `{"data":[{"type":"territoryAvailabilities","id":"ta-1","attributes":{"available":true}}]}`,
+		pricingTerritories: `{"data":[{"type":"territories","id":"USA"}],"links":{"next":""}}`,
 		ageRating: `{"data":{"type":"ageRatingDeclarations","id":"age-1","attributes":{
 			"advertising":false,
 			"gambling":false,
@@ -271,6 +358,8 @@ func validValidateFixture() validateFixture {
 			"messagingAndChat":true,
 			"parentalControls":true,
 			"ageAssurance":false,
+			"socialMedia":false,
+			"socialMediaAgeRestricted":false,
 			"unrestrictedWebAccess":false,
 			"userGeneratedContent":true,
 			"alcoholTobaccoOrDrugUseOrReferences":"NONE",
@@ -303,6 +392,66 @@ func validValidateFixture() validateFixture {
 	}
 }
 
+func TestValidateRejectsExplicitVersionBindingMismatch(t *testing.T) {
+	tests := []struct {
+		name      string
+		mutate    func(*validateFixture)
+		args      []string
+		wantError string
+	}{
+		{
+			name: "version belongs to another app",
+			mutate: func(fixture *validateFixture) {
+				fixture.version = strings.Replace(fixture.version, `"id":"app-1"`, `"id":"app-2"`, 1)
+			},
+			args:      []string{"validate", "--app", "app-1", "--version-id", "ver-1"},
+			wantError: `version "ver-1" belongs to app "app-2", not "app-1"`,
+		},
+		{
+			name: "version platform does not match",
+			mutate: func(fixture *validateFixture) {
+				fixture.version = strings.Replace(fixture.version, `"platform":"IOS"`, `"platform":"MAC_OS"`, 1)
+			},
+			args:      []string{"validate", "--app", "app-1", "--version-id", "ver-1", "--platform", "IOS"},
+			wantError: `version "ver-1" is on platform "MAC_OS", not "IOS"`,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := validValidateFixture()
+			test.mutate(&fixture)
+			client := newValidateTestClient(t, fixture)
+			restore := validate.SetClientFactory(func() (*asc.Client, error) {
+				return client, nil
+			})
+			t.Cleanup(restore)
+
+			root := RootCommand("1.2.3")
+			var runErr error
+			stdout, stderr := captureOutput(t, func() {
+				if err := root.Parse(test.args); err != nil {
+					t.Fatalf("parse error: %v", err)
+				}
+				runErr = root.Run(context.Background())
+			})
+
+			if runErr == nil || errors.Is(runErr, flag.ErrHelp) || !strings.Contains(runErr.Error(), test.wantError) {
+				t.Fatalf("Run() error = %v, want runtime error containing %q", runErr, test.wantError)
+			}
+			if got := rootcmd.ExitCodeFromError(runErr); got != rootcmd.ExitError {
+				t.Fatalf("exit code = %d, want %d", got, rootcmd.ExitError)
+			}
+			if stdout != "" {
+				t.Fatalf("expected no readiness report on binding failure, got stdout %q", stdout)
+			}
+			if stderr != "" {
+				t.Fatalf("expected direct command run to leave stderr empty, got %q", stderr)
+			}
+		})
+	}
+}
+
 func TestValidateRequiresAppAndVersionSelector(t *testing.T) {
 	t.Setenv("ASC_APP_ID", "")
 
@@ -315,11 +464,6 @@ func TestValidateRequiresAppAndVersionSelector(t *testing.T) {
 			name:    "missing app",
 			args:    []string{"validate", "--version-id", "ver-1"},
 			wantErr: "--app is required",
-		},
-		{
-			name:    "missing version id",
-			args:    []string{"validate", "--app", "app-1"},
-			wantErr: "--version or --version-id is required",
 		},
 	}
 
@@ -365,6 +509,97 @@ func TestValidateVersionAndVersionIDMutuallyExclusive(t *testing.T) {
 	}
 	if !strings.Contains(stderr, "mutually exclusive") {
 		t.Fatalf("expected mutually exclusive error, got %q", stderr)
+	}
+}
+
+func TestValidateWarnsCopyrightWithoutLeadingAcquisitionYear(t *testing.T) {
+	fixture := validValidateFixture()
+	fixture.version = strings.Replace(fixture.version, `"copyright":"2026 Test Company"`, `"copyright":"Example Inc."`, 1)
+
+	client := newValidateTestClient(t, fixture)
+	restore := validate.SetClientFactory(func() (*asc.Client, error) {
+		return client, nil
+	})
+	defer restore()
+
+	root := RootCommand("1.2.3")
+	var runErr error
+	stdout, stderr := captureOutput(t, func() {
+		if err := root.Parse([]string{"validate", "--app", "app-1", "--version-id", "ver-1", "--output", "json"}); err != nil {
+			t.Fatalf("parse error: %v", err)
+		}
+		runErr = root.Run(context.Background())
+	})
+
+	if runErr != nil {
+		t.Fatalf("expected copyright format to be advisory, got %T: %v", runErr, runErr)
+	}
+	if got := rootcmd.ExitCodeFromError(runErr); got != rootcmd.ExitSuccess {
+		t.Fatalf("exit code = %d, want %d", got, rootcmd.ExitSuccess)
+	}
+	if stderr != "" {
+		t.Fatalf("expected empty stderr, got %q", stderr)
+	}
+
+	var report validation.Report
+	if err := json.Unmarshal([]byte(stdout), &report); err != nil {
+		t.Fatalf("failed to parse JSON output: %v; stdout=%q", err, stdout)
+	}
+
+	var matches []validation.CheckResult
+	for _, check := range report.Checks {
+		if check.ID == "legal.format.copyright_year" {
+			matches = append(matches, check)
+		}
+	}
+	if len(matches) != 1 {
+		t.Fatalf("expected exactly one copyright-year check, got %d: %+v", len(matches), report.Checks)
+	}
+	if report.Summary.Errors != 0 || report.Summary.Blocking != 0 {
+		t.Fatalf("expected no blocking issues, got %+v", report.Summary)
+	}
+	check := matches[0]
+	if check.Severity != validation.SeverityWarning || check.Field != "copyright" || check.ResourceType != "appStoreVersion" {
+		t.Fatalf("unexpected copyright-year check: %+v", check)
+	}
+}
+
+func TestValidateAcceptsCopyrightMarkersAndYearRanges(t *testing.T) {
+	for _, copyright := range []string{"© 2026 Test Company", "Copyright 2026 Test Company", "2019-2026 Test Company"} {
+		t.Run(copyright, func(t *testing.T) {
+			fixture := validValidateFixture()
+			fixture.version = strings.Replace(fixture.version, `"copyright":"2026 Test Company"`, `"copyright":"`+copyright+`"`, 1)
+
+			client := newValidateTestClient(t, fixture)
+			restore := validate.SetClientFactory(func() (*asc.Client, error) {
+				return client, nil
+			})
+			defer restore()
+
+			root := RootCommand("1.2.3")
+			var runErr error
+			stdout, stderr := captureOutput(t, func() {
+				if err := root.Parse([]string{"validate", "--app", "app-1", "--version-id", "ver-1", "--output", "json"}); err != nil {
+					t.Fatalf("parse error: %v", err)
+				}
+				runErr = root.Run(context.Background())
+			})
+
+			if runErr != nil {
+				t.Fatalf("run error: %v", runErr)
+			}
+			if stderr != "" {
+				t.Fatalf("expected empty stderr, got %q", stderr)
+			}
+
+			var report validation.Report
+			if err := json.Unmarshal([]byte(stdout), &report); err != nil {
+				t.Fatalf("failed to parse JSON output: %v; stdout=%q", err, stdout)
+			}
+			if hasCheckWithID(report.Checks, "legal.format.copyright_year") {
+				t.Fatalf("copyright %q reported legal.format.copyright_year: %+v", copyright, report.Checks)
+			}
+		})
 	}
 }
 
@@ -488,13 +723,18 @@ func TestValidateSubcommandsRejectParentValidateFlags(t *testing.T) {
 	}{
 		{
 			name:    "top-level version selector before subcommand",
-			args:    []string{"validate", "--version-id", "ver-1", "testflight", "--app", "app-1", "--build", "build-1"},
+			args:    []string{"validate", "--version-id", "ver-1", "testflight", "--app", "app-1", "--build-id", "build-1"},
 			wantErr: "--version-id is only valid for asc validate",
 		},
 		{
 			name:    "shared flag before subcommand",
-			args:    []string{"validate", "--strict", "testflight", "--app", "app-1", "--build", "build-1"},
+			args:    []string{"validate", "--strict", "testflight", "--app", "app-1", "--build-id", "build-1"},
 			wantErr: "--strict must be passed after the validate subcommand name",
+		},
+		{
+			name:    "ipa before subcommand",
+			args:    []string{"validate", "--ipa", "App.ipa", "testflight", "--app", "app-1", "--build-id", "build-1"},
+			wantErr: "--ipa is only valid for asc validate",
 		},
 	}
 
@@ -584,6 +824,186 @@ func TestValidateOutputsJSONAndTable(t *testing.T) {
 
 	if !strings.Contains(stdout, "Severity") {
 		t.Fatalf("expected table output to include headers, got %q", stdout)
+	}
+}
+
+func TestValidateDeepWithoutCachedSessionReturnsStructuredUnverifiedResults(t *testing.T) {
+	t.Setenv("ASC_WEB_SESSION_CACHE_BACKEND", "off")
+	fixture := validValidateFixture()
+	client := newValidateTestClient(t, fixture)
+	restore := validate.SetClientFactory(func() (*asc.Client, error) {
+		return client, nil
+	})
+	defer restore()
+
+	root := RootCommand("1.2.3")
+	var runErr error
+	stdout, stderr := captureOutput(t, func() {
+		if err := root.Parse([]string{"validate", "--app", "app-1", "--version-id", "ver-1", "--deep", "--output", "json"}); err != nil {
+			t.Fatalf("parse error: %v", err)
+		}
+		runErr = root.Run(context.Background())
+	})
+	if runErr != nil {
+		t.Fatalf("unverified deep checks should not block without --strict: %v", runErr)
+	}
+	if stderr != "" {
+		t.Fatalf("stderr = %q, want empty", stderr)
+	}
+
+	var report validation.Report
+	if err := json.Unmarshal([]byte(stdout), &report); err != nil {
+		t.Fatalf("failed to decode deep report: %v; stdout=%q", err, stdout)
+	}
+	if report.Deep == nil || report.Deep.SessionStatus != validation.DeepSessionUnavailable || len(report.Deep.Checks) != 5 {
+		t.Fatalf("deep report = %#v", report.Deep)
+	}
+	if report.Deep.Summary.Unverified != 3 || report.Deep.Summary.Passed != 2 {
+		t.Fatalf("deep summary = %#v", report.Deep.Summary)
+	}
+	for _, check := range report.Checks {
+		if check.ID == "privacy.publish_state.unverified" {
+			t.Fatalf("public privacy advisory was not replaced: %#v", report.Checks)
+		}
+		if check.Severity != validation.SeverityInfo && check.Resolution == nil {
+			t.Fatalf("deep-mode failure %q has no classification", check.ID)
+		}
+	}
+
+	root = RootCommand("1.2.3")
+	stdout, _ = captureOutput(t, func() {
+		if err := root.Parse([]string{"validate", "--app", "app-1", "--version-id", "ver-1", "--deep", "--output", "table"}); err != nil {
+			t.Fatalf("parse error: %v", err)
+		}
+		if err := root.Run(context.Background()); err != nil {
+			t.Fatalf("run error: %v", err)
+		}
+	})
+	for _, want := range []string{"Fixability", "Commands", "App Store Connect URL", "privacy.publish_state", "unverified"} {
+		if !strings.Contains(stdout, want) {
+			t.Fatalf("deep table missing %q: %s", want, stdout)
+		}
+	}
+}
+
+func TestValidateDeepCachedSessionRunsAllFiveChecksThroughCommand(t *testing.T) {
+	fixture := validValidateFixture()
+	client := newValidateTestClient(t, fixture)
+	restoreClient := validate.SetClientFactory(func() (*asc.Client, error) {
+		return client, nil
+	})
+	defer restoreClient()
+
+	webFixture := &validateDeepWebFixture{
+		privacy:       &webcore.AppDataUsagesPublishState{ID: "publish-1", Published: true, PublishedKnown: true},
+		subscriptions: []webcore.ReviewSubscription{{ID: "sub-1", State: "APPROVED", SubmitWithNextAppStoreVersionKnown: true}},
+		agreements:    &asc.WebAgreementsStatusResult{Agreements: []asc.WebAgreement{{Status: "active", IsProgramLicenseAgreement: true}}},
+	}
+	restoreDeep := validate.SetDeepValidationTestHooks(
+		func(context.Context, string) (*webcore.AuthSession, bool, error) {
+			return &webcore.AuthSession{Client: &http.Client{}, UserEmail: "user@example.com"}, true, nil
+		},
+		webFixture,
+	)
+	defer restoreDeep()
+
+	root := RootCommand("1.2.3")
+	var runErr error
+	stdout, stderr := captureOutput(t, func() {
+		if err := root.Parse([]string{"validate", "--app", "app-1", "--version-id", "ver-1", "--deep", "--apple-id", "user@example.com", "--output", "json"}); err != nil {
+			t.Fatalf("parse error: %v", err)
+		}
+		runErr = root.Run(context.Background())
+	})
+	if runErr != nil {
+		t.Fatalf("run error: %v", runErr)
+	}
+	if stderr != "" {
+		t.Fatalf("stderr = %q, want empty", stderr)
+	}
+
+	var report validation.Report
+	if err := json.Unmarshal([]byte(stdout), &report); err != nil {
+		t.Fatalf("decode deep report: %v; stdout=%q", err, stdout)
+	}
+	if report.Deep == nil || report.Deep.SessionStatus != validation.DeepSessionCached || len(report.Deep.Checks) != 5 {
+		t.Fatalf("deep report = %#v", report.Deep)
+	}
+	if report.Deep.Summary.Passed != 4 || report.Deep.Summary.NotApplicable != 1 {
+		t.Fatalf("deep summary = %#v", report.Deep.Summary)
+	}
+	for _, check := range report.Deep.Checks {
+		if check.Status == validation.DeepStatusUnverified || check.Status == validation.DeepStatusBlocked {
+			t.Fatalf("unexpected deep check = %#v", check)
+		}
+	}
+}
+
+func TestValidateDeepStrictBlocksUnverifiedSessionAfterPrintingReport(t *testing.T) {
+	t.Setenv("ASC_WEB_SESSION_CACHE_BACKEND", "off")
+	fixture := validValidateFixture()
+	client := newValidateTestClient(t, fixture)
+	restore := validate.SetClientFactory(func() (*asc.Client, error) {
+		return client, nil
+	})
+	defer restore()
+
+	root := RootCommand("1.2.3")
+	var runErr error
+	stdout, stderr := captureOutput(t, func() {
+		if err := root.Parse([]string{"validate", "--app", "app-1", "--version-id", "ver-1", "--deep", "--strict", "--output", "json"}); err != nil {
+			t.Fatalf("parse error: %v", err)
+		}
+		runErr = root.Run(context.Background())
+	})
+	if runErr == nil {
+		t.Fatal("--strict should block an unverified requested web session")
+	}
+	if got := rootcmd.ExitCodeFromError(runErr); got != rootcmd.ExitError {
+		t.Fatalf("exit code = %d, want validation exit %d", got, rootcmd.ExitError)
+	}
+	if stderr != "" || !strings.Contains(stdout, `"deep"`) {
+		t.Fatalf("expected report on stdout before strict failure; stdout=%q stderr=%q", stdout, stderr)
+	}
+}
+
+func TestValidateDeepReturnsStructuredFallbackWhenRequiredAgreementBlocksPublicAPI(t *testing.T) {
+	t.Setenv("ASC_WEB_SESSION_CACHE_BACKEND", "off")
+	fixture := validValidateFixture()
+	fixture.appStatus = http.StatusForbidden
+	fixture.app = `{"errors":[{"status":"403","code":"FORBIDDEN.REQUIRED_AGREEMENTS_MISSING_OR_EXPIRED","title":"A required agreement is missing or has expired","detail":"This request requires an in-effect agreement."}]}`
+	client := newValidateTestClient(t, fixture)
+	restore := validate.SetClientFactory(func() (*asc.Client, error) {
+		return client, nil
+	})
+	defer restore()
+
+	root := RootCommand("1.2.3")
+	var runErr error
+	stdout, stderr := captureOutput(t, func() {
+		if err := root.Parse([]string{"validate", "--app", "app-1", "--version-id", "ver-1", "--deep", "--output", "json"}); err != nil {
+			t.Fatalf("parse error: %v", err)
+		}
+		runErr = root.Run(context.Background())
+	})
+	if got := rootcmd.ExitCodeFromError(runErr); got != rootcmd.ExitError {
+		t.Fatalf("exit code = %d, want validation exit %d; err=%v", got, rootcmd.ExitError, runErr)
+	}
+	if stderr != "" {
+		t.Fatalf("stderr = %q, want empty", stderr)
+	}
+
+	var report validation.Report
+	if err := json.Unmarshal([]byte(stdout), &report); err != nil {
+		t.Fatalf("decode fallback report: %v; stdout=%q", err, stdout)
+	}
+	if report.Deep == nil || report.Deep.SessionStatus != validation.DeepSessionUnavailable || len(report.Deep.Checks) != 5 {
+		t.Fatalf("deep fallback = %#v", report.Deep)
+	}
+	for _, id := range []string{"agreements.public_api.blocked", "availability.unverified", "review_details.unverified", "deep.web_session.unavailable"} {
+		if !hasCheckWithID(report.Checks, id) {
+			t.Fatalf("fallback missing %q: %#v", id, report.Checks)
+		}
 	}
 }
 
@@ -1453,7 +1873,7 @@ func TestValidateFailsWhenReviewDetailsMissing(t *testing.T) {
 
 func TestValidateFailsWhenReviewDetailsMissingContactEmail(t *testing.T) {
 	fixture := validValidateFixture()
-	fixture.reviewDetails = `{"data":{"type":"appStoreReviewDetails","id":"review-detail-1","attributes":{"contactFirstName":"A","contactLastName":"B","contactEmail":"","contactPhone":"123","demoAccountRequired":false}}}`
+	fixture.reviewDetails = `{"data":{"type":"appStoreReviewDetails","id":"review-detail-1","attributes":{"contactFirstName":"A","contactLastName":"B","contactEmail":"","contactPhone":"+1 555 010 1234","demoAccountRequired":false}}}`
 
 	client := newValidateTestClient(t, fixture)
 	restore := validate.SetClientFactory(func() (*asc.Client, error) {
@@ -1494,9 +1914,65 @@ func TestValidateFailsWhenReviewDetailsMissingContactEmail(t *testing.T) {
 	}
 }
 
+func TestValidateFlagsMalformedReviewContactDetails(t *testing.T) {
+	fixture := validValidateFixture()
+	fixture.reviewDetails = `{"data":{"type":"appStoreReviewDetails","id":"review-detail-1","attributes":{"contactFirstName":"A","contactLastName":"B","contactEmail":"reviewer.example.com","contactPhone":"123","demoAccountRequired":false}}}`
+
+	client := newValidateTestClient(t, fixture)
+	restore := validate.SetClientFactory(func() (*asc.Client, error) {
+		return client, nil
+	})
+	defer restore()
+
+	root := RootCommand("1.2.3")
+
+	var runErr error
+	stdout, _ := captureOutput(t, func() {
+		if err := root.Parse([]string{"validate", "--app", "app-1", "--version-id", "ver-1"}); err != nil {
+			t.Fatalf("parse error: %v", err)
+		}
+		runErr = root.Run(context.Background())
+	})
+
+	if runErr == nil {
+		t.Fatalf("expected error for malformed review contact email")
+	}
+	if _, ok := errors.AsType[ReportedError](runErr); !ok {
+		t.Fatalf("expected ReportedError, got %v", runErr)
+	}
+
+	var report validation.Report
+	if err := json.Unmarshal([]byte(stdout), &report); err != nil {
+		t.Fatalf("failed to parse JSON output: %v", err)
+	}
+
+	foundEmail := false
+	foundPhone := false
+	for _, check := range report.Checks {
+		switch check.ID {
+		case "review_details.format.contact_email":
+			foundEmail = true
+			if check.Severity != validation.SeverityError {
+				t.Fatalf("expected contact email format error, got %+v", check)
+			}
+		case "review_details.format.contact_phone":
+			foundPhone = true
+			if check.Severity != validation.SeverityWarning {
+				t.Fatalf("expected contact phone format warning, got %+v", check)
+			}
+		}
+	}
+	if !foundEmail {
+		t.Fatalf("expected review_details.format.contact_email, got %+v", report.Checks)
+	}
+	if !foundPhone {
+		t.Fatalf("expected review_details.format.contact_phone, got %+v", report.Checks)
+	}
+}
+
 func TestValidateFailsWhenDemoCredentialsMissingAfterOptIn(t *testing.T) {
 	fixture := validValidateFixture()
-	fixture.reviewDetails = `{"data":{"type":"appStoreReviewDetails","id":"review-detail-1","attributes":{"contactFirstName":"A","contactLastName":"B","contactEmail":"a@example.com","contactPhone":"123","demoAccountName":"","demoAccountPassword":"","demoAccountRequired":true,"notes":"Reviewer signs in with the seeded account below."}}}`
+	fixture.reviewDetails = `{"data":{"type":"appStoreReviewDetails","id":"review-detail-1","attributes":{"contactFirstName":"A","contactLastName":"B","contactEmail":"a@example.com","contactPhone":"+1 555 010 1234","demoAccountName":"","demoAccountPassword":"","demoAccountRequired":true,"notes":"Reviewer signs in with the seeded account below."}}}`
 
 	client := newValidateTestClient(t, fixture)
 	restore := validate.SetClientFactory(func() (*asc.Client, error) {
@@ -1872,6 +2348,145 @@ func TestValidateFailsWhenPriceScheduleMissing(t *testing.T) {
 	}
 }
 
+func runValidateReport(t *testing.T, fixture validateFixture) (validation.Report, error) {
+	t.Helper()
+	client := newValidateTestClient(t, fixture)
+	restore := validate.SetClientFactory(func() (*asc.Client, error) {
+		return client, nil
+	})
+	defer restore()
+
+	root := RootCommand("1.2.3")
+	var runErr error
+	stdout, _ := captureOutput(t, func() {
+		if err := root.Parse([]string{"validate", "--app", "app-1", "--version-id", "ver-1", "--output", "json"}); err != nil {
+			t.Fatalf("parse error: %v", err)
+		}
+		runErr = root.Run(context.Background())
+	})
+
+	var report validation.Report
+	if err := json.Unmarshal([]byte(stdout), &report); err != nil {
+		t.Fatalf("failed to parse JSON output %q: %v", stdout, err)
+	}
+	return report, runErr
+}
+
+func findCheck(checks []validation.CheckResult, id string) (validation.CheckResult, bool) {
+	for _, check := range checks {
+		if check.ID == id {
+			return check, true
+		}
+	}
+	return validation.CheckResult{}, false
+}
+
+func TestValidateFailsWhenSyntheticPriceScheduleWasNeverConfigured(t *testing.T) {
+	// Live sequence for a first-time app: the schedule read returns a synthetic
+	// schedule whose ID is the app ID, and manualPrices returns a 404 for a
+	// resource of type 'null'.
+	fixture := validValidateFixture()
+	fixture.priceSchedule = `{"data":{"type":"appPriceSchedules","id":"app-1"}}`
+	fixture.manualPricesStatus = http.StatusNotFound
+	fixture.manualPricesBody = `{"errors":[{"status":"404","code":"NOT_FOUND","title":"The specified resource does not exist","detail":"There is no resource of type 'null' with id 'app-1'"}]}`
+
+	report, runErr := runValidateReport(t, fixture)
+	if _, ok := errors.AsType[ReportedError](runErr); !ok {
+		t.Fatalf("expected ReportedError, got %v", runErr)
+	}
+	check, ok := findCheck(report.Checks, "pricing.schedule.missing")
+	if !ok || check.Severity != validation.SeverityError {
+		t.Fatalf("expected blocking pricing.schedule.missing, got %+v", report.Checks)
+	}
+	if hasCheckWithID(report.Checks, "pricing.base_price.missing") {
+		t.Fatalf("did not expect pricing.base_price.missing alongside a missing schedule, got %+v", report.Checks)
+	}
+}
+
+func TestValidateFailsWhenBaseTerritoryHasNoPrice(t *testing.T) {
+	fixture := validValidateFixture()
+	fixture.manualPrices = `{"data":[],"links":{"next":""}}`
+
+	report, runErr := runValidateReport(t, fixture)
+	if _, ok := errors.AsType[ReportedError](runErr); !ok {
+		t.Fatalf("expected ReportedError, got %v", runErr)
+	}
+	check, ok := findCheck(report.Checks, "pricing.base_price.missing")
+	if !ok || check.Severity != validation.SeverityError {
+		t.Fatalf("expected blocking pricing.base_price.missing, got %+v", report.Checks)
+	}
+	if check.Message != "app has no price set for base territory USA" {
+		t.Fatalf("unexpected message %q", check.Message)
+	}
+}
+
+func TestValidateFailsWhenBaseTerritoryPriceEnded(t *testing.T) {
+	fixture := validValidateFixture()
+	fixture.manualPrices = `{"data":[{"type":"appPrices","id":"price-usa","attributes":{"manual":true,"startDate":"2025-01-01","endDate":"2025-06-01"},"relationships":{"appPricePoint":{"data":{"type":"appPricePoints","id":"point-free"}},"territory":{"data":{"type":"territories","id":"USA"}}}}],"links":{"next":""}}`
+
+	report, _ := runValidateReport(t, fixture)
+	if !hasCheckWithID(report.Checks, "pricing.base_price.missing") {
+		t.Fatalf("expected pricing.base_price.missing for an ended price, got %+v", report.Checks)
+	}
+}
+
+func TestValidateAcceptsFreeAndScheduledBaseTerritoryPrices(t *testing.T) {
+	scheduled := `{"data":[{"type":"appPrices","id":"price-usa","attributes":{"manual":true,"startDate":"2999-01-01"},"relationships":{"appPricePoint":{"data":{"type":"appPricePoints","id":"point-paid"}},"territory":{"data":{"type":"territories","id":"USA"}}}}],"links":{"next":""}}`
+	for name, manualPrices := range map[string]string{
+		"free":      validateFreeManualPricesBody,
+		"scheduled": scheduled,
+	} {
+		t.Run(name, func(t *testing.T) {
+			fixture := validValidateFixture()
+			fixture.manualPrices = manualPrices
+
+			report, runErr := runValidateReport(t, fixture)
+			if runErr != nil {
+				t.Fatalf("expected validate to pass, got %v (%+v)", runErr, report.Checks)
+			}
+			for _, id := range []string{"pricing.base_price.missing", "pricing.schedule.missing", "pricing.schedule.unverified"} {
+				if hasCheckWithID(report.Checks, id) {
+					t.Fatalf("did not expect %s, got %+v", id, report.Checks)
+				}
+			}
+		})
+	}
+}
+
+func TestValidateDowngradesUnreadableBaseTerritoryPriceToUnverified(t *testing.T) {
+	for name, fixture := range map[string]validateFixture{
+		"rate limited": func() validateFixture {
+			fixture := validValidateFixture()
+			fixture.manualPricesStatus = http.StatusTooManyRequests
+			return fixture
+		}(),
+		"unrelated not found": func() validateFixture {
+			fixture := validValidateFixture()
+			fixture.manualPricesStatus = http.StatusNotFound
+			return fixture
+		}(),
+		"unattributed price": func() validateFixture {
+			fixture := validValidateFixture()
+			fixture.manualPrices = `{"data":[{"type":"appPrices","id":"opaque","attributes":{"manual":true}}],"links":{"next":""}}`
+			return fixture
+		}(),
+	} {
+		t.Run(name, func(t *testing.T) {
+			report, runErr := runValidateReport(t, fixture)
+			if runErr != nil {
+				t.Fatalf("expected an unverified warning to stay non-blocking, got %v (%+v)", runErr, report.Checks)
+			}
+			check, ok := findCheck(report.Checks, "pricing.schedule.unverified")
+			if !ok || check.Severity != validation.SeverityWarning {
+				t.Fatalf("expected pricing.schedule.unverified warning, got %+v", report.Checks)
+			}
+			if hasCheckWithID(report.Checks, "pricing.base_price.missing") || hasCheckWithID(report.Checks, "pricing.schedule.missing") {
+				t.Fatalf("did not expect a missing-price error for unverifiable pricing, got %+v", report.Checks)
+			}
+		})
+	}
+}
+
 func TestValidateTreatsAppAvailabilityMissingNon404AsMissing(t *testing.T) {
 	fixture := validValidateFixture()
 	fixture.availabilityV2Status = http.StatusConflict
@@ -1961,20 +2576,19 @@ func TestValidateFailsWhenNoTerritoriesAvailable(t *testing.T) {
 
 func TestValidateWarnsPartialSubscriptionPricingCoverage(t *testing.T) {
 	fixture := validValidateFixture()
-	// Subscription with pricing for 1 territory but app available in many.
+	// Subscription with pricing for 1 territory but a larger App Store pricing universe.
 	fixture.subscriptionsByGroup["group-1"] = `{"data":[{"type":"subscriptions","id":"sub-1","attributes":{"name":"Monthly","productId":"com.example.monthly","state":"APPROVED"}}]}`
 	fixture.expectedPriceInclude = "territory"
 	fixture.pricesBySubscription = map[string]string{
 		"sub-1": `{"data":[{"type":"subscriptionPrices","id":"price-1","attributes":{"startDate":"2026-01-01"},"relationships":{"territory":{"data":{"type":"territories","id":"USA"}}}}]}`,
 	}
-	// Make the app available in 5 territories so the coverage gap is clear.
-	fixture.territories = `{"data":[` +
-		`{"type":"territoryAvailabilities","id":"ta-1","attributes":{"available":true}},` +
-		`{"type":"territoryAvailabilities","id":"ta-2","attributes":{"available":true}},` +
-		`{"type":"territoryAvailabilities","id":"ta-3","attributes":{"available":true}},` +
-		`{"type":"territoryAvailabilities","id":"ta-4","attributes":{"available":true}},` +
-		`{"type":"territoryAvailabilities","id":"ta-5","attributes":{"available":true}}` +
-		`]}`
+	fixture.pricingTerritories = `{"data":[` +
+		`{"type":"territories","id":"USA"},` +
+		`{"type":"territories","id":"CAN"},` +
+		`{"type":"territories","id":"GBR"},` +
+		`{"type":"territories","id":"FRA"},` +
+		`{"type":"territories","id":"DEU"}` +
+		`],"links":{"next":""}}`
 
 	client := newValidateTestClient(t, fixture)
 	restore := validate.SetClientFactory(func() (*asc.Client, error) {
@@ -2011,13 +2625,13 @@ func TestValidateWarnsPartialSubscriptionPricingCoverageAcrossTerritoryPages(t *
 	fixture.pricesBySubscription = map[string]string{
 		"sub-1": `{"data":[{"type":"subscriptionPrices","id":"price-1","attributes":{"startDate":"2026-01-01"},"relationships":{"territory":{"data":{"type":"territories","id":"USA"}}}}]}`,
 	}
-	fixture.territories = `{"data":[{"type":"territoryAvailabilities","id":"ta-1","attributes":{"available":true}}],"links":{"next":"https://api.appstoreconnect.apple.com/v2/appAvailabilities/avail-1/territoryAvailabilities?cursor=page-2"}}`
-	fixture.territoriesByQuery = map[string]string{
+	fixture.pricingTerritories = `{"data":[{"type":"territories","id":"USA"}],"links":{"next":"https://api.appstoreconnect.apple.com/v1/territories?cursor=page-2"}}`
+	fixture.pricingTerritoriesByQuery = map[string]string{
 		"cursor=page-2": `{"data":[
-			{"type":"territoryAvailabilities","id":"ta-2","attributes":{"available":true}},
-			{"type":"territoryAvailabilities","id":"ta-3","attributes":{"available":true}},
-			{"type":"territoryAvailabilities","id":"ta-4","attributes":{"available":true}},
-			{"type":"territoryAvailabilities","id":"ta-5","attributes":{"available":true}}
+			{"type":"territories","id":"CAN"},
+			{"type":"territories","id":"GBR"},
+			{"type":"territories","id":"FRA"},
+			{"type":"territories","id":"DEU"}
 		],"links":{"next":""}}`,
 	}
 
@@ -2049,17 +2663,17 @@ func TestValidateWarnsPartialSubscriptionPricingCoverageAcrossTerritoryPages(t *
 	}
 }
 
-func TestValidateNamesMissingSubscriptionPricingTerritoriesWhenAppTerritoryIDsAreAvailable(t *testing.T) {
+func TestValidateNamesMissingSubscriptionPricingTerritoriesWhenPricingTerritoryIDsAreAvailable(t *testing.T) {
 	fixture := validValidateFixture()
 	fixture.subscriptionsByGroup["group-1"] = `{"data":[{"type":"subscriptions","id":"sub-1","attributes":{"name":"Monthly","productId":"com.example.monthly","state":"APPROVED"}}]}`
 	fixture.expectedPriceInclude = "territory"
 	fixture.pricesBySubscription = map[string]string{
 		"sub-1": `{"data":[{"type":"subscriptionPrices","id":"price-1","attributes":{"startDate":"2026-01-01"},"relationships":{"territory":{"data":{"type":"territories","id":"USA"}}}}]}`,
 	}
-	fixture.territories = `{"data":[
-		{"type":"territoryAvailabilities","id":"ta-1","attributes":{"available":true},"relationships":{"territory":{"data":{"type":"territories","id":"USA"}}}},
-		{"type":"territoryAvailabilities","id":"ta-2","attributes":{"available":true},"relationships":{"territory":{"data":{"type":"territories","id":"CAN"}}}}
-	]}`
+	fixture.pricingTerritories = `{"data":[
+		{"type":"territories","id":"USA"},
+		{"type":"territories","id":"CAN"}
+	],"links":{"next":""}}`
 
 	client := newValidateTestClient(t, fixture)
 	restore := validate.SetClientFactory(func() (*asc.Client, error) {
@@ -2094,6 +2708,7 @@ func TestValidateNamesMissingSubscriptionPricingTerritoriesWhenAppTerritoryIDsAr
 	}
 	if coverageCheck == nil {
 		t.Fatalf("expected pricing coverage warning, got %+v", report.Checks)
+		return
 	}
 	if !strings.Contains(coverageCheck.Message, "missing: CAN") {
 		t.Fatalf("expected exact missing territory in coverage warning, got %+v", *coverageCheck)

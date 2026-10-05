@@ -3,6 +3,7 @@ package auth
 import (
 	"bufio"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -10,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/config"
+	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/rootfs"
 )
 
 type DoctorMigrationHints struct {
@@ -182,7 +184,7 @@ var (
 )
 
 func extractAppfileSignal(path string) appfileSignal {
-	data, err := os.ReadFile(path)
+	data, err := readMigrationFile(path)
 	if err != nil {
 		return appfileSignal{}
 	}
@@ -230,7 +232,7 @@ func appfileKeyOrder() []string {
 }
 
 func extractFastfileActions(path string) []string {
-	data, err := os.ReadFile(path)
+	data, err := readMigrationFile(path)
 	if err != nil {
 		return nil
 	}
@@ -414,7 +416,7 @@ func discoverPbxprojFiles(root string) []string {
 }
 
 func extractMarketingVersions(path string) []string {
-	data, err := os.ReadFile(path)
+	data, err := readMigrationFile(path)
 	if err != nil {
 		return nil
 	}
@@ -574,7 +576,7 @@ func buildSuggestedCommands(signals migrationSignals, resolver MigrationSuggesti
 	if hasMetadataSignal {
 		fastlaneDir := formatFastlaneDir(signals.fastlaneDir)
 		add(fmt.Sprintf("asc migrate validate --fastlane-dir %s", fastlaneDir))
-		add(fmt.Sprintf(`asc migrate import --app %q --version-id %q --fastlane-dir %s`, values.appID, values.versionID, fastlaneDir))
+		add(fmt.Sprintf(`asc migrate import --app %q --version-id %q --fastlane-dir %s --confirm`, values.appID, values.versionID, fastlaneDir))
 	}
 	if hasBuildSignal {
 		add(fmt.Sprintf(`asc builds info --app %q --latest`, values.appID))
@@ -591,11 +593,9 @@ func buildSuggestedCommands(signals migrationSignals, resolver MigrationSuggesti
 			if !hasResolvedVersionID {
 				add(fmt.Sprintf(`asc versions create --app %q --version %q`, values.appID, values.versionString))
 			}
-			add(fmt.Sprintf(`asc versions attach-build --version-id %q --build %q`, values.versionID, uploadedBuildIDPlaceholder))
+			add(fmt.Sprintf(`asc versions attach-build --version-id %q --build-id %q`, values.versionID, uploadedBuildIDPlaceholder))
 			add(fmt.Sprintf(`asc validate --app %q --version-id %q`, values.appID, values.versionID))
-			add(fmt.Sprintf(`asc review submissions-create --app %q --platform %q`, values.appID, reviewSubmissionPlatformPlaceholder))
-			add(fmt.Sprintf(`asc review items-add --submission "REVIEW_SUBMISSION_ID" --item-type appStoreVersions --item-id %q`, values.versionID))
-			add(`asc review submissions-submit --id "REVIEW_SUBMISSION_ID" --confirm`)
+			add(fmt.Sprintf(`asc review submit --app %q --version-id %q --build-id %q --platform %q --confirm`, values.appID, values.versionID, uploadedBuildIDPlaceholder, reviewSubmissionPlatformPlaceholder))
 		}
 	}
 
@@ -705,11 +705,27 @@ func relativePath(root, path string) string {
 }
 
 func isFile(path string) bool {
-	info, err := os.Stat(path)
+	file, err := rootfs.OpenFile(path)
 	if err != nil {
 		return false
 	}
-	return !info.IsDir()
+	return file.Close() == nil
+}
+
+func readMigrationFile(path string) ([]byte, error) {
+	file, err := rootfs.OpenFile(path)
+	if err != nil {
+		return nil, err
+	}
+	data, readErr := io.ReadAll(file)
+	closeErr := file.Close()
+	if readErr != nil {
+		return nil, readErr
+	}
+	if closeErr != nil {
+		return nil, closeErr
+	}
+	return data, nil
 }
 
 func hasGitMarker(dir string) bool {

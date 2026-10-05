@@ -1,9 +1,6 @@
 name: Integration Tests
 
 on:
-  schedule:
-    # Run weekly on Mondays at 06:00 UTC
-    - cron: '0 6 * * 1'
   workflow_dispatch:
     # Allow manual trigger from GitHub UI
 
@@ -14,16 +11,16 @@ jobs:
   integration:
     runs-on: macos-latest
     # Only run if secrets are available (skips forks)
-    if: github.repository == 'rudrankriyam/App-Store-Connect-CLI'
+    if: github.repository == 'rorkai/App-Store-Connect-CLI'
     timeout-minutes: 15
     steps:
       - name: Checkout code
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Set up Go
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@v7
         with:
-          go-version: '1.26.x'
+          go-version-file: go.mod
 
       - name: Run integration tests
         env:
@@ -35,6 +32,7 @@ jobs:
           # Write key from base64 secret to temp file
           if [ -n "$ASC_PRIVATE_KEY_B64" ]; then
             echo "$ASC_PRIVATE_KEY_B64" | base64 -d > /tmp/AuthKey.p8
+            chmod 600 /tmp/AuthKey.p8
             export ASC_PRIVATE_KEY_PATH=/tmp/AuthKey.p8
           fi
 

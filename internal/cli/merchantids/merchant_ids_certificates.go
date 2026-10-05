@@ -10,6 +10,7 @@ import (
 	"github.com/peterbourgon/ff/v3/ffcli"
 
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/asc"
+	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/cli/certificates"
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/cli/shared"
 )
 
@@ -20,17 +21,19 @@ func MerchantIDsCertificatesCommand() *ffcli.Command {
 	return &ffcli.Command{
 		Name:       "certificates",
 		ShortUsage: "asc merchant-ids certificates <subcommand> [flags]",
-		ShortHelp:  "List merchant ID certificates.",
-		LongHelp: `List merchant ID certificates.
+		ShortHelp:  "Manage merchant ID certificates.",
+		LongHelp: `Manage merchant ID certificates.
 
 Examples:
   asc merchant-ids certificates list --merchant-id "MERCHANT_ID"
-  asc merchant-ids certificates get --merchant-id "MERCHANT_ID"`,
+  asc merchant-ids certificates view --merchant-id "MERCHANT_ID"
+  asc merchant-ids certificates create --merchant-id "MERCHANT_ID" --certificate-type APPLE_PAY_MERCHANT_IDENTITY --csr "./merchant.csr"`,
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
 		Subcommands: []*ffcli.Command{
 			MerchantIDsCertificatesListCommand(),
 			MerchantIDsCertificatesGetCommand(),
+			MerchantIDsCertificatesCreateCommand(),
 		},
 		Exec: func(ctx context.Context, args []string) error {
 			return flag.ErrHelp
@@ -42,7 +45,7 @@ Examples:
 func MerchantIDsCertificatesListCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("certificates list", flag.ExitOnError)
 
-	merchantID := fs.String("merchant-id", "", "Merchant ID")
+	merchantID := shared.BindResourceIDFlag(fs, "merchant-id", "merchantIds", "Merchant ID")
 	displayName := fs.String("display-name", "", "Filter by certificate display name(s), comma-separated")
 	certificateType := fs.String("certificate-type", "", "Filter by certificate type(s), comma-separated")
 	serialNumber := fs.String("serial-number", "", "Filter by certificate serial number(s), comma-separated")
@@ -71,16 +74,16 @@ Examples:
 			merchantIDValue := strings.TrimSpace(*merchantID)
 			if merchantIDValue == "" && strings.TrimSpace(*next) == "" {
 				fmt.Fprintln(os.Stderr, "Error: --merchant-id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--merchant-id")
 			}
 			if *limit != 0 && (*limit < 1 || *limit > 200) {
-				return fmt.Errorf("merchant-ids certificates list: --limit must be between 1 and 200")
+				return shared.UsageError("merchant-ids certificates list: --limit must be between 1 and 200")
 			}
 			if err := shared.ValidateNextURL(*next); err != nil {
-				return fmt.Errorf("merchant-ids certificates list: %w", err)
+				return shared.UsageErrorf("merchant-ids certificates list: %v", err)
 			}
 			if err := shared.ValidateSort(*sort, certificateSortValues...); err != nil {
-				return fmt.Errorf("merchant-ids certificates list: %w", err)
+				return shared.UsageErrorf("merchant-ids certificates list: %v", err)
 			}
 
 			fieldsValue, err := normalizeCertificateFields(*fields, "--fields")
@@ -148,43 +151,50 @@ Examples:
 	}
 }
 
+// MerchantIDsCertificatesCreateCommand returns the certificates create
+// subcommand. The implementation lives in the certificates package so both
+// create paths share one CSR and relationship implementation.
+func MerchantIDsCertificatesCreateCommand() *ffcli.Command {
+	return certificates.MerchantIDCertificatesCreateCommand()
+}
+
 // MerchantIDsCertificatesGetCommand returns the certificates relationships get subcommand.
 func MerchantIDsCertificatesGetCommand() *ffcli.Command {
-	fs := flag.NewFlagSet("certificates get", flag.ExitOnError)
+	fs := flag.NewFlagSet("certificates view", flag.ExitOnError)
 
-	merchantID := fs.String("merchant-id", "", "Merchant ID")
+	merchantID := shared.BindResourceIDFlag(fs, "merchant-id", "merchantIds", "Merchant ID")
 	limit := fs.Int("limit", 0, "Maximum results per page (1-200)")
 	next := fs.String("next", "", "Fetch next page using a links.next URL")
 	paginate := fs.Bool("paginate", false, "Automatically fetch all pages (aggregate results)")
 	output := shared.BindOutputFlags(fs)
 
 	return &ffcli.Command{
-		Name:       "get",
-		ShortUsage: "asc merchant-ids certificates get --merchant-id \"MERCHANT_ID\" [flags]",
-		ShortHelp:  "Get certificate relationships for a merchant ID.",
-		LongHelp: `Get certificate relationships for a merchant ID.
+		Name:       "view",
+		ShortUsage: "asc merchant-ids certificates view --merchant-id \"MERCHANT_ID\" [flags]",
+		ShortHelp:  "View certificate relationships for a merchant ID.",
+		LongHelp: `View certificate relationships for a merchant ID.
 
 Examples:
-  asc merchant-ids certificates get --merchant-id "MERCHANT_ID"
-  asc merchant-ids certificates get --merchant-id "MERCHANT_ID" --paginate`,
+  asc merchant-ids certificates view --merchant-id "MERCHANT_ID"
+  asc merchant-ids certificates view --merchant-id "MERCHANT_ID" --paginate`,
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
 			merchantIDValue := strings.TrimSpace(*merchantID)
 			if merchantIDValue == "" && strings.TrimSpace(*next) == "" {
 				fmt.Fprintln(os.Stderr, "Error: --merchant-id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--merchant-id")
 			}
 			if *limit != 0 && (*limit < 1 || *limit > 200) {
-				return fmt.Errorf("merchant-ids certificates get: --limit must be between 1 and 200")
+				return shared.UsageError("merchant-ids certificates view: --limit must be between 1 and 200")
 			}
 			if err := shared.ValidateNextURL(*next); err != nil {
-				return fmt.Errorf("merchant-ids certificates get: %w", err)
+				return shared.UsageErrorf("merchant-ids certificates view: %v", err)
 			}
 
 			client, err := shared.GetASCClient()
 			if err != nil {
-				return fmt.Errorf("merchant-ids certificates get: %w", err)
+				return fmt.Errorf("merchant-ids certificates view: %w", err)
 			}
 
 			requestCtx, cancel := shared.ContextWithTimeout(ctx)
@@ -199,14 +209,14 @@ Examples:
 				paginateOpts := append(opts, asc.WithLinkagesLimit(200))
 				firstPage, err := client.GetMerchantIDCertificatesRelationships(requestCtx, merchantIDValue, paginateOpts...)
 				if err != nil {
-					return fmt.Errorf("merchant-ids certificates get: failed to fetch: %w", err)
+					return fmt.Errorf("merchant-ids certificates view: failed to fetch: %w", err)
 				}
 
 				paginated, err := asc.PaginateAll(requestCtx, firstPage, func(ctx context.Context, nextURL string) (asc.PaginatedResponse, error) {
 					return client.GetMerchantIDCertificatesRelationships(ctx, merchantIDValue, asc.WithLinkagesNextURL(nextURL))
 				})
 				if err != nil {
-					return fmt.Errorf("merchant-ids certificates get: %w", err)
+					return fmt.Errorf("merchant-ids certificates view: %w", err)
 				}
 
 				return shared.PrintOutput(paginated, *output.Output, *output.Pretty)
@@ -214,7 +224,7 @@ Examples:
 
 			resp, err := client.GetMerchantIDCertificatesRelationships(requestCtx, merchantIDValue, opts...)
 			if err != nil {
-				return fmt.Errorf("merchant-ids certificates get: failed to fetch: %w", err)
+				return fmt.Errorf("merchant-ids certificates view: failed to fetch: %w", err)
 			}
 
 			return shared.PrintOutput(resp, *output.Output, *output.Pretty)

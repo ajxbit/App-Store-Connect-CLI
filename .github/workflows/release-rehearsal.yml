@@ -1,0 +1,101 @@
+name: Release rehearsal
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Candidate release version in x.y.z form
+        required: true
+        type: string
+      ref:
+        description: Candidate commit SHA or Git ref containing rehearsal tooling
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-rehearsal-${{ inputs.ref }}-${{ inputs.version }}
+  cancel-in-progress: false
+
+jobs:
+  rehearse:
+    runs-on: macos-latest
+    timeout-minutes: 45
+    env:
+      GIT_TERMINAL_PROMPT: 0
+      GH_PROMPT_DISABLED: 1
+    steps:
+      - name: Checkout requested source
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify rehearsal tooling is available
+        run: |
+          set -euo pipefail
+          if [ ! -f scripts/release_rehearsal.py ] || ! grep -q '^release-guardrails:' Makefile; then
+            echo "::error::Requested ref must contain the hosted release rehearsal tooling. Choose a candidate ref at or after this workflow was introduced."
+            exit 1
+          fi
+
+      - name: Record exact tested commit
+        env:
+          REQUESTED_REF: ${{ inputs.ref }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          TESTED_SHA="$(git rev-parse HEAD)"
+          printf 'TESTED_SHA=%s\n' "${TESTED_SHA}" >> "${GITHUB_ENV}"
+          printf 'Requested ref: %s\nTested SHA: %s\n' "${REQUESTED_REF}" "${TESTED_SHA}"
+          {
+            echo "## Release rehearsal ${VERSION}"
+            echo
+            echo "- Requested ref: \`${REQUESTED_REF}\`"
+            echo "- Tested SHA: \`${TESTED_SHA}\`"
+            echo "- Publishing: disabled"
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install tooling
+        run: make tools
+
+      - name: Run non-publishing release rehearsal
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          GO_BIN="$(go env GOPATH)/bin"
+          export PATH="${GO_BIN}:${PATH}"
+          python3 scripts/release_rehearsal.py \
+            --version "${VERSION}" \
+            --expected-sha "${TESTED_SHA}" \
+            --release-dir release
+
+      - name: Summarize local rehearsal outputs
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          {
+            echo
+            echo "### Release-notes preview"
+            echo
+            cat "release/asc_${VERSION}_release-notes.md"
+            echo
+            echo "### Package checksums"
+            echo
+            echo '```text'
+            cat "release/asc_${VERSION}_checksums.txt"
+            echo '```'
+            echo
+            echo "All files remained local to this runner; no release assets were uploaded."
+          } >> "${GITHUB_STEP_SUMMARY}"

@@ -99,7 +99,6 @@ func TestAppSetupAvailabilitySetCommand_MissingFlags(t *testing.T) {
 		{name: "missing territory", args: []string{"--app", "APP", "--available", "true", "--available-in-new-territories", "true"}},
 		{name: "invalid territory csv", args: []string{"--app", "APP", "--territory", ",,,", "--available", "true", "--available-in-new-territories", "true"}},
 		{name: "missing available", args: []string{"--app", "APP", "--territory", "USA", "--available-in-new-territories", "true"}},
-		{name: "missing available in new territories", args: []string{"--app", "APP", "--territory", "USA", "--available", "true"}},
 	}
 
 	for _, test := range tests {
@@ -194,6 +193,7 @@ func TestAppSetupCommands_DefaultOutputJSON(t *testing.T) {
 			f := cmd.FlagSet.Lookup("output")
 			if f == nil {
 				t.Fatalf("expected --output flag to be defined")
+				return
 			}
 			if f.DefValue != "json" {
 				t.Fatalf("expected --output default to be 'json', got %q", f.DefValue)

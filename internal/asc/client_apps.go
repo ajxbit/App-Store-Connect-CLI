@@ -15,20 +15,39 @@ const (
 	ContentRightsDeclarationUsesThirdPartyContent       ContentRightsDeclaration = "USES_THIRD_PARTY_CONTENT"
 )
 
+// SubscriptionStatusURLVersion is the App Store Server Notifications payload version.
+type SubscriptionStatusURLVersion string
+
+const (
+	SubscriptionStatusURLVersionV1 SubscriptionStatusURLVersion = "V1"
+	SubscriptionStatusURLVersionV2 SubscriptionStatusURLVersion = "V2"
+)
+
 // AppAttributes describes an app resource.
 type AppAttributes struct {
-	Name                     string                    `json:"name"`
-	BundleID                 string                    `json:"bundleId"`
-	SKU                      string                    `json:"sku"`
-	PrimaryLocale            string                    `json:"primaryLocale,omitempty"`
-	ContentRightsDeclaration *ContentRightsDeclaration `json:"contentRightsDeclaration,omitempty"`
+	Name                                   string                        `json:"name"`
+	BundleID                               string                        `json:"bundleId"`
+	SKU                                    string                        `json:"sku"`
+	PrimaryLocale                          string                        `json:"primaryLocale,omitempty"`
+	ContentRightsDeclaration               *ContentRightsDeclaration     `json:"contentRightsDeclaration,omitempty"`
+	SubscriptionStatusURL                  *string                       `json:"subscriptionStatusUrl,omitempty"`
+	SubscriptionStatusURLVersion           *SubscriptionStatusURLVersion `json:"subscriptionStatusUrlVersion,omitempty"`
+	SubscriptionStatusURLForSandbox        *string                       `json:"subscriptionStatusUrlForSandbox,omitempty"`
+	SubscriptionStatusURLVersionForSandbox *SubscriptionStatusURLVersion `json:"subscriptionStatusUrlVersionForSandbox,omitempty"`
+
+	originalAttributes map[string]json.RawMessage
+	decodedAttributes  map[string]json.RawMessage
 }
 
 // AppUpdateAttributes describes fields for updating an app.
 type AppUpdateAttributes struct {
-	BundleID                 *string                   `json:"bundleId,omitempty"`
-	PrimaryLocale            *string                   `json:"primaryLocale,omitempty"`
-	ContentRightsDeclaration *ContentRightsDeclaration `json:"contentRightsDeclaration,omitempty"`
+	BundleID                               *string                       `json:"bundleId,omitempty"`
+	PrimaryLocale                          *string                       `json:"primaryLocale,omitempty"`
+	ContentRightsDeclaration               *ContentRightsDeclaration     `json:"contentRightsDeclaration,omitempty"`
+	SubscriptionStatusURL                  *string                       `json:"subscriptionStatusUrl,omitempty"`
+	SubscriptionStatusURLVersion           *SubscriptionStatusURLVersion `json:"subscriptionStatusUrlVersion,omitempty"`
+	SubscriptionStatusURLForSandbox        *string                       `json:"subscriptionStatusUrlForSandbox,omitempty"`
+	SubscriptionStatusURLVersionForSandbox *SubscriptionStatusURLVersion `json:"subscriptionStatusUrlVersionForSandbox,omitempty"`
 }
 
 // AppCreateAttributes describes attributes for creating an app.
@@ -101,8 +120,21 @@ func (c *Client) GetApps(ctx context.Context, opts ...AppsOption) (*AppsResponse
 
 // GetApp retrieves a single app by ID.
 func (c *Client) GetApp(ctx context.Context, appID string) (*AppResponse, error) {
+	return c.GetAppWithOptions(ctx, appID)
+}
+
+// GetAppWithOptions retrieves a single app by ID with sparse fields and includes.
+func (c *Client) GetAppWithOptions(ctx context.Context, appID string, opts ...AppOption) (*AppResponse, error) {
+	query := &appQuery{}
+	for _, opt := range opts {
+		opt(query)
+	}
+
 	appID = strings.TrimSpace(appID)
 	path := fmt.Sprintf("/v1/apps/%s", appID)
+	if queryString := buildAppQuery(query); queryString != "" {
+		path += "?" + queryString
+	}
 	data, err := c.do(ctx, "GET", path, nil)
 	if err != nil {
 		return nil, err
@@ -272,7 +304,7 @@ func (c *Client) UpdateApp(ctx context.Context, appID string, attrs AppUpdateAtt
 			ID:   appID,
 		},
 	}
-	if attrs.BundleID != nil || attrs.PrimaryLocale != nil || attrs.ContentRightsDeclaration != nil {
+	if attrs != (AppUpdateAttributes{}) {
 		payload.Data.Attributes = &attrs
 	}
 
@@ -364,37 +396,6 @@ func (c *Client) GetAppSearchKeywords(ctx context.Context, appID string, opts ..
 	}
 
 	return &response, nil
-}
-
-// SetAppSearchKeywords replaces the search keywords for an app.
-func (c *Client) SetAppSearchKeywords(ctx context.Context, appID string, keywords []string) error {
-	appID = strings.TrimSpace(appID)
-	keywords = normalizeList(keywords)
-	if appID == "" {
-		return fmt.Errorf("appID is required")
-	}
-	if len(keywords) == 0 {
-		return fmt.Errorf("keywords are required")
-	}
-
-	payload := RelationshipRequest{
-		Data: make([]RelationshipData, 0, len(keywords)),
-	}
-	for _, keyword := range keywords {
-		payload.Data = append(payload.Data, RelationshipData{
-			Type: ResourceTypeAppKeywords,
-			ID:   keyword,
-		})
-	}
-
-	body, err := BuildRequestBody(payload)
-	if err != nil {
-		return err
-	}
-
-	path := fmt.Sprintf("/v1/apps/%s/relationships/searchKeywords", appID)
-	_, err = c.do(ctx, "PATCH", path, body)
-	return err
 }
 
 // GetAppCiProduct retrieves the CI product for an app.

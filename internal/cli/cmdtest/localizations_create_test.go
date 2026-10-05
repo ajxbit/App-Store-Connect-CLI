@@ -157,8 +157,8 @@ func TestLocalizationsCreate_WarnsWhenCreatedLocaleIsSubmitIncomplete(t *testing
 			return jsonResponse(http.StatusOK, `{"data":{"type":"appStoreVersions","id":"version-1","attributes":{"platform":"IOS"},"relationships":{"app":{"data":{"type":"apps","id":"app-1"}}}}}`)
 		case req.Method == http.MethodGet && req.URL.Path == "/v1/apps/app-1/appStoreVersions":
 			query := req.URL.Query()
-			if got := query.Get("filter[appStoreState]"); got != "READY_FOR_SALE,DEVELOPER_REMOVED_FROM_SALE,REMOVED_FROM_SALE" {
-				t.Fatalf("expected released-state filter, got %q", got)
+			if !isReleasedVersionStateQuery(query) {
+				t.Fatalf("expected released-state filter, got %q", req.URL.RawQuery)
 			}
 			if got := query.Get("filter[platform]"); got != "IOS" {
 				t.Fatalf("expected platform filter IOS, got %q", got)
@@ -280,8 +280,8 @@ func TestLocalizationsCreate_WarnsWhenUpdateVersionIsMissingWhatsNew(t *testing.
 			return jsonResponse(http.StatusOK, `{"data":{"type":"appStoreVersions","id":"version-1","attributes":{"platform":"IOS"},"relationships":{"app":{"data":{"type":"apps","id":"app-1"}}}}}`)
 		case req.Method == http.MethodGet && req.URL.Path == "/v1/apps/app-1/appStoreVersions":
 			query := req.URL.Query()
-			if got := query.Get("filter[appStoreState]"); got != "READY_FOR_SALE,DEVELOPER_REMOVED_FROM_SALE,REMOVED_FROM_SALE" {
-				t.Fatalf("expected released-state filter, got %q", got)
+			if !isReleasedVersionStateQuery(query) {
+				t.Fatalf("expected released-state filter, got %q", req.URL.RawQuery)
 			}
 			if got := query.Get("filter[platform]"); got != "IOS" {
 				t.Fatalf("expected platform filter IOS, got %q", got)
@@ -356,8 +356,8 @@ func TestLocalizationsCreate_UpdateWarningIncludesWhatsNewAlongsideBaseMissingFi
 			return jsonResponse(http.StatusOK, `{"data":{"type":"appStoreVersions","id":"version-1","attributes":{"platform":"IOS"},"relationships":{"app":{"data":{"type":"apps","id":"app-1"}}}}}`)
 		case req.Method == http.MethodGet && req.URL.Path == "/v1/apps/app-1/appStoreVersions":
 			query := req.URL.Query()
-			if got := query.Get("filter[appStoreState]"); got != "READY_FOR_SALE,DEVELOPER_REMOVED_FROM_SALE,REMOVED_FROM_SALE" {
-				t.Fatalf("expected released-state filter, got %q", got)
+			if !isReleasedVersionStateQuery(query) {
+				t.Fatalf("expected released-state filter, got %q", req.URL.RawQuery)
 			}
 			if got := query.Get("filter[platform]"); got != "IOS" {
 				t.Fatalf("expected platform filter IOS, got %q", got)
@@ -722,7 +722,7 @@ func TestLocalizationsCreate_RejectsOverLimitKeywordBytesBeforeRequest(t *testin
 			"localizations", "create",
 			"--version", "version-1",
 			"--locale", "ja",
-			"--keywords", strings.Repeat("語", 34),
+			"--keywords", strings.Repeat("語", 101),
 		}, "1.2.3")
 		if code != cmd.ExitUsage {
 			t.Fatalf("expected exit code %d, got %d", cmd.ExitUsage, code)
@@ -732,15 +732,15 @@ func TestLocalizationsCreate_RejectsOverLimitKeywordBytesBeforeRequest(t *testin
 	if stdout != "" {
 		t.Fatalf("expected empty stdout, got %q", stdout)
 	}
-	if !strings.Contains(stderr, "keywords exceed 100 bytes") {
-		t.Fatalf("expected keyword byte-limit error, got %q", stderr)
+	if !strings.Contains(stderr, "keywords exceed 100 characters") {
+		t.Fatalf("expected keyword character-limit error, got %q", stderr)
 	}
 	if requestCount != 0 {
 		t.Fatalf("expected no HTTP requests, got %d", requestCount)
 	}
 }
 
-func TestLocalizationsCreate_RejectsOverLimitKeywordBytesBeforeAuthResolution(t *testing.T) {
+func TestLocalizationsCreate_RejectsOverLimitKeywordCharactersBeforeAuthResolution(t *testing.T) {
 	t.Setenv("ASC_BYPASS_KEYCHAIN", "1")
 	t.Setenv("ASC_KEY_ID", "")
 	t.Setenv("ASC_ISSUER_ID", "")
@@ -767,7 +767,7 @@ func TestLocalizationsCreate_RejectsOverLimitKeywordBytesBeforeAuthResolution(t 
 			"localizations", "create",
 			"--version", "version-1",
 			"--locale", "ja",
-			"--keywords", strings.Repeat("語", 34),
+			"--keywords", strings.Repeat("語", 101),
 		}, "1.2.3")
 		if code != cmd.ExitUsage {
 			t.Fatalf("expected exit code %d, got %d", cmd.ExitUsage, code)
@@ -777,8 +777,8 @@ func TestLocalizationsCreate_RejectsOverLimitKeywordBytesBeforeAuthResolution(t 
 	if stdout != "" {
 		t.Fatalf("expected empty stdout, got %q", stdout)
 	}
-	if !strings.Contains(stderr, "keywords exceed 100 bytes") {
-		t.Fatalf("expected keyword byte-limit error, got %q", stderr)
+	if !strings.Contains(stderr, "keywords exceed 100 characters") {
+		t.Fatalf("expected keyword character-limit error, got %q", stderr)
 	}
 	if requestCount != 0 {
 		t.Fatalf("expected no HTTP requests, got %d", requestCount)
@@ -986,7 +986,7 @@ func TestLocalizationsCreate_RejectsPositionalArgs(t *testing.T) {
 	if stdout != "" {
 		t.Fatalf("expected empty stdout, got %q", stdout)
 	}
-	if !strings.Contains(stderr, "localizations create does not accept positional arguments") {
+	if !strings.Contains(stderr, `unexpected argument "extra"`) {
 		t.Fatalf("expected positional-args error, got %q", stderr)
 	}
 	if requestCount != 0 {

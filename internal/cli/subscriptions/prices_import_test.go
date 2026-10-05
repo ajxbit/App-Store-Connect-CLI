@@ -6,6 +6,9 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
+
+	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/asc"
 )
 
 func TestReadSubscriptionPricesImportCSV_SupportsHeaderAliases(t *testing.T) {
@@ -115,5 +118,184 @@ func TestResolveSubscriptionPriceImportTerritoryID_RejectsTerritoriesOutsideASCS
 				t.Fatalf("expected error for %q, got nil", input)
 			}
 		})
+	}
+}
+
+func TestWriteSubscriptionPriceImportFailureArtifact_ReturnsWriteError(t *testing.T) {
+	t.Chdir(t.TempDir())
+	if err := os.WriteFile(".asc", []byte("not a directory"), 0o600); err != nil {
+		t.Fatalf("WriteFile() error: %v", err)
+	}
+
+	_, err := writeSubscriptionPriceImportFailureArtifact(&subscriptionPriceImportSummary{
+		Failed:  1,
+		Results: []subscriptionPriceImportResultItem{{Status: "failed"}},
+	})
+	if err == nil {
+		t.Fatal("expected write error, got nil")
+	}
+}
+
+func TestSubscriptionPriceImportStateMatchesIgnoresUnspecifiedPreservedValue(t *testing.T) {
+	index := &subscriptionPriceImportStateIndex{
+		states: []subscriptionPriceImportState{{
+			territoryID:          "USA",
+			pricePointID:         "pp-usa",
+			startDate:            "2026-07-01",
+			preserveCurrentPrice: true,
+			planType:             asc.SubscriptionPlanTypeUpfront,
+		}},
+	}
+	target := subscriptionPriceImportResolvedRow{
+		territoryID:  "USA",
+		pricePointID: "pp-usa",
+		startDate:    "2026-07-01",
+		preserveSet:  false,
+		planType:     asc.SubscriptionPlanTypeUpfront,
+	}
+
+	if !index.matches(target) {
+		t.Fatal("expected omitted preserved value to match either remote state")
+	}
+}
+
+func TestSubscriptionPriceImportStateMatchesCanonicalSameDayPrice(t *testing.T) {
+	index := &subscriptionPriceImportStateIndex{
+		now: time.Date(2026, time.July, 2, 12, 0, 0, 0, time.UTC),
+		states: []subscriptionPriceImportState{
+			{territoryID: "USA", pricePointID: "target", startDate: "2026-07-01", preserveCurrentPrice: true, planType: asc.SubscriptionPlanTypeUpfront},
+			{territoryID: "USA", pricePointID: "canonical", startDate: "2026-07-01", preserveCurrentPrice: false, planType: asc.SubscriptionPlanTypeUpfront},
+		},
+	}
+	target := subscriptionPriceImportResolvedRow{
+		territoryID:  "USA",
+		pricePointID: "target",
+		planType:     asc.SubscriptionPlanTypeUpfront,
+	}
+	if index.matches(target) {
+		t.Fatal("expected the same-day non-preserved canonical price to win")
+	}
+
+	target.pricePointID = "canonical"
+	if !index.matches(target) {
+		t.Fatal("expected the canonical non-preserved price to match")
+	}
+}
+
+func TestSubscriptionPriceImportStateSelectsCanonicalWhenPreserveIsExplicit(t *testing.T) {
+	index := &subscriptionPriceImportStateIndex{
+		now: time.Date(2026, time.July, 2, 12, 0, 0, 0, time.UTC),
+		states: []subscriptionPriceImportState{
+			{territoryID: "USA", pricePointID: "target", startDate: "2026-07-01", preserveCurrentPrice: true, planType: asc.SubscriptionPlanTypeUpfront},
+			{territoryID: "USA", pricePointID: "canonical", startDate: "2026-07-01", preserveCurrentPrice: false, planType: asc.SubscriptionPlanTypeUpfront},
+		},
+	}
+	target := subscriptionPriceImportResolvedRow{
+		territoryID:          "USA",
+		pricePointID:         "target",
+		preserveSet:          true,
+		preserveCurrentPrice: true,
+		planType:             asc.SubscriptionPlanTypeUpfront,
+	}
+	if index.matches(target) {
+		t.Fatal("expected explicit preserved matching to compare against the canonical row")
+	}
+
+	target.pricePointID = "canonical"
+	if !index.matches(target) {
+		t.Fatal("expected preserveCurrentPrice not to be compared with the canonical row's historical preserved state")
+	}
+}
+
+func TestSubscriptionPriceImportStateExplicitDateMatchesEitherPreservedValue(t *testing.T) {
+	index := &subscriptionPriceImportStateIndex{
+		states: []subscriptionPriceImportState{
+			{territoryID: "USA", pricePointID: "target", startDate: "2026-07-01", preserveCurrentPrice: true, planType: asc.SubscriptionPlanTypeUpfront},
+			{territoryID: "USA", pricePointID: "other", startDate: "2026-07-01", preserveCurrentPrice: false, planType: asc.SubscriptionPlanTypeUpfront},
+		},
+	}
+	target := subscriptionPriceImportResolvedRow{
+		territoryID: "USA", pricePointID: "target", startDate: "2026-07-01", planType: asc.SubscriptionPlanTypeUpfront,
+	}
+	if !index.matches(target) {
+		t.Fatal("expected an explicit-date target with omitted preserve to match either preserved value")
+	}
+}
+
+func TestSubscriptionPriceImportStateExplicitDateIgnoresCreatePreserveOption(t *testing.T) {
+	index := &subscriptionPriceImportStateIndex{
+		states: []subscriptionPriceImportState{
+			{territoryID: "USA", pricePointID: "target", startDate: "2026-08-15", preserveCurrentPrice: false, planType: asc.SubscriptionPlanTypeUpfront},
+		},
+	}
+	target := subscriptionPriceImportResolvedRow{
+		territoryID:          "USA",
+		pricePointID:         "target",
+		startDate:            "2026-08-15",
+		preserveSet:          true,
+		preserveCurrentPrice: true,
+		planType:             asc.SubscriptionPlanTypeUpfront,
+	}
+	if !index.matches(target) {
+		t.Fatal("expected preserveCurrentPrice create option not to be compared with response preserved state")
+	}
+}
+
+func TestSubscriptionPriceImportStateRejectsMonthlyPrice(t *testing.T) {
+	index := &subscriptionPriceImportStateIndex{
+		now: time.Date(2026, time.July, 2, 12, 0, 0, 0, time.UTC),
+		states: []subscriptionPriceImportState{{
+			territoryID: "USA", pricePointID: "pp-usa", startDate: "2026-07-01", planType: asc.SubscriptionPlanTypeMonthly,
+		}},
+	}
+	target := subscriptionPriceImportResolvedRow{
+		territoryID: "USA", pricePointID: "pp-usa", planType: asc.SubscriptionPlanTypeUpfront,
+	}
+	if index.matches(target) {
+		t.Fatal("expected a MONTHLY price not to satisfy an UPFRONT import")
+	}
+}
+
+func TestSubscriptionPriceImportStateUsesUSPacificDay(t *testing.T) {
+	// The 2026-10-01 price ends the 2026-01-01 price on its start date.
+	states := []subscriptionPriceImportState{
+		{territoryID: "USA", pricePointID: "pp-old", startDate: "2026-01-01", planType: asc.SubscriptionPlanTypeUpfront},
+		{territoryID: "USA", pricePointID: "pp-new", startDate: "2026-10-01", planType: asc.SubscriptionPlanTypeUpfront},
+	}
+	tests := []struct {
+		name    string
+		now     time.Time
+		current string
+	}{
+		// 17:30 PDT on 2026-09-30: the 2026-10-01 price is still scheduled.
+		{name: "00:30 UTC is the previous Pacific day", now: time.Date(2026, time.October, 1, 0, 30, 0, 0, time.UTC), current: "pp-old"},
+		{name: "Pacific midnight starts the next price", now: time.Date(2026, time.October, 1, 7, 0, 0, 0, time.UTC), current: "pp-new"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			index := &subscriptionPriceImportStateIndex{now: test.now, states: states}
+			for _, pricePointID := range []string{"pp-old", "pp-new"} {
+				target := subscriptionPriceImportResolvedRow{
+					territoryID:  "USA",
+					pricePointID: pricePointID,
+					planType:     asc.SubscriptionPlanTypeUpfront,
+				}
+				if got, want := index.matches(target), pricePointID == test.current; got != want {
+					t.Fatalf("matches(%s) = %t, want %t", pricePointID, got, want)
+				}
+			}
+		})
+	}
+}
+
+func TestSubscriptionPriceImportStateAddRecordsUSPacificDate(t *testing.T) {
+	index := &subscriptionPriceImportStateIndex{now: time.Date(2026, time.October, 1, 0, 30, 0, 0, time.UTC)}
+	index.add(subscriptionPriceImportResolvedRow{
+		territoryID:  "USA",
+		pricePointID: "pp-new",
+		planType:     asc.SubscriptionPlanTypeUpfront,
+	})
+	if len(index.states) != 1 || index.states[0].startDate != "2026-09-30" {
+		t.Fatalf("expected the immediate price recorded on the Pacific date 2026-09-30, got %+v", index.states)
 	}
 }

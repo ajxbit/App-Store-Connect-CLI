@@ -25,9 +25,9 @@ func AppClipsCommand() *ffcli.Command {
 
 Examples:
   asc app-clips list --app "APP_ID"
-  asc app-clips get --id "CLIP_ID"
+  asc app-clips view --id "CLIP_ID"
   asc app-clips default-experiences list --app-clip-id "CLIP_ID"
-  asc app-clips advanced-experiences create --app "APP_ID" --bundle-id "com.example.clip" --link "https://example.com" --default-language EN --is-powered-by
+  asc app-clips advanced-experiences create --app "APP_ID" --bundle-id "com.example.clip" --link "https://example.com" --default-language EN --is-powered-by --header-image-id "IMAGE_ID" --localization-id "LOCALIZATION_ID"
   asc app-clips invocations list --build-bundle-id "BUILD_BUNDLE_ID"`,
 		FlagSet:   fs,
 		UsageFunc: shared.VisibleUsageFunc,
@@ -75,16 +75,16 @@ Examples:
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
 			if *limit != 0 && (*limit < 1 || *limit > 200) {
-				return fmt.Errorf("app-clips list: --limit must be between 1 and 200")
+				return shared.UsageError("app-clips list: --limit must be between 1 and 200")
 			}
 			if err := shared.ValidateNextURL(*next); err != nil {
-				return fmt.Errorf("app-clips list: %w", err)
+				return shared.UsageErrorf("app-clips list: %v", err)
 			}
 
 			appValue := strings.TrimSpace(shared.ResolveAppID(*appID))
 			if appValue == "" {
 				fmt.Fprintln(os.Stderr, "Error: --app is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--app")
 			}
 
 			client, err := shared.GetASCClient()
@@ -138,31 +138,31 @@ Examples:
 
 // AppClipsGetCommand returns the app clips get subcommand.
 func AppClipsGetCommand() *ffcli.Command {
-	fs := flag.NewFlagSet("get", flag.ExitOnError)
+	fs := flag.NewFlagSet("view", flag.ExitOnError)
 
-	appClipID := fs.String("id", "", "App Clip ID")
+	appClipID := shared.BindResourceIDFlag(fs, "id", "appClips", "App Clip ID")
 	output := shared.BindOutputFlags(fs)
 
 	return &ffcli.Command{
-		Name:       "get",
-		ShortUsage: "asc app-clips get --id \"CLIP_ID\"",
-		ShortHelp:  "Get App Clip details by ID.",
-		LongHelp: `Get App Clip details by ID.
+		Name:       "view",
+		ShortUsage: "asc app-clips view --id \"CLIP_ID\"",
+		ShortHelp:  "View App Clip details by ID.",
+		LongHelp: `View App Clip details by ID.
 
 Examples:
-  asc app-clips get --id "CLIP_ID"`,
+  asc app-clips view --id "CLIP_ID"`,
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
 			idValue := strings.TrimSpace(*appClipID)
 			if idValue == "" {
 				fmt.Fprintln(os.Stderr, "Error: --id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--id")
 			}
 
 			client, err := shared.GetASCClient()
 			if err != nil {
-				return fmt.Errorf("app-clips get: %w", err)
+				return fmt.Errorf("app-clips view: %w", err)
 			}
 
 			requestCtx, cancel := shared.ContextWithTimeout(ctx)
@@ -170,7 +170,7 @@ Examples:
 
 			resp, err := client.GetAppClip(requestCtx, idValue)
 			if err != nil {
-				return fmt.Errorf("app-clips get: failed to fetch: %w", err)
+				return fmt.Errorf("app-clips view: failed to fetch: %w", err)
 			}
 
 			return shared.PrintOutput(resp, *output.Output, *output.Pretty)

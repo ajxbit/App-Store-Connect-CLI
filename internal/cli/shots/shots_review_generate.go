@@ -30,25 +30,25 @@ func ShotsReviewGenerateCommand() *ffcli.Command {
 	return &ffcli.Command{
 		Name:       "review-generate",
 		ShortUsage: "asc screenshots review-generate [flags]",
-		ShortHelp:  "[experimental] Generate HTML side-by-side review and JSON manifest.",
-		LongHelp: `Generate review artifacts for screenshots (experimental):
+		ShortHelp:  "Generate HTML side-by-side review and JSON manifest.",
+		LongHelp: `Generate review artifacts for screenshots:
 
 - HTML report for visual QA (raw vs framed side-by-side)
 - JSON manifest for agent checks (size, locale/device grouping, approval state)`,
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
-			framed := strings.TrimSpace(*framedDir)
-			if framed == "" {
+			framed := *framedDir
+			if strings.TrimSpace(framed) == "" {
 				fmt.Fprintln(os.Stderr, "Error: --framed-dir is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--framed-dir")
 			}
 
 			result, err := screenshots.GenerateReview(ctx, screenshots.ReviewRequest{
-				RawDir:       strings.TrimSpace(*rawDir),
+				RawDir:       *rawDir,
 				FramedDir:    framed,
-				OutputDir:    strings.TrimSpace(*outputDir),
-				ApprovalPath: strings.TrimSpace(*approvalPath),
+				OutputDir:    *outputDir,
+				ApprovalPath: *approvalPath,
 			})
 			if err != nil {
 				return fmt.Errorf("screenshots review-generate: %w", err)

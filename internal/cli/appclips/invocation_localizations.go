@@ -44,7 +44,7 @@ Examples:
 func AppClipInvocationLocalizationsListCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("list", flag.ExitOnError)
 
-	invocationID := fs.String("invocation-id", "", "Invocation ID")
+	invocationID := shared.BindResourceIDFlag(fs, "invocation-id", "betaAppClipInvocations", "Invocation ID")
 	limit := fs.Int("limit", 0, "Maximum included localizations (1-200)")
 	output := shared.BindOutputFlags(fs)
 
@@ -60,13 +60,13 @@ Examples:
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
 			if *limit != 0 && (*limit < 1 || *limit > 200) {
-				return fmt.Errorf("app-clips invocations localizations list: --limit must be between 1 and 200")
+				return shared.UsageError("app-clips invocations localizations list: --limit must be between 1 and 200")
 			}
 
 			invocationValue := strings.TrimSpace(*invocationID)
 			if invocationValue == "" {
 				fmt.Fprintln(os.Stderr, "Error: --invocation-id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--invocation-id")
 			}
 
 			client, err := shared.GetASCClient()
@@ -95,7 +95,7 @@ Examples:
 func AppClipInvocationLocalizationsCreateCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("create", flag.ExitOnError)
 
-	invocationID := fs.String("invocation-id", "", "Invocation ID")
+	invocationID := shared.BindResourceIDFlag(fs, "invocation-id", "betaAppClipInvocations", "Invocation ID")
 	locale := fs.String("locale", "", "Locale (e.g., en-US)")
 	title := fs.String("title", "", "Title")
 	output := shared.BindOutputFlags(fs)
@@ -114,19 +114,19 @@ Examples:
 			invocationValue := strings.TrimSpace(*invocationID)
 			if invocationValue == "" {
 				fmt.Fprintln(os.Stderr, "Error: --invocation-id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--invocation-id")
 			}
 
 			localeValue := strings.TrimSpace(*locale)
 			if localeValue == "" {
 				fmt.Fprintln(os.Stderr, "Error: --locale is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--locale")
 			}
 
 			titleValue := strings.TrimSpace(*title)
 			if titleValue == "" {
 				fmt.Fprintln(os.Stderr, "Error: --title is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--title")
 			}
 
 			client, err := shared.GetASCClient()
@@ -156,7 +156,7 @@ Examples:
 func AppClipInvocationLocalizationsUpdateCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("update", flag.ExitOnError)
 
-	localizationID := fs.String("localization-id", "", "Localization ID")
+	localizationID := shared.BindResourceIDFlag(fs, "localization-id", "betaAppClipInvocationLocalizations", "Localization ID")
 	title := fs.String("title", "", "Title")
 	output := shared.BindOutputFlags(fs)
 
@@ -174,7 +174,7 @@ Examples:
 			locValue := strings.TrimSpace(*localizationID)
 			if locValue == "" {
 				fmt.Fprintln(os.Stderr, "Error: --localization-id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--localization-id")
 			}
 
 			visited := map[string]bool{}
@@ -183,7 +183,7 @@ Examples:
 			})
 			if !visited["title"] {
 				fmt.Fprintln(os.Stderr, "Error: at least one update flag is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("")
 			}
 
 			titleValue := strings.TrimSpace(*title)
@@ -211,7 +211,7 @@ Examples:
 func AppClipInvocationLocalizationsDeleteCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("delete", flag.ExitOnError)
 
-	localizationID := fs.String("localization-id", "", "Localization ID")
+	localizationID := shared.BindResourceIDFlag(fs, "localization-id", "betaAppClipInvocationLocalizations", "Localization ID")
 	confirm := fs.Bool("confirm", false, "Confirm deletion")
 	output := shared.BindOutputFlags(fs)
 
@@ -229,11 +229,11 @@ Examples:
 			locValue := strings.TrimSpace(*localizationID)
 			if locValue == "" {
 				fmt.Fprintln(os.Stderr, "Error: --localization-id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--localization-id")
 			}
 			if !*confirm {
 				fmt.Fprintln(os.Stderr, "Error: --confirm is required to delete")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--confirm")
 			}
 
 			client, err := shared.GetASCClient()

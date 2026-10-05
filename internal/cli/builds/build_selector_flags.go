@@ -6,21 +6,21 @@ import (
 	"strings"
 
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/asc"
+	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/cli/shared"
 )
 
 type buildSelectorFlags struct {
-	buildID       *string
-	legacyBuildID *trackedStringFlag
-	legacyID      *trackedStringFlag
-	appID         *string
-	latest        *bool
-	version       *string
-	buildNumber   *string
-	platform      *string
+	buildID        *string
+	appID          *string
+	latest         *bool
+	version        *string
+	buildNumber    *string
+	platform       *string
+	excludeExpired *bool
+	notExpired     *bool
 }
 
 type buildSelectorFlagOptions struct {
-	includeLegacyID  bool
 	buildIDUsage     string
 	appUsage         string
 	latestUsage      string
@@ -52,35 +52,19 @@ func bindBuildSelectorFlags(fs *flag.FlagSet, opts buildSelectorFlagOptions) bui
 	}
 	platformUsage := strings.TrimSpace(opts.platformUsage)
 	if platformUsage == "" {
-		platformUsage = "Optional platform filter for --app selectors: IOS, MAC_OS, TV_OS, VISION_OS"
+		platformUsage = "Platform filter for --app selectors (required with --build-number): IOS, MAC_OS, TV_OS, VISION_OS"
 	}
 
-	selectors := buildSelectorFlags{
-		buildID:       fs.String("build-id", "", buildIDUsage),
-		legacyBuildID: bindHiddenStringFlag(fs, "build"),
-		appID:         fs.String("app", "", appUsage),
-		latest:        fs.Bool("latest", false, latestUsage),
-		version:       fs.String("version", "", versionUsage),
-		buildNumber:   fs.String("build-number", "", buildNumberUsage),
-		platform:      fs.String("platform", "", platformUsage),
+	return buildSelectorFlags{
+		buildID:        shared.BindResourceIDFlag(fs, "build-id", "builds", buildIDUsage),
+		appID:          shared.BindResourceIDFlag(fs, "app", "apps", appUsage),
+		latest:         fs.Bool("latest", false, latestUsage),
+		version:        fs.String("version", "", versionUsage),
+		buildNumber:    fs.String("build-number", "", buildNumberUsage),
+		platform:       fs.String("platform", "", platformUsage),
+		excludeExpired: fs.Bool("exclude-expired", false, "Exclude expired builds when selecting --latest"),
+		notExpired:     fs.Bool("not-expired", false, "Alias for --exclude-expired"),
 	}
-	if opts.includeLegacyID {
-		selectors.legacyID = bindHiddenStringFlag(fs, "id")
-	}
-
-	return selectors
-}
-
-func (s buildSelectorFlags) applyLegacyAliases() error {
-	if err := applyLegacyBuildIDAlias(s.buildID, s.legacyBuildID); err != nil {
-		return err
-	}
-	if s.legacyID != nil {
-		if err := applyLegacyIDAlias(s.buildID, s.legacyID); err != nil {
-			return err
-		}
-	}
-	return nil
 }
 
 func (s buildSelectorFlags) resolveOptions() ResolveBuildOptions {
@@ -91,11 +75,21 @@ func (s buildSelectorFlags) resolveOptions() ResolveBuildOptions {
 		BuildNumber: strings.TrimSpace(s.value(s.buildNumber)),
 		Platform:    strings.TrimSpace(s.value(s.platform)),
 		Latest:      s.latest != nil && *s.latest,
+		ExcludeExpired: (s.excludeExpired != nil && *s.excludeExpired) ||
+			(s.notExpired != nil && *s.notExpired),
 	}
 }
 
 func (s buildSelectorFlags) validate() error {
 	return validateResolveBuildOptions(s.resolveOptions())
+}
+
+func (s buildSelectorFlags) validateNextPageSelectorFlags() error {
+	opts := s.resolveOptions()
+	if opts.ExcludeExpired && !opts.Latest {
+		return shared.UsageError("--exclude-expired and --not-expired require --latest")
+	}
+	return nil
 }
 
 func (s buildSelectorFlags) resolveBuild(ctx context.Context, client *asc.Client) (*asc.BuildResponse, error) {

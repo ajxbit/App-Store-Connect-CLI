@@ -2,21 +2,39 @@
 
 > Validate App Store version readiness before submission
 
-The `validate` command performs preflight validation to check if an App Store version is ready for submission.
+The `validate` command builds the canonical App Store submission-readiness
+report for one version. Its normal mode uses the public App Store Connect API.
+Add `--deep` when you also need checks that Apple exposes only through a signed-in
+web session.
 
 ## Usage
 
 ```bash  theme={null}
-asc validate [flags]
+asc validate --app "APP_ID" [flags]
 ```
+
+Pass at most one version selector: `--version` or `--version-id`. When both
+are omitted, `validate` uses the app's newest active editable App Store version
+(`PREPARE_FOR_SUBMISSION`, `DEVELOPER_REJECTED`, `REJECTED`,
+`METADATA_REJECTED`, `READY_FOR_REVIEW`, `WAITING_FOR_REVIEW`, or
+`INVALID_BINARY`), then a `DEVELOPER_REMOVED_FROM_SALE` version, and finally
+the live version. The selection is reported
+on stderr, for example
+`Using version 1.2.0 (PREPARE_FOR_SUBMISSION) for platform IOS; pass --version to override`.
+When candidate versions exist on more than one platform, pass `--platform`.
+Default selection only chooses the version to inspect. The selected state still
+goes through readiness validation: `READY_FOR_REVIEW` can be submitted, while a
+waiting, in-review, or live version produces the normal state blocker. A live
+fallback is not a claim that the version is ready for another submission.
 
 ## Validate a version
 
 Check if a version is ready for submission:
 
 ```bash  theme={null}
-asc validate --app APP_ID --version VERSION_STRING
-asc validate --app 123456789 --version 1.2.0
+asc validate --app "123456789"
+asc validate --app "123456789" --version "1.2.0"
+asc validate --app "123456789" --version-id "VERSION_ID"
 ```
 
 ## What it checks
@@ -29,23 +47,136 @@ The validation process checks:
 * Age rating is configured
 * App categories are assigned
 * Pricing and availability are configured
+* App Review contact information and required demo credentials are present
+* An eligible build is attached, processed, and ready for encryption review
+* Localized listing fields do not contain unmistakable template markers such as
+  `Lorem ipsum`, `TODO`, `TBD`, or `FIXME`
+* App names and keyword fields satisfy deterministic content-quality checks
+
+Placeholder findings cover app names, subtitles, descriptions, keywords,
+promotional text, and What's New copy. The canonical `Lorem ipsum dolor sit
+amet` sequence is matched without regard to letter case. `TODO`, `TBD`, and
+`FIXME` are uppercase-only; `TODO` additionally requires following marker
+punctuation such as a colon or dash so ordinary localized wording is not
+flagged. Findings include the locale, field, matched text, resource type and ID,
+and a remediation step. They are warnings by default and become blocking with
+`--strict`.
+
+The canonical validator also reports warning-only metadata-quality findings for
+app names shorter than two Unicode characters and for empty keyword segments,
+non-canonical separators, repeated phrases, or terms already present in the
+localized app name or subtitle. These checks do not classify editorial copy,
+use user-supplied blocked terms, or expose keyword values in the canonical
+report.
+
+## Check public metadata URL destinations
+
+URL syntax is checked offline by default. The `--check-urls` flag
+opts into bounded, read-only HTTP checks for populated support, marketing,
+privacy-policy, and privacy-choices URLs:
+
+```bash  theme={null}
+asc validate --app "123456789" --version-id "VERSION_ID" --check-urls
+```
+
+The checker follows at most ten HTTP(S) redirects, rejects private or otherwise
+non-public network destinations, disables proxies, deduplicates identical
+URLs, and does not read response bodies. Destination failures, changed hosts,
+and site-root results are warnings; use `--strict` when warnings must block.
+The command never prints the URL, host, IP address, response body, or transport
+details in a finding. No URL request is made unless `--check-urls` is present.
+
+## Check required iPad screenshots
+
+App Store Connect refuses to submit a build that runs on iPad until the version
+has `APP_IPAD_PRO_3GEN_129` screenshots. The public API doesn't report whether a
+build runs on iPad, so pass the version's IPA with `--ipa` and `validate` reads
+`UIDeviceFamily` from its app `Info.plist` locally:
+
+```bash  theme={null}
+asc validate --app "123456789" --version-id "VERSION_ID" --ipa "./build/MyApp.ipa"
+```
+
+When `UIDeviceFamily` includes iPad (`2`) and the app's primary locale has no
+`APP_IPAD_PRO_3GEN_129` set, `screenshots.required.ipad` blocks validation.
+Other locales fall back to the primary locale's screenshots, so a set that
+exists only in another locale doesn't satisfy it. An iPhone-only IPA,
+including one without `UIDeviceFamily`, passes without iPad screenshots.
+
+The IPA must be the version's binary: the version's platform must be `IOS`,
+its bundle ID must match the app's, its `CFBundleShortVersionString` must match
+the App Store version string, and its `CFBundleVersion` must match the attached
+build when one is attached. Before a build is attached, the check runs against
+the IPA you're about to upload. Any mismatch, or an IPA without a readable app `Info.plist`, fails the command
+instead of guessing. `--ipa` reads only the archive's top-level app
+`Info.plist` and doesn't upload anything.
+
+Without `--ipa`, a version that has iPhone screenshots but no
+`APP_IPAD_PRO_3GEN_129` set in the primary locale gets the
+`screenshots.required.ipad_unverified` info finding, even when a retired iPad
+slot or another locale has iPad screenshots. It never blocks, even with
+`--strict`, because iPhone-only apps don't need iPad screenshots.
+
+A `UIDeviceFamily` key that is present but empty or unreadable fails `--ipa`.
+A missing key means iPhone only, as on iOS.
+
+## Check Apple's web-only blockers
+
+The `--deep` mode keeps every public-API check above, then reads an
+existing file-backed Apple web session. It doesn't open a login or Keychain
+prompt, accept agreements, publish privacy answers, or attach subscriptions.
+
+```bash  theme={null}
+asc validate --app "123456789" --version "1.2.0" --deep
+asc validate --app "123456789" --version-id "VERSION_ID" --deep --apple-id "user@example.com"
+```
+
+Deep mode reports one result for each of these release gates:
+
+* App Privacy answers are published
+* The app's first auto-renewable subscription is attached to a new app version
+* Required agreements are active
+* Initial availability is configured
+* Required App Review fields are present
+
+The first three checks use Apple's web session. Availability and review
+information stay on the public API, so deep mode doesn't fetch the same data
+twice. If no cached session exists, the web-only checks return `unverified` and
+the command adds a warning. Use `--strict` if an unverified result must fail CI.
+
+The subscription check follows Apple's first-of-type rule. Once an
+auto-renewable subscription is approved, later subscriptions don't need an app
+version and this check returns `notApplicable`. The web attachment field applies
+to the app's next review candidate, so validating an older, terminal version
+also returns `notApplicable` instead of borrowing the next version's state.
+`READY_FOR_REVIEW` is still checked, but deep mode won't offer an attachment
+mutation after the version has left an editable state.
+
+Agreement relevance includes active subscriptions, IAPs, and the app's current
+upfront download price. If current pricing can't be read completely, deep mode
+reports Paid Apps Agreement relevance as `unverified` instead of assuming the
+app is free or inventing a blocker.
+
+Every deep-mode error or warning includes a `resolution` classification:
+`api-fixable`, `web-fixable`, or `manual`. When the report has enough facts to
+produce a safe command, it returns that command alongside the relevant App
+Store Connect link. Public API commands contain the exact resource ID and flag;
+values such as missing metadata text remain visibly named placeholders for the
+operator to replace. Commands that change web-only state still require
+`--confirm` and validation never runs them for you.
+
+Remediation commands are pinned to the Apple Account that deep validation
+checked. If several subscriptions are ready and the intended one is ambiguous,
+the finding stays `manual` and returns the safe list command instead of guessing
+which subscription to attach.
 
 ## Output
 
-**Success:**
-
-```
-Version 1.2.0 is ready for submission
-```
-
-**Validation errors:**
-
-```
-Validation failed for version 1.2.0:
-  - No build attached to version
-  - Missing screenshots for iPhone 6.5"
-  - Description is empty for en-US
-```
+JSON is the default for pipes and CI; terminals default to a table. Both forms
+include the severity summary, ordered remediation steps, and individual
+findings. Deep mode adds a `deep` section to JSON and resolution columns to
+table or Markdown output. The ordinary output shape doesn't change when
+`--deep` is absent.
 
 ## Flags
 
@@ -53,12 +184,55 @@ Validation failed for version 1.2.0:
   App ID to validate
 </ParamField>
 
-<ParamField path="--version" type="string" required>
-  Version string to validate (e.g., `1.2.0`)
+<ParamField path="--version" type="string">
+  Version string to validate (for example, `1.2.0`). Mutually exclusive with
+  `--version-id`. When neither selector is passed, the app's newest editable
+  version is used, falling back to the live version.
+</ParamField>
+
+<ParamField path="--version-id" type="string">
+  App Store version ID to validate. Mutually exclusive with `--version`.
+</ParamField>
+
+<ParamField path="--platform" type="string">
+  Platform used with `--version` when an app has the same version on more than
+  one platform, or to pick the default version when both selectors are omitted
+  and the app has candidates on more than one platform. When used with
+  `--version-id`, the selected version must match this platform.
 </ParamField>
 
 <ParamField path="--output" type="string">
   Output format: `json`, `table`, or `markdown`
+</ParamField>
+
+<ParamField path="--pretty" type="boolean">
+  Pretty-print JSON output
+</ParamField>
+
+<ParamField path="--strict" type="boolean">
+  Treat warnings, including metadata-quality and placeholder findings, as
+  blocking validation issues
+</ParamField>
+
+<ParamField path="--check-urls" type="boolean">
+  Fetch populated metadata URL destinations with bounded,
+  privacy-safe public HTTP checks. Network checks are disabled by default.
+</ParamField>
+
+<ParamField path="--ipa" type="string">
+  Path to the version's `.ipa`. Its `UIDeviceFamily` decides whether
+  `APP_IPAD_PRO_3GEN_129` screenshots are required. Read locally; valid only
+  for `IOS` versions.
+</ParamField>
+
+<ParamField path="--deep" type="boolean">
+  Verify blockers that require an existing cached Apple web
+  session and classify actionable findings
+</ParamField>
+
+<ParamField path="--apple-id" type="string">
+  Select a cached Apple web session for `--deep`. This flag
+  doesn't log in and isn't valid without `--deep`.
 </ParamField>
 
 ## Example workflows
@@ -67,9 +241,9 @@ Validation failed for version 1.2.0:
 
 ```bash  theme={null}
 # Validate version
-if asc validate --app 123456789 --version 1.2.0; then
+if asc validate --app "123456789" --version "1.2.0"; then
   echo "Version is ready, running the release pipeline..."
-  asc publish appstore --app 123456789 --ipa ./build/MyApp.ipa --version 1.2.0 --submit --confirm
+  asc publish appstore --app "123456789" --ipa "./build/MyApp.ipa" --version "1.2.0" --submit --confirm
 else
   echo "Validation failed, fix issues before publishing"
   exit 1
@@ -81,15 +255,20 @@ fi
 ```yaml  theme={null}
 # GitHub Actions
 - name: Validate version
+  env:
+    APP_ID: ${{ secrets.APP_ID }}
+    TAG_NAME: ${{ github.ref_name }}
   run: |
-    asc validate --app ${{ secrets.APP_ID }} --version ${{ github.ref_name }}
-    if [ $? -ne 0 ]; then
+    if ! asc validate --app "$APP_ID" --version "$TAG_NAME"; then
       echo "Validation failed"
       exit 1
     fi
 
 - name: Publish to App Store
-  run: asc publish appstore --app ${{ secrets.APP_ID }} --ipa ./build/MyApp.ipa --version ${{ github.ref_name }} --submit --confirm
+  env:
+    APP_ID: ${{ secrets.APP_ID }}
+    TAG_NAME: ${{ github.ref_name }}
+  run: asc publish appstore --app "$APP_ID" --ipa ./build/MyApp.ipa --version "$TAG_NAME" --submit --confirm
 ```
 
 ## Exit codes

@@ -6,6 +6,8 @@ import (
 	"flag"
 	"strings"
 	"testing"
+
+	rootcmd "github.com/rudrankriyam/App-Store-Connect-CLI/cmd"
 )
 
 func TestProductPagesCustomPagesListRequiresApp(t *testing.T) {
@@ -142,17 +144,15 @@ func TestProductPagesCustomPagesListRejectsInvalidLimit(t *testing.T) {
 				if err == nil {
 					t.Fatal("expected error, got nil")
 				}
-				if errors.Is(err, flag.ErrHelp) {
-					t.Fatalf("unexpected ErrHelp, got %v", err)
+				if got := rootcmd.ExitCodeFromError(err); got != rootcmd.ExitUsage {
+					t.Fatalf("exit code = %d, want %d (err=%v)", got, rootcmd.ExitUsage, err)
 				}
 			})
 
 			if stdout != "" {
 				t.Fatalf("expected empty stdout, got %q", stdout)
 			}
-			if stderr != "" {
-				t.Fatalf("expected empty stderr, got %q", stderr)
-			}
+			assertUsageDiagnosticFirstLine(t, stderr, "custom-pages list: --limit must be between 1 and 200")
 		})
 	}
 }
@@ -168,17 +168,15 @@ func TestProductPagesCustomPagesListRejectsInvalidNextURL(t *testing.T) {
 		if err == nil {
 			t.Fatal("expected error, got nil")
 		}
-		if errors.Is(err, flag.ErrHelp) {
-			t.Fatalf("unexpected ErrHelp, got %v", err)
+		if got := rootcmd.ExitCodeFromError(err); got != rootcmd.ExitUsage {
+			t.Fatalf("exit code = %d, want %d (err=%v)", got, rootcmd.ExitUsage, err)
 		}
 	})
 
 	if stdout != "" {
 		t.Fatalf("expected empty stdout, got %q", stdout)
 	}
-	if stderr != "" {
-		t.Fatalf("expected empty stderr, got %q", stderr)
-	}
+	assertUsageDiagnosticFirstLine(t, stderr, "custom-pages list: --next must be an App Store Connect URL")
 }
 
 func TestProductPagesExperimentTreatmentLocalizationMediaSetsValidationErrors(t *testing.T) {
@@ -220,6 +218,104 @@ func TestProductPagesExperimentTreatmentLocalizationMediaSetsValidationErrors(t 
 	}
 }
 
+func TestProductPagesScreenshotSetIncludeScreenshotsIsRegistered(t *testing.T) {
+	root := RootCommand("1.2.3")
+	cases := [][]string{
+		{"product-pages", "custom-pages", "localizations", "screenshot-sets", "list"},
+		{"product-pages", "experiments", "treatments", "localizations", "screenshot-sets", "list"},
+	}
+
+	for _, path := range cases {
+		cmd := findSubcommand(root, path...)
+		if cmd == nil {
+			t.Fatalf("command %v not found", path)
+		}
+		includeScreenshots := cmd.FlagSet.Lookup("include-screenshots")
+		if includeScreenshots == nil {
+			t.Fatalf("command %v missing --include-screenshots", path)
+		}
+	}
+}
+
+func TestProductPagesScreenshotSetIncludeScreenshotsRequiresFullLocalizationList(t *testing.T) {
+	const nextURL = "https://api.appstoreconnect.apple.com/v1/appCustomProductPageLocalizations/loc-1/appScreenshotSets?cursor=next"
+
+	cases := []struct {
+		name           string
+		path           []string
+		localizationID string
+		next           string
+		wantStderr     string
+	}{
+		{
+			name:       "custom pages requires localization id for expansion",
+			path:       []string{"product-pages", "custom-pages", "localizations", "screenshot-sets", "list"},
+			wantStderr: "Error: --localization-id is required",
+		},
+		{
+			name:           "custom pages requires paginate",
+			path:           []string{"product-pages", "custom-pages", "localizations", "screenshot-sets", "list"},
+			localizationID: "loc-1",
+			wantStderr:     "custom-pages localizations screenshot-sets list: --include-screenshots requires --paginate",
+		},
+		{
+			name:           "custom pages rejects next",
+			path:           []string{"product-pages", "custom-pages", "localizations", "screenshot-sets", "list"},
+			localizationID: "loc-1",
+			next:           nextURL,
+			wantStderr:     "custom-pages localizations screenshot-sets list: --include-screenshots cannot be combined with --next",
+		},
+		{
+			name:       "treatment requires localization id for expansion",
+			path:       []string{"product-pages", "experiments", "treatments", "localizations", "screenshot-sets", "list"},
+			wantStderr: "Error: --localization-id is required",
+		},
+		{
+			name:           "treatment requires paginate",
+			path:           []string{"product-pages", "experiments", "treatments", "localizations", "screenshot-sets", "list"},
+			localizationID: "loc-1",
+			wantStderr:     "experiments treatments localizations screenshot-sets list: --include-screenshots requires --paginate",
+		},
+		{
+			name:           "treatment rejects next",
+			path:           []string{"product-pages", "experiments", "treatments", "localizations", "screenshot-sets", "list"},
+			localizationID: "loc-1",
+			next:           nextURL,
+			wantStderr:     "experiments treatments localizations screenshot-sets list: --include-screenshots cannot be combined with --next",
+		},
+	}
+
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			root := RootCommand("1.2.3")
+			args := append(append([]string{}, test.path...), "--include-screenshots")
+			if test.localizationID != "" {
+				args = append(args, "--localization-id", test.localizationID)
+			}
+			if test.next != "" {
+				args = append(args, "--paginate", "--next", test.next)
+			}
+
+			stdout, stderr := captureOutput(t, func() {
+				if err := root.Parse(args); err != nil {
+					t.Fatalf("parse error: %v", err)
+				}
+				err := root.Run(context.Background())
+				if !errors.Is(err, flag.ErrHelp) {
+					t.Fatalf("expected ErrHelp, got %v", err)
+				}
+			})
+
+			if stdout != "" {
+				t.Fatalf("expected empty stdout, got %q", stdout)
+			}
+			if !strings.Contains(stderr, test.wantStderr) {
+				t.Fatalf("expected %q in stderr, got %q", test.wantStderr, stderr)
+			}
+		})
+	}
+}
+
 func TestProductPagesCustomPagesLocalizationsPreviewSetsListRejectsInvalidLimit(t *testing.T) {
 	root := RootCommand("1.2.3")
 
@@ -247,17 +343,15 @@ func TestProductPagesCustomPagesLocalizationsPreviewSetsListRejectsInvalidLimit(
 				if err == nil {
 					t.Fatal("expected error, got nil")
 				}
-				if errors.Is(err, flag.ErrHelp) {
-					t.Fatalf("unexpected ErrHelp, got %v", err)
+				if got := rootcmd.ExitCodeFromError(err); got != rootcmd.ExitUsage {
+					t.Fatalf("exit code = %d, want %d (err=%v)", got, rootcmd.ExitUsage, err)
 				}
 			})
 
 			if stdout != "" {
 				t.Fatalf("expected empty stdout, got %q", stdout)
 			}
-			if stderr != "" {
-				t.Fatalf("expected empty stderr, got %q", stderr)
-			}
+			assertUsageDiagnosticFirstLine(t, stderr, "custom-pages localizations preview-sets list: --limit must be between 1 and 200")
 		})
 	}
 }
@@ -273,17 +367,15 @@ func TestProductPagesCustomPagesLocalizationsPreviewSetsListRejectsInvalidNextUR
 		if err == nil {
 			t.Fatal("expected error, got nil")
 		}
-		if errors.Is(err, flag.ErrHelp) {
-			t.Fatalf("unexpected ErrHelp, got %v", err)
+		if got := rootcmd.ExitCodeFromError(err); got != rootcmd.ExitUsage {
+			t.Fatalf("exit code = %d, want %d (err=%v)", got, rootcmd.ExitUsage, err)
 		}
 	})
 
 	if stdout != "" {
 		t.Fatalf("expected empty stdout, got %q", stdout)
 	}
-	if stderr != "" {
-		t.Fatalf("expected empty stderr, got %q", stderr)
-	}
+	assertUsageDiagnosticFirstLine(t, stderr, "custom-pages localizations preview-sets list: --next must be an App Store Connect URL")
 }
 
 func TestProductPagesCustomPagesLocalizationsScreenshotSetsListRejectsInvalidLimit(t *testing.T) {
@@ -313,17 +405,15 @@ func TestProductPagesCustomPagesLocalizationsScreenshotSetsListRejectsInvalidLim
 				if err == nil {
 					t.Fatal("expected error, got nil")
 				}
-				if errors.Is(err, flag.ErrHelp) {
-					t.Fatalf("unexpected ErrHelp, got %v", err)
+				if got := rootcmd.ExitCodeFromError(err); got != rootcmd.ExitUsage {
+					t.Fatalf("exit code = %d, want %d (err=%v)", got, rootcmd.ExitUsage, err)
 				}
 			})
 
 			if stdout != "" {
 				t.Fatalf("expected empty stdout, got %q", stdout)
 			}
-			if stderr != "" {
-				t.Fatalf("expected empty stderr, got %q", stderr)
-			}
+			assertUsageDiagnosticFirstLine(t, stderr, "custom-pages localizations screenshot-sets list: --limit must be between 1 and 200")
 		})
 	}
 }
@@ -339,17 +429,15 @@ func TestProductPagesCustomPagesLocalizationsScreenshotSetsListRejectsInvalidNex
 		if err == nil {
 			t.Fatal("expected error, got nil")
 		}
-		if errors.Is(err, flag.ErrHelp) {
-			t.Fatalf("unexpected ErrHelp, got %v", err)
+		if got := rootcmd.ExitCodeFromError(err); got != rootcmd.ExitUsage {
+			t.Fatalf("exit code = %d, want %d (err=%v)", got, rootcmd.ExitUsage, err)
 		}
 	})
 
 	if stdout != "" {
 		t.Fatalf("expected empty stdout, got %q", stdout)
 	}
-	if stderr != "" {
-		t.Fatalf("expected empty stderr, got %q", stderr)
-	}
+	assertUsageDiagnosticFirstLine(t, stderr, "custom-pages localizations screenshot-sets list: --next must be an App Store Connect URL")
 }
 
 func TestProductPagesCustomPagesLocalizationsSearchKeywordsListRequiresLocalizationID(t *testing.T) {

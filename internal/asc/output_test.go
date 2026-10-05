@@ -3,6 +3,7 @@ package asc
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"io"
 	"os"
 	"strings"
@@ -35,6 +36,95 @@ func captureStdout(t *testing.T, fn func() error) string {
 	}
 
 	return buf.String()
+}
+
+func withClosedStdout(t *testing.T, fn func() error) error {
+	t.Helper()
+
+	closed, err := os.CreateTemp(t.TempDir(), "closed-stdout-*")
+	if err != nil {
+		t.Fatalf("create closed stdout fixture: %v", err)
+	}
+	if err := closed.Close(); err != nil {
+		t.Fatalf("close stdout fixture: %v", err)
+	}
+
+	original := os.Stdout
+	os.Stdout = closed
+	defer func() {
+		os.Stdout = original
+	}()
+
+	return fn()
+}
+
+func TestPrintTableAndMarkdown_PropagateWriteErrors(t *testing.T) {
+	result := &ScreenshotSizesResult{Sizes: []ScreenshotSizeEntry{{
+		DisplayType: "APP_IPHONE_65",
+		Family:      "iPhone",
+		Dimensions:  []ScreenshotDimension{{Width: 1284, Height: 2778}},
+	}}}
+
+	renderers := []struct {
+		name string
+		fn   func(any) error
+	}{
+		{name: "table", fn: PrintTable},
+		{name: "markdown", fn: PrintMarkdown},
+	}
+
+	for _, renderer := range renderers {
+		renderer := renderer
+		t.Run(renderer.name, func(t *testing.T) {
+			err := withClosedStdout(t, func() error {
+				return renderer.fn(result)
+			})
+			if !errors.Is(err, os.ErrClosed) {
+				t.Fatalf("render error = %v, want a closed stdout error", err)
+			}
+		})
+	}
+}
+
+func TestPrintTable_DirectRendererPreservesFirstWriteError(t *testing.T) {
+	type multiTableOutput struct {
+		afterFirst func()
+	}
+
+	key := typeKey[multiTableOutput]()
+	cleanupRegistryTypes(t, key)
+	registerDirect(func(value *multiTableOutput, render func([]string, [][]string)) error {
+		render([]string{"First"}, [][]string{{"one"}})
+		value.afterFirst()
+		render([]string{"Second"}, [][]string{{"two"}})
+		return nil
+	})
+
+	closed, err := os.CreateTemp(t.TempDir(), "closed-first-render-*")
+	if err != nil {
+		t.Fatalf("create first render fixture: %v", err)
+	}
+	if err := closed.Close(); err != nil {
+		t.Fatalf("close first render fixture: %v", err)
+	}
+	writable, err := os.CreateTemp(t.TempDir(), "writable-second-render-*")
+	if err != nil {
+		t.Fatalf("create second render fixture: %v", err)
+	}
+	defer writable.Close()
+
+	original := os.Stdout
+	os.Stdout = closed
+	defer func() {
+		os.Stdout = original
+	}()
+
+	err = PrintTable(&multiTableOutput{afterFirst: func() {
+		os.Stdout = writable
+	}})
+	if !errors.Is(err, os.ErrClosed) {
+		t.Fatalf("render error = %v, want the first closed stdout error", err)
+	}
 }
 
 func assertRenderedNonJSONContains(t *testing.T, render func(any) error, data any, want ...string) {
@@ -280,6 +370,19 @@ func TestPrintPrettyJSON_PerfPowerMetricsUsesRawData(t *testing.T) {
 	}
 }
 
+func TestPrintPrettyJSON_RawMessage(t *testing.T) {
+	output := captureStdout(t, func() error {
+		return PrintPrettyJSON(json.RawMessage(`{"data":{"attributes":{"isEnabled":false}}}`))
+	})
+
+	if !strings.Contains(output, "\n  \"data\"") {
+		t.Fatalf("expected pretty-printed raw JSON, got: %s", output)
+	}
+	if !strings.Contains(output, `"isEnabled": false`) {
+		t.Fatalf("expected preserved isEnabled=false, got: %s", output)
+	}
+}
+
 func TestPrintJSON_CustomProductPageUploadResultUsesCustomLocalizationID(t *testing.T) {
 	tests := []struct {
 		name string
@@ -385,6 +488,21 @@ func TestPrintTable_SkippedAssetUploadResultShowsSkippedState(t *testing.T) {
 	if !strings.Contains(output, "skipped") {
 		t.Fatalf("expected skipped state in table output, got: %s", output)
 	}
+}
+
+func TestPrintTable_AppPreviewUploadResultRendersPartialFailures(t *testing.T) {
+	assertRenderedNonJSONContains(t, PrintTable, &AppPreviewUploadResult{
+		VersionLocalizationID: "LOC_123",
+		SetID:                 "SET_123",
+		PreviewType:           "IPHONE_65",
+		Results: []AssetUploadResultItem{
+			{FileName: "01-first.mov", AssetID: "PREVIEW_1", State: "COMPLETE"},
+			{FileName: "02-second.mov", FilePath: "/tmp/02-second.mov", State: "failed"},
+		},
+		Failures: []AssetUploadFailureItem{
+			{FileName: "02-second.mov", FilePath: "/tmp/02-second.mov", Error: "preview reservation failed"},
+		},
+	}, "SET_123", "IPHONE_65", "01-first.mov", "PREVIEW_1", "failed", "preview reservation failed")
 }
 
 func TestPrintTableAndMarkdown_AppScreenshotFanoutUploadResultIncludesFlattenedFileRows(t *testing.T) {
@@ -540,6 +658,30 @@ func TestPrintTableAndMarkdown_BuildUploadResultIncludesOperations(t *testing.T)
 		renderer := renderer
 		t.Run(renderer.name, func(t *testing.T) {
 			assertRenderedNonJSONContains(t, renderer.fn, resp, "UPLOAD_123", "PUT")
+		})
+	}
+}
+
+func TestPrintTableAndMarkdown_BuildUploadResultIncludesBuildID(t *testing.T) {
+	uploaded := true
+	resp := &BuildUploadResult{
+		UploadID: "UPLOAD_123",
+		FileID:   "FILE_123",
+		FileName: "app.ipa",
+		FileSize: 1024,
+		Uploaded: &uploaded,
+		BuildID:  "BUILD_123",
+	}
+
+	for _, renderer := range []struct {
+		name string
+		fn   func(any) error
+	}{
+		{name: "table", fn: PrintTable},
+		{name: "markdown", fn: PrintMarkdown},
+	} {
+		t.Run(renderer.name, func(t *testing.T) {
+			assertRenderedNonJSONContains(t, renderer.fn, resp, "Build ID", "BUILD_123")
 		})
 	}
 }

@@ -1,12 +1,15 @@
 package validation
 
-import "fmt"
+import (
+	"fmt"
+	"unicode/utf8"
+)
 
-const keywordLengthUnit = "bytes"
+const keywordLengthUnit = "characters"
 
-// KeywordFieldLength returns the App Store Connect keyword field length in bytes.
+// KeywordFieldLength returns the App Store Connect keyword field length in characters.
 func KeywordFieldLength(value string) int {
-	return len(value)
+	return utf8.RuneCountInString(value)
 }
 
 // KeywordFieldLengthIssue returns an over-limit issue for keywords when present.
@@ -23,7 +26,7 @@ func KeywordFieldLengthIssue(value string) *MetadataLengthIssue {
 	}
 }
 
-// ValidateKeywordField returns an error when the keyword field exceeds ASC's byte limit.
+// ValidateKeywordField returns an error when the keyword field exceeds ASC's character limit.
 func ValidateKeywordField(value string) error {
 	issue := KeywordFieldLengthIssue(value)
 	if issue == nil {

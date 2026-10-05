@@ -31,3 +31,13 @@ func TestRunVersionFlagReturnsSuccess(t *testing.T) {
 		t.Fatalf("expected exit success (%d), got %d", cmd.ExitSuccess, code)
 	}
 }
+
+func TestRunHandlesInternalTelemetryWorkerBeforeCLI(t *testing.T) {
+	t.Setenv("ASC_INTERNAL_TELEMETRY_WORKER", "1")
+	t.Setenv("HOME", t.TempDir())
+
+	code := run([]string{"--asc-internal-telemetry-worker"})
+	if code != cmd.ExitSuccess {
+		t.Fatalf("internal telemetry worker exit code = %d, want %d", code, cmd.ExitSuccess)
+	}
+}

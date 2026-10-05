@@ -22,12 +22,12 @@ var rootUsageGroups = []rootCommandGroup{
 		commands: []string{"auth", "doctor", "install-skills", "init", "docs"},
 	},
 	{
-		title:    "EXPERIMENTAL COMMANDS",
+		title:    "WEB SESSION COMMANDS",
 		commands: []string{"web"},
 	},
 	{
 		title:    "ANALYTICS & FINANCE COMMANDS",
-		commands: []string{"analytics", "insights", "finance", "performance"},
+		commands: []string{"analytics", "ads", "optimize", "insights", "finance", "performance"},
 	},
 	{
 		title: "APP MANAGEMENT COMMANDS",
@@ -43,8 +43,9 @@ var rootUsageGroups = []rootCommandGroup{
 	{
 		title: "TESTFLIGHT & BUILD COMMANDS",
 		commands: []string{
-			"testflight", "feedback", "crashes", "builds", "build-bundles",
-			"build-localizations", "xcode",
+			"testflight", "builds", "build-bundles",
+			"build-localizations", "xcode", "distribute",
+			"ipa-info", "pkg-info",
 			"sandbox",
 		},
 	},
@@ -54,7 +55,7 @@ var rootUsageGroups = []rootCommandGroup{
 	},
 	{
 		title:    "MONETIZATION COMMANDS",
-		commands: []string{"iap", "app-events", "subscriptions"},
+		commands: []string{"iap", "storekit", "app-events", "subscriptions"},
 	},
 	{
 		title:    "SIGNING COMMANDS",
@@ -70,7 +71,7 @@ var rootUsageGroups = []rootCommandGroup{
 	},
 	{
 		title:    "UTILITY COMMANDS",
-		commands: []string{"diff", "snitch", "version", "completion", "schema"},
+		commands: []string{"system-status", "diff", "capabilities", "search", "snitch", "version", "completion", "schema", "api", "telemetry"},
 	},
 }
 

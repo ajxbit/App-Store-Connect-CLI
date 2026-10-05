@@ -1,0 +1,788 @@
+package capabilities
+
+import (
+	"context"
+	"flag"
+	"fmt"
+	"os"
+	"sort"
+	"strings"
+	"text/tabwriter"
+
+	"github.com/peterbourgon/ff/v3/ffcli"
+
+	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/cli/schema"
+	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/cli/shared"
+)
+
+const (
+	statusCLISupported = "cli-supported"
+	statusPartial      = "partial"
+	statusClientOnly   = "client-only"
+	statusWebSession   = "web-session"
+	statusNotPublicAPI = "not-public-api"
+)
+
+var allowedCapabilityStatuses = []string{
+	statusCLISupported,
+	statusPartial,
+	statusClientOnly,
+	statusWebSession,
+	statusNotPublicAPI,
+}
+
+// Report is the deterministic capabilities payload.
+type Report struct {
+	Summary      Summary      `json:"summary"`
+	Capabilities []Capability `json:"capabilities"`
+	Sources      []string     `json:"sources"`
+}
+
+// Summary contains roll-up counts for quick inspection.
+type Summary struct {
+	Total               int            `json:"total"`
+	SchemaEndpointCount int            `json:"schemaEndpointCount"`
+	Statuses            map[string]int `json:"statuses"`
+	Areas               map[string]int `json:"areas"`
+}
+
+// Capability describes one App Store Connect workflow surface.
+type Capability struct {
+	Area         string   `json:"area"`
+	Capability   string   `json:"capability"`
+	Status       string   `json:"status"`
+	Commands     []string `json:"commands,omitempty"`
+	APIResources []string `json:"apiResources,omitempty"`
+	Notes        []string `json:"notes,omitempty"`
+	NextAction   string   `json:"nextAction,omitempty"`
+}
+
+type capabilityFilter struct {
+	statuses map[string]struct{}
+	areas    map[string]struct{}
+}
+
+// Command returns the capabilities command.
+func Command() *ffcli.Command {
+	fs := flag.NewFlagSet("capabilities", flag.ExitOnError)
+	status := fs.String("status", "", "Filter by status: cli-supported, partial, client-only, web-session, not-public-api")
+	area := fs.String("area", "", "Filter by area (comma-separated, e.g. release,monetization)")
+	output := shared.BindOutputFlags(fs)
+
+	return &ffcli.Command{
+		Name:       "capabilities",
+		ShortUsage: "asc capabilities [flags]",
+		ShortHelp:  "Show CLI, API, web-only, and public-API-limited capability coverage.",
+		LongHelp: `Show CLI, API, web-only, and public-API-limited capability coverage.
+
+This command answers whether high-value App Store Connect workflows are first-class
+CLI commands, partially covered, available only through internal client code, routed
+through web-session commands, or blocked by Apple's public API.
+
+Examples:
+  asc capabilities
+  asc capabilities --status not-public-api --output table
+  asc capabilities --area release,monetization --output markdown
+  asc capabilities --output json --pretty`,
+		FlagSet:   fs,
+		UsageFunc: shared.DefaultUsageFunc,
+		Exec: func(ctx context.Context, args []string) error {
+			if len(args) > 0 {
+				return shared.UsageErrorf("unexpected arguments: %s", strings.Join(args, " "))
+			}
+
+			filter, err := parseCapabilityFilter(*status, *area)
+			if err != nil {
+				return err
+			}
+
+			report, err := buildReport(filter)
+			if err != nil {
+				return fmt.Errorf("capabilities: %w", err)
+			}
+
+			return shared.PrintOutputWithRenderers(
+				report,
+				*output.Output,
+				*output.Pretty,
+				func() error { return renderTable(report) },
+				func() error { return renderMarkdown(report) },
+			)
+		},
+	}
+}
+
+func parseCapabilityFilter(statusCSV, areaCSV string) (capabilityFilter, error) {
+	filter := capabilityFilter{}
+
+	statuses, err := parseCSVSet(statusCSV)
+	if err != nil {
+		return filter, shared.UsageErrorf("invalid --status: %s", err)
+	}
+	if len(statuses) > 0 {
+		allowed := make(map[string]struct{}, len(allowedCapabilityStatuses))
+		for _, status := range allowedCapabilityStatuses {
+			allowed[status] = struct{}{}
+		}
+		for status := range statuses {
+			if _, ok := allowed[status]; !ok {
+				return filter, shared.UsageErrorf("invalid --status %q (allowed: %s)", status, strings.Join(allowedCapabilityStatuses, ", "))
+			}
+		}
+		filter.statuses = statuses
+	}
+
+	areas, err := parseCSVSet(areaCSV)
+	if err != nil {
+		return filter, shared.UsageErrorf("invalid --area: %s", err)
+	}
+	if len(areas) > 0 {
+		allowed := knownAreas()
+		allowedList := sortedKeys(allowed)
+		for area := range areas {
+			if _, ok := allowed[area]; !ok {
+				return filter, shared.UsageErrorf("invalid --area %q (allowed: %s)", area, strings.Join(allowedList, ", "))
+			}
+		}
+		filter.areas = areas
+	}
+
+	return filter, nil
+}
+
+func parseCSVSet(raw string) (map[string]struct{}, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil, nil
+	}
+
+	values := make(map[string]struct{})
+	for _, part := range strings.Split(raw, ",") {
+		value := strings.ToLower(strings.TrimSpace(part))
+		if value == "" {
+			return nil, fmt.Errorf("empty value")
+		}
+		values[value] = struct{}{}
+	}
+	return values, nil
+}
+
+func buildReport(filter capabilityFilter) (Report, error) {
+	endpointCount, err := schema.EndpointCount()
+	if err != nil {
+		return Report{}, err
+	}
+
+	entries := filterCapabilities(capabilityRows(), filter)
+	summary := Summary{
+		Total:               len(entries),
+		SchemaEndpointCount: endpointCount,
+		Statuses:            make(map[string]int),
+		Areas:               make(map[string]int),
+	}
+	for _, entry := range entries {
+		summary.Statuses[entry.Status]++
+		summary.Areas[entry.Area]++
+	}
+
+	return Report{
+		Summary:      summary,
+		Capabilities: entries,
+		Sources: []string{
+			"registered CLI command surface",
+			"embedded App Store Connect OpenAPI schema index",
+			"curated public-API limitations and web-session surfaces",
+		},
+	}, nil
+}
+
+func filterCapabilities(entries []Capability, filter capabilityFilter) []Capability {
+	filtered := make([]Capability, 0, len(entries))
+	for _, entry := range entries {
+		if len(filter.statuses) > 0 {
+			if _, ok := filter.statuses[entry.Status]; !ok {
+				continue
+			}
+		}
+		if len(filter.areas) > 0 {
+			if _, ok := filter.areas[entry.Area]; !ok {
+				continue
+			}
+		}
+		filtered = append(filtered, entry)
+	}
+	return filtered
+}
+
+func knownAreas() map[string]struct{} {
+	areas := make(map[string]struct{})
+	for _, entry := range capabilityRows() {
+		areas[entry.Area] = struct{}{}
+	}
+	return areas
+}
+
+func capabilityRows() []Capability {
+	return []Capability{
+		{
+			Area:       "release",
+			Capability: "App Store release submission",
+			Status:     statusCLISupported,
+			Commands:   []string{"asc publish appstore --submit", "asc review submit", "asc validate"},
+			APIResources: []string{
+				"reviewSubmissions",
+				"reviewSubmissionItems",
+				"appStoreVersionSubmissions",
+			},
+			Notes: []string{"High-level publish flow plus lower-level review submission controls are available."},
+		},
+		{
+			Area:       "release",
+			Capability: "Release readiness validation",
+			Status:     statusCLISupported,
+			Commands:   []string{"asc validate", "asc status", "asc review doctor"},
+			Notes:      []string{"Aggregates common blocking App Review and version readiness signals."},
+		},
+		{
+			Area:         "release",
+			Capability:   "App overview-rating reset",
+			Status:       statusWebSession,
+			Commands:     []string{"asc versions rating-reset"},
+			APIResources: []string{"resetRatingsRequests"},
+			Notes:        []string{"Uses an authenticated web-session endpoint absent from Apple's published OpenAPI specification; Apple may change it without notice."},
+		},
+		{
+			Area:       "builds",
+			Capability: "Build upload and processing tracking",
+			Status:     statusCLISupported,
+			Commands:   []string{"asc builds upload", "asc builds list", "asc builds info", "asc publish testflight"},
+			APIResources: []string{
+				"buildUploads",
+				"builds",
+				"preReleaseVersions",
+			},
+			Notes: []string{"The CLI wraps Apple's supported upload tooling and build-processing APIs."},
+		},
+		{
+			Area:       "builds",
+			Capability: "Direct REST build upload",
+			Status:     statusNotPublicAPI,
+			Notes:      []string{"Apple does not expose direct IPA upload as a normal public App Store Connect REST endpoint."},
+			NextAction: "Use asc builds upload, Xcode, Transporter, or asc publish workflows.",
+		},
+		{
+			Area:         "app-management",
+			Capability:   "App creation",
+			Status:       statusWebSession,
+			Commands:     []string{"asc web apps create"},
+			APIResources: []string{"apps"},
+			Notes:        []string{"The public apps API manages existing apps; creating app records is not exposed as a public REST operation."},
+			NextAction:   "Use App Store Connect web UI, or asc web apps create.",
+		},
+		{
+			Area:         "app-management",
+			Capability:   "App deletion",
+			Status:       statusWebSession,
+			Commands:     []string{"asc web apps delete"},
+			APIResources: []string{"apps"},
+			Notes:        []string{"The public apps API does not expose app deletion; the web command marks the app removed after preflight checks."},
+			NextAction:   "Use App Store Connect web UI, or asc web apps delete.",
+		},
+		{
+			Area:       "app-management",
+			Capability: "App transfer status",
+			Status:     statusWebSession,
+			Commands:   []string{"asc web apps transfer status"},
+			Notes:      []string{"Reads the app-attached transfer relationship through a web session and preserves Apple's raw state. It does not check eligibility or list recipient transfers; initiate, accept, cancel, and decline remain manual workflows."},
+			NextAction: "Use asc web apps transfer status --app APP_ID for the app-attached request, or App Store Connect for transfer actions.",
+		},
+		{
+			Area:       "app-management",
+			Capability: "App Store Mac and Vision Pro compatibility opt-ins",
+			Status:     statusWebSession,
+			Commands:   []string{"asc web apps compatibility"},
+			Notes:      []string{"iPhone and iPad App Store opt-in settings for Apple silicon Mac and Vision Pro are not exposed as a public REST operation."},
+			NextAction: "Use App Store Connect web UI, or asc web apps compatibility.",
+		},
+		{
+			Area:       "app-management",
+			Capability: "Regulated medical device declaration",
+			Status:     statusWebSession,
+			Commands:   []string{"asc web apps medical-device", "asc web apps medical-device region set"},
+			Notes:      []string{"App Store Regulations and Permits medical-device declarations are not present in the embedded public OpenAPI snapshot. The web command supports the captured app-level No path, affirmative EEA/GBR/USA selection, and a detailed regional setter that preserves contacts and verifies exact readback; personal-service and any unsupported medical fields remain website-only. The captured No paths preserve existing regional rows."},
+			NextAction: "Use asc web apps medical-device set --declared false, set --declared true --confirm, or medical-device region set --region REGION --input PATH --confirm; complete unsupported detailed fields in App Store Connect.",
+		},
+		{
+			Area:       "app-management",
+			Capability: "Removed apps inspection",
+			Status:     statusWebSession,
+			Commands:   []string{"asc web removed-apps"},
+			Notes:      []string{"App Store Connect's Removed Apps status view is not exposed as a public REST collection."},
+			NextAction: "Use App Store Connect web UI, or asc web removed-apps list.",
+		},
+		{
+			Area:         "app-management",
+			Capability:   "Initial app availability bootstrap",
+			Status:       statusPartial,
+			Commands:     []string{"asc pricing availability create", "asc web apps availability create"},
+			APIResources: []string{"POST /v2/appAvailabilities", "territoryAvailabilities"},
+			Notes:        []string{"The public command sends Apple's documented inline territory payload, but Apple can reject the bootstrap request. The web command requires an authenticated Apple web session."},
+			NextAction:   "If public bootstrap is rejected, run asc web auth login --apple-id EMAIL and use asc web apps availability create, or configure Pricing and Availability in App Store Connect.",
+		},
+		{
+			Area:       "app-management",
+			Capability: "App distribution method inspection",
+			Status:     statusWebSession,
+			Commands:   []string{"asc web apps distribution view", "asc web apps distribution set", "asc web apps distribution users list", "asc web apps distribution users create", "asc web apps distribution users delete"},
+			Notes:      []string{"The public apps API does not expose distributionType or educationDiscountType. The web commands inspect or update the app-level distribution pair: public (APP_STORE) or private (CUSTOM), with public education discount DISCOUNTED or NOT_DISCOUNTED and private NOT_APPLICABLE. The setter preserves existing custom organization and user rows and does not cover DIRECT_URL or unlisted distribution requests, which remain unavailable.", "App-scoped customAppUsers reads and lifecycle use the private web-session JSON:API. List preserves Apple's raw envelope; create and delete require --confirm and a validated CUSTOM app, verify selected-app readback, and leave ambiguous outcomes uncertain without retrying. --recipient-apple-id identifies the recipient while --apple-id selects authentication. Organization recipients, invitations, onboarding, rename/PATCH, and implicit distribution changes remain unsupported."},
+			NextAction: "Use App Store Connect web UI, or inspect with asc web apps distribution view and update with asc web apps distribution set --app APP_ID --method public|private [--education-discount discounted|not-discounted] --confirm. For custom recipients, use asc web apps distribution users list --app APP_ID --paginate, then create with --recipient-apple-id APPLE_ACCOUNT --confirm or delete a validated RECIPIENT_ID --confirm.",
+		},
+		{
+			Area:       "app-management",
+			Capability: "Last-compatible version settings",
+			Status:     statusCLISupported,
+			Commands:   []string{"asc versions list --paginate --output json", "asc versions view --output json", "asc versions update --downloadable"},
+			Notes:      []string{"App Store Connect's Last-Compatible Version Settings screen is the nullable downloadable attribute on appStoreVersions. Public versions JSON preserves it when Apple returns it; the default table omits the field. asc versions update --downloadable writes it, and --downloadable false requires --confirm."},
+			NextAction: "Read with asc versions list --app APP_ID --paginate --output json or asc versions view --version-id VERSION_ID --output json. Enable downloads with asc versions update --version-id VERSION_ID --downloadable true, or disable them with asc versions update --version-id VERSION_ID --downloadable false --confirm.",
+		},
+		{
+			Area:       "app-management",
+			Capability: "App Store version status history",
+			Status:     statusWebSession,
+			Commands:   []string{"asc web apps history"},
+			Notes:      []string{"The public App Store Connect API has no status-history endpoint; history is version-scoped on the internal web API and gated by the App Status History role capability."},
+			NextAction: "Use App Store Connect web UI, or asc web apps history.",
+		},
+		{
+			Area:       "app-management",
+			Capability: "App pricing and availability updates",
+			Status:     statusPartial,
+			Commands:   []string{"asc pricing availability view", "asc pricing availability create", "asc pricing availability edit", "asc pricing schedule create"},
+			APIResources: []string{
+				"appAvailabilities",
+				"territoryAvailabilities",
+				"appPriceSchedules",
+				"appPricePoints",
+			},
+			Notes: []string{"Existing availability records can be viewed and edited through the public App Store Connect API; initial bootstrap can require an authenticated web session or App Store Connect."},
+		},
+		{
+			Area:       "metadata",
+			Capability: "Metadata and localization sync",
+			Status:     statusCLISupported,
+			Commands:   []string{"asc metadata init", "asc metadata pull", "asc metadata validate", "asc metadata apply", "asc localizations update"},
+			APIResources: []string{
+				"appInfos",
+				"appInfoLocalizations",
+				"appStoreVersionLocalizations",
+				"searchKeywords",
+			},
+		},
+		{
+			Area:       "metadata",
+			Capability: "Screenshots and app previews",
+			Status:     statusCLISupported,
+			Commands:   []string{"asc screenshots upload", "asc screenshots plan", "asc video-previews upload"},
+			APIResources: []string{
+				"appScreenshotSets",
+				"appScreenshots",
+				"appPreviewSets",
+				"appPreviews",
+			},
+		},
+		{
+			Area:       "metadata",
+			Capability: "Custom product pages and experiments",
+			Status:     statusCLISupported,
+			Commands:   []string{"asc product-pages", "asc versions experiments-v2"},
+			APIResources: []string{
+				"appCustomProductPages",
+				"appStoreVersionExperiments",
+				"appStoreVersionExperimentTreatments",
+			},
+		},
+		{
+			Area:       "privacy",
+			Capability: "App privacy data-use declarations",
+			Status:     statusWebSession,
+			Commands:   []string{"asc web privacy"},
+			Notes:      []string{"App privacy data-use resources are not present in the embedded public OpenAPI snapshot."},
+			NextAction: "Use App Store Connect web UI, or asc web privacy.",
+		},
+		{
+			Area:       "app-management",
+			Capability: "App Store Regulations and Permits declarations",
+			Status:     statusWebSession,
+			Commands:   []string{"asc web apps declarations list"},
+			Notes: []string{
+				"App Store Regulations and Permits requirements are not present in the embedded public OpenAPI snapshot. Listing reports each app-scoped requirement Apple returns; the web command supports captured medical-device app-level declarations and the detailed regional setter, while personal-service and unsupported detailed medical fields remain website-only. EU DSA trader status is account-level and is not part of this listing.",
+			},
+			NextAction: "Use App Store Connect web UI, or asc web apps declarations list.",
+		},
+		{
+			Area:       "monetization",
+			Capability: "Subscriptions and in-app purchases",
+			Status:     statusCLISupported,
+			Commands: []string{
+				"asc subscriptions setup",
+				"asc iap setup",
+				"asc subscriptions versions create",
+				"asc subscriptions groups versions create",
+				"asc iap versions create",
+				"asc review items add",
+			},
+			APIResources: []string{
+				"subscriptions",
+				"subscriptionGroups",
+				"inAppPurchases",
+				"subscriptionVersions",
+				"subscriptionGroupVersions",
+				"inAppPurchaseVersions",
+				"reviewSubmissions",
+				"reviewSubmissionItems",
+			},
+			Notes: []string{"Version-scoped resources and shared review submission items are the App Store Connect API 4.4.1 review workflow."},
+		},
+		{
+			Area:       "monetization",
+			Capability: "Subscription sale availability and pricing web workflows",
+			Status:     statusWebSession,
+			Commands:   []string{"asc web subscriptions"},
+			Notes:      []string{"Removing a subscription from sale and some pricing bootstrap and equalization flows are exposed only through web-session endpoints."},
+			NextAction: "Use App Store Connect web UI, or asc web subscriptions.",
+		},
+		{
+			Area:       "monetization",
+			Capability: "Promoted purchases and offer codes",
+			Status:     statusCLISupported,
+			Commands:   []string{"asc subscriptions offers", "asc iap offer-codes", "asc iap promoted-purchases"},
+			APIResources: []string{
+				"promotedPurchases",
+				"inAppPurchaseOfferCodes",
+				"subscriptionOfferCodes",
+				"winBackOffers",
+			},
+		},
+		{
+			Area:       "monetization",
+			Capability: "App and In-App Purchase tax category",
+			Status:     statusWebSession,
+			Commands: []string{
+				"asc web apps tax-category list",
+				"asc web apps tax-category view",
+				"asc web apps tax-category set",
+				"asc web iap tax-category list",
+				"asc web iap tax-category view",
+				"asc web iap tax-category set",
+				"asc web iap tax-category reset",
+			},
+			Notes: []string{
+				"Tax categories use private web-session endpoints; the public OpenAPI snapshot has no tax-category resource. App Information uses the APPLICATION catalog, while In-App Purchases use ADDON.",
+				"IAP reads preserve Apple's response. Explicit null means inheritance from the parent app without identifying its effective category. set requires --confirm, validates the catalog, replaces the complete condition set (omitting --condition clears it), and verifies the result. reset removes only the discovered IAP tax override and verifies explicit null. Neither mutation retries automatically after an uncertain outcome.",
+			},
+			NextAction: "Use asc web apps tax-category list/view/set for App Information, or asc web iap tax-category list/view/set/reset for In-App Purchases.",
+		},
+		{
+			Area:       "testflight",
+			Capability: "TestFlight distribution, feedback, and crashes",
+			Status:     statusCLISupported,
+			Commands:   []string{"asc testflight groups", "asc testflight testers", "asc testflight feedback", "asc testflight crashes"},
+			APIResources: []string{
+				"betaGroups",
+				"betaTesters",
+				"betaFeedbackScreenshotSubmissions",
+				"betaFeedbackCrashSubmissions",
+			},
+		},
+		{
+			Area:       "testflight",
+			Capability: "Sandbox tester lifecycle",
+			Status:     statusPartial,
+			Commands:   []string{"asc sandbox", "asc web sandbox create", "asc web sandbox delete"},
+			APIResources: []string{
+				"sandboxTesters",
+				"sandboxTestersClearPurchaseHistoryRequest",
+			},
+			Notes: []string{
+				"Public API support varies by operation and account; web-session creation exists as a fallback.",
+				"Web-session deletion uses a private endpoint, requires --confirm, refuses family members or incomplete account-list snapshots, and verifies absence after the request; Apple's delete response contract remains unverified.",
+			},
+		},
+		{
+			Area:       "analytics",
+			Capability: "Analytics, sales, finance, and performance reports",
+			Status:     statusCLISupported,
+			Commands:   []string{"asc analytics", "asc finance reports", "asc performance", "asc insights"},
+			APIResources: []string{
+				"analyticsReportRequests",
+				"salesReports",
+				"financeReports",
+				"diagnosticSignatures",
+			},
+		},
+		{
+			Area:       "analytics",
+			Capability: "App Store Connect analytics web dashboards",
+			Status:     statusWebSession,
+			Commands:   []string{"asc web analytics"},
+			Notes:      []string{"These commands recreate App Store Connect analytics web pages over a user session and are separate from the official Analytics Reports API used by asc analytics."},
+			NextAction: "Use App Store Connect analytics, or asc web analytics.",
+		},
+		{
+			Area:       "analytics",
+			Capability: "Transaction tax reports",
+			Status:     statusWebSession,
+			Commands:   []string{"asc web finance transaction-tax download"},
+			Notes: []string{
+				"Apple does not expose Transaction Tax reports through the public App Store Connect API.",
+				"The command uses the captured App Store Connect finance web session to generate, poll, and download one eligible period; report history and generated job IDs are not exposed.",
+			},
+			NextAction: "Use asc web finance transaction-tax download, or download manually from App Store Connect.",
+		},
+		{
+			Area:       "signing",
+			Capability: "Signing assets and bundle capabilities",
+			Status:     statusCLISupported,
+			Commands:   []string{"asc bundle-ids", "asc certificates", "asc profiles", "asc signing"},
+			APIResources: []string{
+				"bundleIds",
+				"bundleIdCapabilities",
+				"certificates",
+				"profiles",
+				"devices",
+			},
+		},
+		{
+			Area:         "signing",
+			Capability:   "Developer Portal-only Bundle ID capabilities",
+			Status:       statusWebSession,
+			Commands:     []string{"asc web bundle-ids capabilities enable", "asc web bundle-ids capabilities disable"},
+			APIResources: []string{"PRIVATE_CLOUD_COMPUTE"},
+			Notes:        []string{"Supports explicitly modeled Developer Portal capabilities that are absent from Apple's public App Store Connect capability enum; currently PRIVATE_CLOUD_COMPUTE."},
+			NextAction:   "Use asc web bundle-ids capabilities enable or disable with a Developer Portal Bundle ID resource ID and --confirm.",
+		},
+		{
+			Area:       "signing",
+			Capability: "Developer Portal Bundle ID reads",
+			Status:     statusWebSession,
+			Commands:   []string{"asc web bundle-ids list", "asc web bundle-ids view"},
+			APIResources: []string{
+				"bundleIds",
+				"bundleIdCapabilities",
+			},
+			Notes:      []string{"Read-only iOS and Mac Bundle ID collection/detail reads use captured Developer Portal web-session JSON:API endpoints; pagination is intentionally not exposed in this slice."},
+			NextAction: "Use asc web bundle-ids list, then asc web bundle-ids view --bundle-id BUNDLE_RESOURCE_ID.",
+		},
+		{
+			Area:       "signing",
+			Capability: "Sign in with Apple private keys",
+			Status:     statusWebSession,
+			Commands:   []string{"asc web sign-in-keys list", "asc web sign-in-keys view", "asc web sign-in-keys create", "asc web sign-in-keys download"},
+			Notes:      []string{"Uses private Developer Portal authentication-key endpoints. Creation verifies the primary Bundle ID association; one-time P8 download saves private files on macOS or Linux. Revoke is not exposed."},
+			NextAction: "Use list and view to inspect existing keys, then create with --name, --bundle-id, --output-dir, and --confirm, or recover a download with --key-id, --output-dir, and --confirm.",
+		},
+		{
+			Area:         "signing",
+			Capability:   "Developer Portal Services ID lifecycle",
+			Status:       statusWebSession,
+			Commands:     []string{"asc web service-ids", "asc web service-ids domains set"},
+			APIResources: []string{"bundleIds"},
+			Notes:        []string{"Services ID list, view, create, rename, and delete use the captured Developer Portal web-session bundleIds contract filtered to platform=SERVICES. domains set replaces and verifies domain and return URL lists on an already configured Sign in with Apple Services ID, preserving the primary App ID."},
+			NextAction:   "Use the lifecycle commands to manage Services IDs. Use domains set with complete --domain and --return-url lists and --confirm after configuring Sign in with Apple in Developer Portal.",
+		},
+		{
+			Area:       "signing",
+			Capability: "Developer Portal iCloud containers",
+			Status:     statusWebSession,
+			Commands:   []string{"asc web icloud-containers list", "asc web icloud-containers create"},
+			APIResources: []string{
+				"cloudContainers",
+			},
+			Notes:      []string{"List uses the captured Developer Portal web-session collection. create sends a JSON:API POST to the same cloudContainers collection and verifies the new container by reading the collections back. iCloud containers can never be deleted. Rename, delete, and detail remain unavailable."},
+			NextAction: "Use asc web icloud-containers list, or asc web icloud-containers create --confirm for a permanent new container.",
+		},
+		{
+			Area:       "signing",
+			Capability: "App Clip Bundle ID capability sync",
+			Status:     statusWebSession,
+			Commands:   []string{"asc web bundle-ids capabilities sync-app-clip"},
+			Notes:      []string{"App Clip Bundle ID capability patches require a parentBundleId relationship that the public capability endpoint does not accept."},
+			NextAction: "Use asc web bundle-ids capabilities sync-app-clip.",
+		},
+		{
+			Area:       "signing",
+			Capability: "Developer Portal App Groups",
+			Status:     statusWebSession,
+			Commands:   []string{"asc web app-groups"},
+			Notes:      []string{"App Groups list, create, and assign operations use Developer Portal web-session endpoints and are not in the public App Store Connect API."},
+			NextAction: "Use Apple Developer Portal, or asc web app-groups.",
+		},
+		{
+			Area:       "signing",
+			Capability: "Developer Portal Website Push ID reads",
+			Status:     statusWebSession,
+			Commands:   []string{"asc web website-push-ids list", "asc web website-push-ids view"},
+			Notes:      []string{"Website Push ID collection reads preserve Apple's legacy websitePushIdList envelope and request the first page only. Detail reads use the captured modern web-session endpoint and preserve the complete JSON:API envelope."},
+			NextAction: "Use asc web website-push-ids list, or view with an opaque Website Push resource ID.",
+		},
+		{
+			Area:       "signing",
+			Capability: "Developer Portal Website Push ID lifecycle",
+			Status:     statusWebSession,
+			Commands:   []string{"asc web website-push-ids create", "asc web website-push-ids delete"},
+			Notes:      []string{"Confirmed create and delete use captured Developer Portal web-session contracts, require an empty capability graph, and verify the resulting state without retrying uncertain writes. Rename and capability configuration remain unsupported."},
+			NextAction: "Use asc web website-push-ids create or delete with --confirm.",
+		},
+		{
+			Area:       "automation",
+			Capability: "Xcode Cloud workflows and artifacts",
+			Status:     statusCLISupported,
+			Commands:   []string{"asc xcode-cloud run", "asc xcode-cloud status", "asc xcode-cloud artifacts"},
+			APIResources: []string{
+				"ciProducts",
+				"ciWorkflows",
+				"ciBuildRuns",
+				"ciArtifacts",
+			},
+		},
+		{
+			Area:       "automation",
+			Capability: "Xcode Cloud usage and web workflow management",
+			Status:     statusWebSession,
+			Commands:   []string{"asc web xcode-cloud"},
+			Notes:      []string{"Compute usage, environment variables, and some workflow option and edit surfaces require Apple CI web-session endpoints. Public asc xcode-cloud covers run, status, and documented workflow CRUD. asc web xcode-cloud scm providers list and scm connection-status read private provider connection metadata; registration, linking, repository assignment, and onboarding remain unavailable."},
+			NextAction: "Use asc xcode-cloud for public operations, or asc web xcode-cloud for usage and web-only workflow surfaces.",
+		},
+		{
+			Area:       "automation",
+			Capability: "Webhooks",
+			Status:     statusCLISupported,
+			Commands:   []string{"asc webhooks"},
+			APIResources: []string{
+				"webhooks",
+				"webhookDeliveries",
+				"webhookPings",
+			},
+		},
+		{
+			Area:       "automation",
+			Capability: "Raw authenticated API requests",
+			Status:     statusCLISupported,
+			Commands:   []string{"asc api"},
+			Notes:      []string{"asc api sends any GET, POST, PATCH, or DELETE operation in the embedded schema index through the CLI's authentication, retries, and error rendering, including relationships linkage reads without a dedicated command."},
+		},
+		{
+			Area:       "access",
+			Capability: "Users, invitations, actors, and devices",
+			Status:     statusCLISupported,
+			Commands:   []string{"asc users", "asc actors", "asc devices", "asc account"},
+			APIResources: []string{
+				"users",
+				"userInvitations",
+				"actors",
+				"devices",
+			},
+		},
+		{
+			Area:       "access",
+			Capability: "Apple Developer Program agreements",
+			Status:     statusWebSession,
+			Commands:   []string{"asc web agreements"},
+			Notes:      []string{"Program license agreement status and acceptance are not in the public App Store Connect API. The public asc agreements command covers EULA territories, not this workflow."},
+			NextAction: "Use App Store Connect web UI, or asc web agreements.",
+		},
+		{
+			Area:       "access",
+			Capability: "App Store Connect API key web-session management",
+			Status:     statusWebSession,
+			Commands:   []string{"asc web api-keys"},
+			Notes:      []string{"List covers team and individual keys via web-session iris endpoints rather than a public REST key catalog. View and create-with-P8 are team-key-only; individual keys appear in list but are not loaded by view."},
+			NextAction: "Use App Store Connect web UI, or asc web api-keys.",
+		},
+		{
+			Area:       "access",
+			Capability: "Exact API key role lookup",
+			Status:     statusWebSession,
+			Commands:   []string{"asc web auth capabilities"},
+			Notes:      []string{"Reads web-visible API key role assignments and maps them to the bundled Apple capability reference."},
+			NextAction: "Use asc web auth capabilities.",
+		},
+		{
+			Area:       "game-center",
+			Capability: "Game Center resources",
+			Status:     statusCLISupported,
+			Commands:   []string{"asc game-center"},
+			APIResources: []string{
+				"gameCenterAchievements",
+				"gameCenterLeaderboards",
+				"gameCenterActivities",
+				"gameCenterChallenges",
+				"gameCenterMatchmakingQueues",
+			},
+		},
+		{
+			Area:       "review",
+			Capability: "Web-only review rejection inspection",
+			Status:     statusWebSession,
+			Commands: []string{
+				"asc web review",
+				"asc web review drafts",
+				"asc web review drafts create",
+				"asc web review drafts update",
+				"asc web review drafts delete",
+				"asc web review reply",
+			},
+			Notes: []string{"Reviewer-message and rejection-detail surfaces, plus next-version subscription and IAP attachment, are richer or only available in App Store Connect web-session flows. The reply path requires --confirm, has no attachment, and does not automatically retry an ambiguous send; the draft path provides unsent create/update/delete without attachments or automatic retries. Source capture has not proven provider acceptance."},
+		},
+	}
+}
+
+func renderTable(report Report) error {
+	fmt.Fprintf(os.Stdout, "Total: %d  Schema endpoints: %d\n\n", report.Summary.Total, report.Summary.SchemaEndpointCount)
+	tw := tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0)
+	_, _ = fmt.Fprintln(tw, "AREA\tCAPABILITY\tSTATUS\tCOMMANDS\tNOTES")
+	for _, entry := range report.Capabilities {
+		_, _ = fmt.Fprintf(
+			tw,
+			"%s\t%s\t%s\t%s\t%s\n",
+			entry.Area,
+			entry.Capability,
+			entry.Status,
+			strings.Join(entry.Commands, ", "),
+			strings.Join(entry.Notes, " "),
+		)
+	}
+	return tw.Flush()
+}
+
+func renderMarkdown(report Report) error {
+	fmt.Fprintf(os.Stdout, "Total: %d  \nSchema endpoints: %d\n\n", report.Summary.Total, report.Summary.SchemaEndpointCount)
+	fmt.Fprintln(os.Stdout, "| Area | Capability | Status | Commands | Notes |")
+	fmt.Fprintln(os.Stdout, "| --- | --- | --- | --- | --- |")
+	for _, entry := range report.Capabilities {
+		fmt.Fprintf(
+			os.Stdout,
+			"| %s | %s | %s | %s | %s |\n",
+			escapeMarkdownTable(entry.Area),
+			escapeMarkdownTable(entry.Capability),
+			escapeMarkdownTable(entry.Status),
+			escapeMarkdownTable(strings.Join(entry.Commands, "<br>")),
+			escapeMarkdownTable(strings.Join(entry.Notes, " ")),
+		)
+	}
+	return nil
+}
+
+func escapeMarkdownTable(value string) string {
+	value = strings.ReplaceAll(value, "\\", "\\\\")
+	return strings.ReplaceAll(value, "|", "\\|")
+}
+
+func sortedKeys(values map[string]struct{}) []string {
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
+}

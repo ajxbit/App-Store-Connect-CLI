@@ -5,7 +5,6 @@ import (
 	"flag"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 
 	"github.com/peterbourgon/ff/v3/ffcli"
@@ -23,7 +22,7 @@ func RoutingCoverageCommand() *ffcli.Command {
 		LongHelp: `Manage routing app coverage files required for routing apps.
 
 Examples:
-  asc routing-coverage get --version-id "VERSION_ID"
+  asc routing-coverage view --version-id "VERSION_ID"
   asc routing-coverage info --id "COVERAGE_ID"
   asc routing-coverage create --version-id "VERSION_ID" --file ./coverage.geojson
   asc routing-coverage delete --id "COVERAGE_ID" --confirm`,
@@ -42,31 +41,31 @@ Examples:
 
 // RoutingCoverageGetCommand returns the routing coverage get subcommand.
 func RoutingCoverageGetCommand() *ffcli.Command {
-	fs := flag.NewFlagSet("routing-coverage get", flag.ExitOnError)
+	fs := flag.NewFlagSet("routing-coverage view", flag.ExitOnError)
 
-	versionID := fs.String("version-id", "", "App Store version ID (required)")
+	versionID := shared.BindResourceIDFlag(fs, "version-id", "appStoreVersions", "App Store version ID (required)")
 	output := shared.BindOutputFlags(fs)
 
 	return &ffcli.Command{
-		Name:       "get",
-		ShortUsage: "asc routing-coverage get --version-id \"VERSION_ID\"",
-		ShortHelp:  "Get routing app coverage for a version.",
-		LongHelp: `Get routing app coverage for an App Store version.
+		Name:       "view",
+		ShortUsage: "asc routing-coverage view --version-id \"VERSION_ID\"",
+		ShortHelp:  "View routing app coverage for a version.",
+		LongHelp: `View routing app coverage for an App Store version.
 
 Examples:
-  asc routing-coverage get --version-id "VERSION_ID"`,
+  asc routing-coverage view --version-id "VERSION_ID"`,
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
 			versionValue := strings.TrimSpace(*versionID)
 			if versionValue == "" {
 				fmt.Fprintln(os.Stderr, "Error: --version-id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--version-id")
 			}
 
 			client, err := shared.GetASCClient()
 			if err != nil {
-				return fmt.Errorf("routing-coverage get: %w", err)
+				return fmt.Errorf("routing-coverage view: %w", err)
 			}
 
 			requestCtx, cancel := shared.ContextWithTimeout(ctx)
@@ -74,7 +73,7 @@ Examples:
 
 			resp, err := client.GetRoutingAppCoverageForVersion(requestCtx, versionValue)
 			if err != nil {
-				return fmt.Errorf("routing-coverage get: failed to fetch: %w", err)
+				return fmt.Errorf("routing-coverage view: failed to fetch: %w", err)
 			}
 
 			return shared.PrintOutput(resp, *output.Output, *output.Pretty)
@@ -86,7 +85,7 @@ Examples:
 func RoutingCoverageInfoCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("routing-coverage info", flag.ExitOnError)
 
-	coverageID := fs.String("id", "", "Routing app coverage ID (required)")
+	coverageID := shared.BindResourceIDFlag(fs, "id", "routingAppCoverages", "Routing app coverage ID (required)")
 	output := shared.BindOutputFlags(fs)
 
 	return &ffcli.Command{
@@ -103,7 +102,7 @@ Examples:
 			coverageValue := strings.TrimSpace(*coverageID)
 			if coverageValue == "" {
 				fmt.Fprintln(os.Stderr, "Error: --id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--id")
 			}
 
 			client, err := shared.GetASCClient()
@@ -128,7 +127,7 @@ Examples:
 func RoutingCoverageCreateCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("routing-coverage create", flag.ExitOnError)
 
-	versionID := fs.String("version-id", "", "App Store version ID (required)")
+	versionID := shared.BindResourceIDFlag(fs, "version-id", "appStoreVersions", "App Store version ID (required)")
 	filePath := fs.String("file", "", "Path to routing coverage file (required)")
 	output := shared.BindOutputFlags(fs)
 
@@ -146,27 +145,18 @@ Examples:
 			versionValue := strings.TrimSpace(*versionID)
 			if versionValue == "" {
 				fmt.Fprintln(os.Stderr, "Error: --version-id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--version-id")
 			}
 
 			pathValue := strings.TrimSpace(*filePath)
 			if pathValue == "" {
 				fmt.Fprintln(os.Stderr, "Error: --file is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--file")
 			}
 
-			info, err := os.Lstat(pathValue)
+			prepared, err := PrepareRoutingCoverageFile(pathValue)
 			if err != nil {
 				return fmt.Errorf("routing-coverage create: %w", err)
-			}
-			if info.Mode()&os.ModeSymlink != 0 {
-				return fmt.Errorf("routing-coverage create: refusing to read symlink %q", pathValue)
-			}
-			if info.IsDir() {
-				return fmt.Errorf("routing-coverage create: %q is a directory", pathValue)
-			}
-			if info.Size() <= 0 {
-				return fmt.Errorf("routing-coverage create: file size must be greater than 0")
 			}
 
 			client, err := shared.GetASCClient()
@@ -174,40 +164,9 @@ Examples:
 				return fmt.Errorf("routing-coverage create: %w", err)
 			}
 
-			requestCtx, cancel := shared.ContextWithTimeout(ctx)
-			defer cancel()
-
-			resp, err := client.CreateRoutingAppCoverage(requestCtx, versionValue, filepath.Base(pathValue), info.Size())
+			commitResp, err := UploadPreparedRoutingCoverageFile(ctx, client, versionValue, prepared)
 			if err != nil {
-				return fmt.Errorf("routing-coverage create: failed to create: %w", err)
-			}
-			if resp == nil || len(resp.Data.Attributes.UploadOperations) == 0 {
-				return fmt.Errorf("routing-coverage create: no upload operations returned")
-			}
-
-			uploadCtx, uploadCancel := shared.ContextWithUploadTimeout(ctx)
-			err = asc.ExecuteUploadOperations(uploadCtx, pathValue, resp.Data.Attributes.UploadOperations)
-			uploadCancel()
-			if err != nil {
-				return fmt.Errorf("routing-coverage create: upload failed: %w", err)
-			}
-
-			checksum, err := asc.ComputeFileChecksum(pathValue, asc.ChecksumAlgorithmMD5)
-			if err != nil {
-				return fmt.Errorf("routing-coverage create: checksum failed: %w", err)
-			}
-
-			uploaded := true
-			updateAttrs := asc.RoutingAppCoverageUpdateAttributes{
-				SourceFileChecksum: &checksum.Hash,
-				Uploaded:           &uploaded,
-			}
-
-			commitCtx, commitCancel := shared.ContextWithUploadTimeout(ctx)
-			commitResp, err := client.UpdateRoutingAppCoverage(commitCtx, resp.Data.ID, updateAttrs)
-			commitCancel()
-			if err != nil {
-				return fmt.Errorf("routing-coverage create: failed to commit upload: %w", err)
+				return fmt.Errorf("routing-coverage create: %w", err)
 			}
 
 			return shared.PrintOutput(commitResp, *output.Output, *output.Pretty)
@@ -219,7 +178,7 @@ Examples:
 func RoutingCoverageDeleteCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("routing-coverage delete", flag.ExitOnError)
 
-	coverageID := fs.String("id", "", "Routing app coverage ID (required)")
+	coverageID := shared.BindResourceIDFlag(fs, "id", "routingAppCoverages", "Routing app coverage ID (required)")
 	confirm := fs.Bool("confirm", false, "Confirm deletion")
 	output := shared.BindOutputFlags(fs)
 
@@ -237,11 +196,11 @@ Examples:
 			coverageValue := strings.TrimSpace(*coverageID)
 			if coverageValue == "" {
 				fmt.Fprintln(os.Stderr, "Error: --id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--id")
 			}
 			if !*confirm {
 				fmt.Fprintln(os.Stderr, "Error: --confirm is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--confirm")
 			}
 
 			client, err := shared.GetASCClient()

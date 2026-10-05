@@ -4,7 +4,6 @@ import (
 	"context"
 	"flag"
 	"fmt"
-	"os"
 	"strings"
 
 	"github.com/peterbourgon/ff/v3/ffcli"
@@ -24,17 +23,17 @@ type CategoriesSetCommandConfig struct {
 func NewCategoriesSetCommand(config CategoriesSetCommandConfig) *ffcli.Command {
 	fs := flag.NewFlagSet(config.FlagSetName, flag.ExitOnError)
 
-	appID := fs.String("app", os.Getenv("ASC_APP_ID"), "App ID (required)")
+	appID := fs.String("app", "", "App ID (required)")
 	var appInfoID *string
 	if config.IncludeAppInfo {
-		appInfoID = fs.String("app-info", "", "App Info ID (optional override)")
+		appInfoID = BindResourceIDFlag(fs, "app-info", "appInfos", "App Info ID (optional override)")
 	}
-	primary := fs.String("primary", "", "Primary category ID (required)")
-	secondary := fs.String("secondary", "", "Secondary category ID (optional)")
-	primarySubOne := fs.String("primary-subcategory-one", "", "Primary subcategory one (e.g. GAMES_ACTION)")
-	primarySubTwo := fs.String("primary-subcategory-two", "", "Primary subcategory two (e.g. GAMES_SIMULATION)")
-	secondarySubOne := fs.String("secondary-subcategory-one", "", "Secondary subcategory one")
-	secondarySubTwo := fs.String("secondary-subcategory-two", "", "Secondary subcategory two")
+	primary := BindResourceIDFlag(fs, "primary", "appCategories", "Primary category ID (required)")
+	secondary := BindResourceIDFlag(fs, "secondary", "appCategories", "Secondary category ID (optional)")
+	primarySubOne := BindResourceIDFlag(fs, "primary-subcategory-one", "appCategories", "Primary subcategory one (e.g. GAMES_ACTION)")
+	primarySubTwo := BindResourceIDFlag(fs, "primary-subcategory-two", "appCategories", "Primary subcategory two (e.g. GAMES_SIMULATION)")
+	secondarySubOne := BindResourceIDFlag(fs, "secondary-subcategory-one", "appCategories", "Secondary subcategory one")
+	secondarySubTwo := BindResourceIDFlag(fs, "secondary-subcategory-two", "appCategories", "Secondary subcategory two")
 	output := BindOutputFlags(fs)
 
 	return &ffcli.Command{
@@ -45,7 +44,10 @@ func NewCategoriesSetCommand(config CategoriesSetCommandConfig) *ffcli.Command {
 		FlagSet:    fs,
 		UsageFunc:  DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
-			appIDValue := strings.TrimSpace(*appID)
+			appIDValue, err := AppIDFlagValue(ResolveAppID(*appID))
+			if err != nil {
+				return err
+			}
 			primaryValue := strings.TrimSpace(*primary)
 			secondaryValue := strings.TrimSpace(*secondary)
 			primarySubOneValue := strings.TrimSpace(*primarySubOne)
@@ -59,10 +61,10 @@ func NewCategoriesSetCommand(config CategoriesSetCommandConfig) *ffcli.Command {
 			}
 
 			if appIDValue == "" {
-				return fmt.Errorf("%s: --app is required", config.ErrorPrefix)
+				return UsageErrorf("%s: --app is required (or set ASC_APP_ID)", config.ErrorPrefix)
 			}
 			if primaryValue == "" {
-				return fmt.Errorf("%s: --primary is required", config.ErrorPrefix)
+				return UsageErrorf("%s: --primary is required", config.ErrorPrefix)
 			}
 
 			client, err := getASCClient()

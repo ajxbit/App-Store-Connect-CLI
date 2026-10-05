@@ -39,8 +39,9 @@ func XcodeCloudWorkflowsCommand() *ffcli.Command {
 Examples:
   asc xcode-cloud workflows --app "APP_ID"
   asc xcode-cloud workflows list --app "APP_ID"
-  asc xcode-cloud workflows get --id "WORKFLOW_ID"
+  asc xcode-cloud workflows view --id "WORKFLOW_ID"
   asc xcode-cloud workflows repository --id "WORKFLOW_ID"
+  asc xcode-cloud workflows duplicate --id "WORKFLOW_ID" --name "Nightly"
   asc xcode-cloud workflows --app "APP_ID" --limit 50
   asc xcode-cloud workflows --app "APP_ID" --paginate`,
 		FlagSet:   fs,
@@ -51,6 +52,7 @@ Examples:
 			XcodeCloudWorkflowsRepositoryCommand(),
 			XcodeCloudWorkflowsCreateCommand(),
 			XcodeCloudWorkflowsUpdateCommand(),
+			XcodeCloudWorkflowsDuplicateCommand(),
 			XcodeCloudWorkflowsDeleteCommand(),
 		},
 		Exec: func(ctx context.Context, args []string) error {
@@ -84,18 +86,19 @@ Examples:
 
 func XcodeCloudWorkflowsGetCommand() *ffcli.Command {
 	return shared.BuildIDGetCommand(shared.IDGetCommandConfig{
-		FlagSetName: "get",
-		Name:        "get",
-		ShortUsage:  "asc xcode-cloud workflows get --id \"WORKFLOW_ID\"",
-		ShortHelp:   "Get details for a workflow.",
-		LongHelp: `Get details for a workflow.
+		FlagSetName: "view",
+		Name:        "view",
+		ShortUsage:  "asc xcode-cloud workflows view --id \"WORKFLOW_ID\"",
+		ShortHelp:   "View details for a workflow.",
+		LongHelp: `View details for a workflow.
 
 Examples:
-  asc xcode-cloud workflows get --id "WORKFLOW_ID"
-  asc xcode-cloud workflows get --id "WORKFLOW_ID" --output table`,
+  asc xcode-cloud workflows view --id "WORKFLOW_ID"
+  asc xcode-cloud workflows view --id "WORKFLOW_ID" --output table`,
 		IDFlag:      "id",
 		IDUsage:     "Workflow ID",
-		ErrorPrefix: "xcode-cloud workflows get",
+		IDType:      "ciWorkflows",
+		ErrorPrefix: "xcode-cloud workflows view",
 		ContextTimeout: func(ctx context.Context) (context.Context, context.CancelFunc) {
 			return contextWithXcodeCloudTimeout(ctx, 0)
 		},
@@ -118,6 +121,7 @@ Examples:
   asc xcode-cloud workflows repository --id "WORKFLOW_ID" --output table`,
 		IDFlag:      "id",
 		IDUsage:     "Workflow ID",
+		IDType:      "ciWorkflows",
 		ErrorPrefix: "xcode-cloud workflows repository",
 		ContextTimeout: func(ctx context.Context) (context.Context, context.CancelFunc) {
 			return contextWithXcodeCloudTimeout(ctx, 0)
@@ -152,7 +156,7 @@ Examples:
 			fileValue := strings.TrimSpace(*file)
 			if fileValue == "" {
 				fmt.Fprintln(os.Stderr, "Error: --file is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--file")
 			}
 
 			payload, err := shared.ReadJSONFilePayload(fileValue)
@@ -181,7 +185,7 @@ Examples:
 func XcodeCloudWorkflowsUpdateCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("update", flag.ExitOnError)
 
-	id := fs.String("id", "", "Workflow ID")
+	id := shared.BindResourceIDFlag(fs, "id", "ciWorkflows", "Workflow ID")
 	file := fs.String("file", "", "Path to workflow JSON payload")
 	output := shared.BindOutputFlags(fs)
 
@@ -199,12 +203,12 @@ Examples:
 			idValue := strings.TrimSpace(*id)
 			if idValue == "" {
 				fmt.Fprintln(os.Stderr, "Error: --id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--id")
 			}
 			fileValue := strings.TrimSpace(*file)
 			if fileValue == "" {
 				fmt.Fprintln(os.Stderr, "Error: --file is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--file")
 			}
 
 			payload, err := shared.ReadJSONFilePayload(fileValue)
@@ -242,6 +246,7 @@ Examples:
   asc xcode-cloud workflows delete --id "WORKFLOW_ID" --confirm`,
 		IDFlag:      "id",
 		IDUsage:     "Workflow ID",
+		IDType:      "ciWorkflows",
 		ErrorPrefix: "xcode-cloud workflows delete",
 		ContextTimeout: func(ctx context.Context) (context.Context, context.CancelFunc) {
 			return contextWithXcodeCloudTimeout(ctx, 0)
@@ -260,17 +265,17 @@ Examples:
 
 func xcodeCloudWorkflowsList(ctx context.Context, appID string, limit int, next string, paginate bool, output string, pretty bool) error {
 	if limit != 0 && (limit < 1 || limit > 200) {
-		return fmt.Errorf("xcode-cloud workflows: --limit must be between 1 and 200")
+		return shared.UsageError("xcode-cloud workflows: --limit must be between 1 and 200")
 	}
 	nextURL := strings.TrimSpace(next)
 	if err := shared.ValidateNextURL(nextURL); err != nil {
-		return fmt.Errorf("xcode-cloud workflows: %w", err)
+		return shared.UsageErrorf("xcode-cloud workflows: %v", err)
 	}
 
 	resolvedAppID := shared.ResolveAppID(appID)
 	if resolvedAppID == "" && nextURL == "" {
 		fmt.Fprintln(os.Stderr, "Error: --app is required (or set ASC_APP_ID)")
-		return flag.ErrHelp
+		return shared.MissingRequiredUsageError("--app")
 	}
 
 	client, err := shared.GetASCClient()
@@ -302,7 +307,8 @@ func xcodeCloudWorkflowsList(ctx context.Context, appID string, limit int, next 
 
 	if paginate {
 		paginateOpts := append(opts, asc.WithCiWorkflowsLimit(200))
-		resp, err := shared.PaginateWithSpinner(requestCtx,
+		resp, err := shared.PaginateWithSpinner(
+			requestCtx,
 			func(ctx context.Context) (asc.PaginatedResponse, error) {
 				return client.GetCiWorkflows(ctx, productID, paginateOpts...)
 			},

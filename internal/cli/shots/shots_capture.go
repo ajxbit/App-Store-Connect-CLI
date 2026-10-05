@@ -26,8 +26,8 @@ func ShotsCaptureCommand() *ffcli.Command {
 	return &ffcli.Command{
 		Name:       "capture",
 		ShortUsage: "asc screenshots capture --bundle-id BUNDLE_ID --name NAME [flags]",
-		ShortHelp:  "[experimental] Capture a single screenshot from a simulator or running macOS app.",
-		LongHelp: `Capture one screenshot from a running app (experimental).
+		ShortHelp:  "Capture a single screenshot from a simulator or running macOS app.",
+		LongHelp: `Capture one screenshot from a running app.
 
 iOS/simulator (default): app must be installed; simulator must be booted or --udid set.
 
@@ -40,25 +40,25 @@ macOS: app must be running. Captures the frontmost visible window by bundle ID.
 			bundleIDVal := strings.TrimSpace(*bundleID)
 			if bundleIDVal == "" {
 				fmt.Fprintln(os.Stderr, "Error: --bundle-id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--bundle-id")
 			}
 			nameVal := strings.TrimSpace(*name)
 			if nameVal == "" {
 				fmt.Fprintln(os.Stderr, "Error: --name is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--name")
 			}
 			if nameVal == "." || nameVal == ".." || strings.ContainsAny(nameVal, `/\`) {
 				fmt.Fprintln(os.Stderr, "Error: --name must be a file name without path separators")
-				return flag.ErrHelp
+				return shared.WithDiagnostic(flag.ErrHelp, shared.DiagnosticInvalidInput, "--name")
 			}
 			providerVal := strings.TrimSpace(strings.ToLower(*provider))
 			if providerVal != screenshots.ProviderAXe && providerVal != screenshots.ProviderMacOS {
 				fmt.Fprintf(os.Stderr, "Error: --provider must be %q or %q\n", screenshots.ProviderAXe, screenshots.ProviderMacOS)
-				return flag.ErrHelp
+				return shared.WithDiagnostic(flag.ErrHelp, shared.DiagnosticInvalidInput, "--provider")
 			}
 
-			outputDirVal := strings.TrimSpace(*outputDir)
-			if outputDirVal == "" {
+			outputDirVal := *outputDir
+			if strings.TrimSpace(outputDirVal) == "" {
 				outputDirVal = "./screenshots/raw"
 			}
 			absOut, err := filepath.Abs(outputDirVal)

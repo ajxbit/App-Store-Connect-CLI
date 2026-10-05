@@ -5,11 +5,15 @@ Thanks for your interest in contributing to asc cli!
 ## Development Setup
 
 Requirements:
-- Go 1.26+
+- Git
+- The Go version declared by `go.mod`; the Go toolchain can download it automatically when needed
+
+Released `asc` binaries are self-contained and do not require Go. Go is only
+required when building or testing from source.
 
 Clone and build:
 ```bash
-git clone https://github.com/rudrankriyam/App-Store-Connect-CLI.git
+git clone https://github.com/rorkai/App-Store-Connect-CLI.git
 cd App-Store-Connect-CLI
 make build
 ```
@@ -67,7 +71,7 @@ Do not commit secrets.
 
 ## Local Validation
 
-Run this checklist before opening a PR:
+Run this checklist before opening a PR that changes CLI behavior, shared code, or release surfaces:
 
 ```bash
 make tools               # Install gofumpt + golangci-lint
@@ -79,9 +83,12 @@ make build               # Build binary
 ./asc --help             # Smoke-test the binary
 ```
 
+For a narrowly scoped documentation or skill change, run `make check-docs`; it includes the repository and skill validators. For a Wall-only PR, run `make check-wall-of-apps` on the exact head. Use broader checks when the changed surface or repository policy requires them.
+
 ## Pull Request Guidelines
 
 - Keep PRs small and focused.
+- Preserve additive commit history on shared PRs. Maintainers use regular merge commits by default and squash only when explicitly requested.
 - Add or update tests for new behavior.
 - When pruning repetitive tests, prefer grouped/table-driven suites, but keep representative high-signal assertions for response decoding and user-facing output formatting.
 - Update `README.md` if behavior or scope changes.
@@ -115,9 +122,10 @@ Label meanings:
 - `medium`: moderate cross-file change or some product/UX/design work
 - `hard`: large, high-risk, or architecture-heavy change
 
-External contributors may not have permission to label issues directly. Maintainers and
-agents should add any missing labels during first triage, and new issues should not be left
-without a type, priority, and difficulty label set.
+External contributors may not have permission to label issues directly. During read-only
+agent triage, recommend one label from each bucket. When issue creation or label updates
+are authorized, apply missing labels and remove conflicting labels so the issue has
+exactly one type, priority, and difficulty. Follow the authority rules in `AGENTS.md`.
 
 ## Security
 

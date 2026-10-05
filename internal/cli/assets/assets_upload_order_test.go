@@ -14,6 +14,8 @@ import (
 	"image/png"
 	"io"
 	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -29,9 +31,10 @@ func (fn assetsUploadRoundTripFunc) RoundTrip(req *http.Request) (*http.Response
 	return fn(req)
 }
 
-func TestUploadScreenshotsToSet_PreservesExistingOrderAndAppendsNewUploads(t *testing.T) {
-	fileA := writeAssetsTestPNG(t, t.TempDir(), "01-home.png")
-	fileB := writeAssetsTestPNG(t, t.TempDir(), "02-settings.png")
+func TestUploadScreenshotsToSetFromRoot_PreservesExistingOrderAndAppendsNewUploads(t *testing.T) {
+	sourceRoot := t.TempDir()
+	fileA := writeAssetsTestPNG(t, sourceRoot, "01-home.png")
+	fileB := writeAssetsTestPNG(t, sourceRoot, "02-settings.png")
 	files := []string{fileA, fileB}
 	sizes := []int64{fileSize(t, fileA), fileSize(t, fileB)}
 	relationshipPatchCalled := false
@@ -64,7 +67,7 @@ func TestUploadScreenshotsToSet_PreservesExistingOrderAndAppendsNewUploads(t *te
 			return assetsJSONResponse(http.StatusOK, fmt.Sprintf(`{"data":{"type":"appScreenshots","id":"%s","attributes":{"uploaded":true}}}`, id))
 		case req.Method == http.MethodGet && strings.HasPrefix(req.URL.Path, "/v1/appScreenshots/"):
 			id := strings.TrimPrefix(req.URL.Path, "/v1/appScreenshots/")
-			return assetsJSONResponse(http.StatusOK, fmt.Sprintf(`{"data":{"type":"appScreenshots","id":"%s","attributes":{"assetDeliveryState":{"state":"COMPLETE"}}}}`, id))
+			return assetsJSONResponse(http.StatusOK, fmt.Sprintf(`{"data":{"type":"appScreenshots","id":"%s","attributes":{"sourceFileChecksum":"settled","assetDeliveryState":{"state":"COMPLETE"}}}}`, id))
 		case req.Method == http.MethodPatch && req.URL.Path == "/v1/appScreenshotSets/set-1/relationships/appScreenshots":
 			body, err := io.ReadAll(req.Body)
 			if err != nil {
@@ -94,9 +97,9 @@ func TestUploadScreenshotsToSet_PreservesExistingOrderAndAppendsNewUploads(t *te
 	})
 
 	client := newAssetsUploadTestClient(t)
-	results, err := UploadScreenshotsToSet(context.Background(), client, "set-1", files, true)
+	results, err := uploadScreenshotsToSetFromRoot(context.Background(), client, "set-1", files, sourceRoot, true)
 	if err != nil {
-		t.Fatalf("UploadScreenshotsToSet() error: %v", err)
+		t.Fatalf("uploadScreenshotsToSetFromRoot() error: %v", err)
 	}
 
 	if len(results) != 2 {
@@ -112,6 +115,53 @@ func TestUploadScreenshotsToSet_PreservesExistingOrderAndAppendsNewUploads(t *te
 
 func newAssetsUploadTestClient(t *testing.T) *asc.Client {
 	t.Helper()
+	pemBytes := newAssetsUploadTestPrivateKeyPEM(t)
+
+	client, err := asc.NewClientFromPEM("KEY_ID", "ISSUER_ID", string(pemBytes))
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+	return client
+}
+
+func newAssetsUploadTestServerClient(t *testing.T, handler http.Handler) *asc.Client {
+	t.Helper()
+
+	server := httptest.NewServer(handler)
+	t.Cleanup(server.Close)
+	target, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatalf("parse test server URL: %v", err)
+	}
+	serverTransport := server.Client().Transport
+	httpClient := &http.Client{Transport: assetsUploadRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+		cloned := req.Clone(req.Context())
+		cloned.URL.Scheme = target.Scheme
+		cloned.URL.Host = target.Host
+		cloned.Host = target.Host
+		return serverTransport.RoundTrip(cloned)
+	})}
+
+	pemBytes := newAssetsUploadTestPrivateKeyPEM(t)
+	keyPath := filepath.Join(t.TempDir(), "AuthKey_TEST.p8")
+	if err := os.WriteFile(keyPath, pemBytes, 0o600); err != nil {
+		t.Fatalf("write private key: %v", err)
+	}
+	client, err := asc.NewClientWithHTTPClient("KEY_ID", "ISSUER_ID", keyPath, httpClient)
+	if err != nil {
+		t.Fatalf("new client with test server: %v", err)
+	}
+	return client
+}
+
+func writeAssetsTestJSON(w http.ResponseWriter, status int, body string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_, _ = io.WriteString(w, body)
+}
+
+func newAssetsUploadTestPrivateKeyPEM(t *testing.T) []byte {
+	t.Helper()
 
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
@@ -125,12 +175,7 @@ func newAssetsUploadTestClient(t *testing.T) *asc.Client {
 	if pemBytes == nil {
 		t.Fatal("encode pem: nil")
 	}
-
-	client, err := asc.NewClientFromPEM("KEY_ID", "ISSUER_ID", string(pemBytes))
-	if err != nil {
-		t.Fatalf("new client: %v", err)
-	}
-	return client
+	return pemBytes
 }
 
 func assetsJSONResponse(status int, body string) (*http.Response, error) {

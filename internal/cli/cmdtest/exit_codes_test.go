@@ -27,6 +27,8 @@ func TestExitCodeConstantsMatch(t *testing.T) {
 		{"Auth", 3, func() int { return cmd.ExitAuth }},
 		{"NotFound", 4, func() int { return cmd.ExitNotFound }},
 		{"Conflict", 5, func() int { return cmd.ExitConflict }},
+		{"ReadOnly", 6, func() int { return cmd.ExitReadOnly }},
+		{"Pending", 7, func() int { return cmd.ExitPending }},
 	}
 
 	for _, tt := range tests {
@@ -76,14 +78,23 @@ func TestRun_IntroductoryOffersImportPartialFailureReturnsExitError(t *testing.T
 		http.DefaultTransport = originalTransport
 	})
 
-	requestCount := 0
+	getCount := 0
+	postCount := 0
 	http.DefaultTransport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
-		requestCount++
+		if req.Method == http.MethodGet && req.URL.Path == "/v1/subscriptions/8000000003/introductoryOffers" {
+			getCount++
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       io.NopCloser(strings.NewReader(`{"data":[]}`)),
+				Header:     http.Header{"Content-Type": []string{"application/json"}},
+			}, nil
+		}
 		if req.Method != http.MethodPost || req.URL.Path != "/v1/subscriptionIntroductoryOffers" {
 			t.Fatalf("unexpected request: %s %s", req.Method, req.URL.Path)
 		}
+		postCount++
 
-		switch requestCount {
+		switch postCount {
 		case 1:
 			body := `{"data":{"type":"subscriptionIntroductoryOffers","id":"offer-1"}}`
 			return &http.Response{
@@ -99,7 +110,7 @@ func TestRun_IntroductoryOffersImportPartialFailureReturnsExitError(t *testing.T
 				Header:     http.Header{"Content-Type": []string{"application/json"}},
 			}, nil
 		default:
-			t.Fatalf("unexpected request count %d", requestCount)
+			t.Fatalf("unexpected POST count %d", postCount)
 			return nil, nil
 		}
 	})
@@ -117,6 +128,7 @@ func TestRun_IntroductoryOffersImportPartialFailureReturnsExitError(t *testing.T
 			"--offer-duration", "ONE_WEEK",
 			"--offer-mode", "FREE_TRIAL",
 			"--number-of-periods", "1",
+			"--confirm",
 		}, "1.0.0")
 		if code != cmd.ExitError {
 			t.Fatalf("expected exit code %d, got %d", cmd.ExitError, code)
@@ -128,6 +140,9 @@ func TestRun_IntroductoryOffersImportPartialFailureReturnsExitError(t *testing.T
 	}
 	if !strings.Contains(stdout, `"failed":1`) {
 		t.Fatalf("expected failure summary in stdout, got %q", stdout)
+	}
+	if getCount != 2 || postCount != 2 {
+		t.Fatalf("expected initial GET, two POSTs, and one readback GET; got GET=%d POST=%d", getCount, postCount)
 	}
 }
 
@@ -296,13 +311,24 @@ func TestRun_UsageValidationErrorsReturnExitUsage(t *testing.T) {
 			wantErr: "--skip-validation and --network are mutually exclusive",
 		},
 		{
+			name: "auth login invalid key type",
+			args: []string{
+				"auth", "login",
+				"--name", "demo",
+				"--key-id", "KEY",
+				"--key-type", "personal",
+				"--private-key", "/tmp/AuthKey.p8",
+			},
+			wantErr: "--key-type must be one of: team, individual",
+		},
+		{
 			name:    "apps info view conflicting version flags",
 			args:    []string{"apps", "info", "view", "--app", "APP_ID", "--version", "1.0.0", "--version-id", "VERSION_ID"},
 			wantErr: "--version and --version-id are mutually exclusive",
 		},
 		{
 			name:    "performance download mutually exclusive selectors",
-			args:    []string{"performance", "download", "--app", "APP_ID", "--build", "BUILD_ID"},
+			args:    []string{"performance", "download", "--app", "APP_ID", "--build-id", "BUILD_ID"},
 			wantErr: "mutually exclusive",
 		},
 		{
@@ -398,9 +424,14 @@ func TestRun_UsageValidationErrorsReturnExitUsage(t *testing.T) {
 			wantErr: "--limit must be between 1 and 200",
 		},
 		{
+			name:    "apps public rank invalid platform",
+			args:    []string{"apps", "public", "rank", "--app", "123", "--term", "focus", "--platform", "MAC_OS"},
+			wantErr: "--platform must be one of: IOS, TV_OS",
+		},
+		{
 			name:    "reviews ratings rejects positional args",
 			args:    []string{"reviews", "ratings", "--app", "123", "extra"},
-			wantErr: "reviews ratings does not accept positional arguments",
+			wantErr: `unexpected argument "extra"`,
 		},
 		{
 			name:    "reviews ratings unsupported country",
@@ -416,6 +447,21 @@ func TestRun_UsageValidationErrorsReturnExitUsage(t *testing.T) {
 			name:    "apps public view signed app id",
 			args:    []string{"apps", "public", "view", "--app", "-123"},
 			wantErr: "--app must be a numeric App Store app ID",
+		},
+		{
+			name:    "subscriptions offer-codes create non-free-trial without prices",
+			args:    []string{"subscriptions", "offers", "offer-codes", "create", "--subscription-id", "SUB_ID", "--name", "Spring", "--offer-eligibility", "STACK_WITH_INTRO_OFFERS", "--customer-eligibilities", "NEW", "--offer-duration", "ONE_MONTH", "--offer-mode", "PAY_AS_YOU_GO", "--number-of-periods", "1"},
+			wantErr: "--prices is required",
+		},
+		{
+			name:    "subscriptions offer-codes create free-trial without prices",
+			args:    []string{"subscriptions", "offers", "offer-codes", "create", "--subscription-id", "SUB_ID", "--name", "Spring", "--offer-eligibility", "STACK_WITH_INTRO_OFFERS", "--customer-eligibilities", "NEW", "--offer-duration", "ONE_MONTH", "--offer-mode", "FREE_TRIAL", "--number-of-periods", "1"},
+			wantErr: "--prices is required",
+		},
+		{
+			name:    "subscriptions offer-codes create free-trial with price point rejected",
+			args:    []string{"subscriptions", "offers", "offer-codes", "create", "--subscription-id", "SUB_ID", "--name", "Spring", "--offer-eligibility", "STACK_WITH_INTRO_OFFERS", "--customer-eligibilities", "NEW", "--offer-duration", "ONE_MONTH", "--offer-mode", "FREE_TRIAL", "--number-of-periods", "1", "--prices", "USA:PRICE_ID"},
+			wantErr: "--prices for FREE_TRIAL must use TERRITORY entries without price point IDs",
 		},
 	}
 

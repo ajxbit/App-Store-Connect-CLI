@@ -51,11 +51,16 @@
   Yes. The CLI supports multiple authentication methods:
 
   ```bash  theme={null}
+  unset ASC_PROFILE ASC_BYPASS_KEYCHAIN ASC_CONFIG_PATH
+  unset ASC_PRIVATE_KEY ASC_PRIVATE_KEY_B64
+  export ASC_KEY_TYPE="team"
   export ASC_KEY_ID="YOUR_KEY_ID"
   export ASC_ISSUER_ID="YOUR_ISSUER_ID"
   export ASC_PRIVATE_KEY_PATH="/path/to/AuthKey.p8"
 
   # Or use base64-encoded key for CI/CD
+  unset ASC_PROFILE ASC_BYPASS_KEYCHAIN ASC_CONFIG_PATH
+  unset ASC_PRIVATE_KEY_PATH ASC_PRIVATE_KEY
   export ASC_PRIVATE_KEY_B64="BASE64_ENCODED_KEY"
   ```
 
@@ -65,7 +70,7 @@
   export ASC_BYPASS_KEYCHAIN=1
   ```
 
-  Priority order: Environment variables > Config file > Keychain
+  Authentication precedence is conditional. A selected profile wins, a complete environment set can skip stored lookup when no profile is selected and keychain bypass is disabled, and keychain bypass makes config the first stored source. See the [credential resolution matrix](/authentication#credential-resolution) for the complete behavior.
 </Accordion>
 
 <Accordion title="What permissions does my API key need?">
@@ -123,7 +128,7 @@
 
   ```bash  theme={null}
   asc testflight feedback list --app "123456789" --paginate
-  asc analytics view --request-id "REQUEST_ID" --date "2024-01-01" --paginate
+  asc analytics view --request-id "REQUEST_ID" --processing-date "2024-01-01" --paginate
   ```
 
   Without `--paginate`, only the first page (default limit) is returned. This is especially important for:
@@ -141,7 +146,7 @@
   * **Bitrise**: Use the [setup-asc step](https://github.com/rudrankriyam/steps-setup-asc)
   * **CircleCI**: Use the [asc orb](https://github.com/rudrankriyam/asc-orb)
 
-  See the [CI/CD guide](https://github.com/rudrankriyam/App-Store-Connect-CLI/blob/main/docs/CI_CD.md) for detailed examples.
+  See the [CI/CD guide](https://github.com/rorkai/App-Store-Connect-CLI/blob/main/docs/CI_CD.md) for detailed examples.
 </Accordion>
 
 <Accordion title="How do I upload builds to TestFlight?">
@@ -181,7 +186,7 @@
   For detailed crash information, filter by build:
 
   ```bash  theme={null}
-  asc testflight crashes list --app "123456789" --build "BUILD_ID"
+  asc testflight crashes list --app "123456789" --build-id "BUILD_ID"
   ```
 </Accordion>
 
@@ -388,7 +393,7 @@
   Do NOT open public GitHub issues for security vulnerabilities.
 
   Report privately using GitHub Security Advisories:
-  [https://github.com/rudrankriyam/App-Store-Connect-CLI/security/advisories/new](https://github.com/rudrankriyam/App-Store-Connect-CLI/security/advisories/new)
+  [https://github.com/rorkai/App-Store-Connect-CLI/security/advisories/new](https://github.com/rorkai/App-Store-Connect-CLI/security/advisories/new)
 
   Include:
 
@@ -406,7 +411,7 @@
   * App submissions
   * Signing and provisioning
 
-  Learn more: [https://github.com/rudrankriyam/app-store-connect-cli-skills](https://github.com/rudrankriyam/app-store-connect-cli-skills)
+  Learn more: [https://github.com/rorkai/app-store-connect-cli-skills](https://github.com/rorkai/app-store-connect-cli-skills)
 </Accordion>
 
 <Accordion title="Can I use this on Linux?">
@@ -415,7 +420,8 @@
   On Linux:
 
   * Keychain features fall back to config file storage
-  * Ensure Go 1.26+ is installed
+  * Released binaries do not require Go
+  * Source builds use the Go version declared by `go.mod`
   * All core functionality works identically
 
   Install using the install script:
@@ -444,7 +450,7 @@
   asc version
   ```
 
-  View releases: [https://github.com/rudrankriyam/App-Store-Connect-CLI/releases](https://github.com/rudrankriyam/App-Store-Connect-CLI/releases)
+  View releases: [https://github.com/rorkai/App-Store-Connect-CLI/releases](https://github.com/rorkai/App-Store-Connect-CLI/releases)
 </Accordion>
 
 <Accordion title="Why does output format change between terminal and scripts?">
@@ -470,5 +476,5 @@
   4. **Troubleshooting**: See [Troubleshooting Guide](/resources/troubleshooting)
   5. **API Notes**: Check [API Notes](/resources/api-notes) for quirks
 
-  For issues: [https://github.com/rudrankriyam/App-Store-Connect-CLI/issues](https://github.com/rudrankriyam/App-Store-Connect-CLI/issues)
+  For issues: [https://github.com/rorkai/App-Store-Connect-CLI/issues](https://github.com/rorkai/App-Store-Connect-CLI/issues)
 </Accordion>

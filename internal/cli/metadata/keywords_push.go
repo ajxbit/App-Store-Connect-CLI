@@ -60,7 +60,7 @@ type metadataKeywordsPushInputObject struct {
 func MetadataKeywordsPushCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("metadata keywords push", flag.ExitOnError)
 
-	versionID := fs.String("version-id", "", "App Store version ID (required)")
+	versionID := shared.BindResourceIDFlag(fs, "version-id", "appStoreVersions", "App Store version ID (required)")
 	inputPath := fs.String("input", "", "Input JSON file path (required)")
 	continueOnError := fs.String("continue-on-error", "true", "Continue processing locales after failures (default true)")
 	output := shared.BindOutputFlags(fs)
@@ -91,13 +91,13 @@ Examples:
 			vid := strings.TrimSpace(*versionID)
 			if vid == "" {
 				fmt.Fprintln(os.Stderr, "Error: --version-id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--version-id")
 			}
 
 			inputValue := strings.TrimSpace(*inputPath)
 			if inputValue == "" {
 				fmt.Fprintln(os.Stderr, "Error: --input is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--input")
 			}
 
 			entries, err := readMetadataKeywordsPushEntries(inputValue)

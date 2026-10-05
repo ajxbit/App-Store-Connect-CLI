@@ -20,8 +20,8 @@ import (
 func PerformanceDownloadCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("download", flag.ExitOnError)
 
-	appID := fs.String("app", "", "App Store Connect app ID (or ASC_APP_ID)")
-	buildID := fs.String("build", "", "Build ID to download metrics for")
+	appID := shared.BindResourceIDFlag(fs, "app", "apps", "App Store Connect app ID (or ASC_APP_ID)")
+	buildID := shared.BindResourceIDFlag(fs, "build-id", "builds", "Build ID to download metrics for")
 	diagnosticID := fs.String("diagnostic-id", "", "Diagnostic signature ID to download logs for")
 	platform := fs.String("platform", "", "Platform filter (IOS)")
 	metricType := fs.String("metric-type", "", "Metric types (comma-separated: "+strings.Join(perfPowerMetricTypeList(), ", ")+")")
@@ -39,7 +39,7 @@ func PerformanceDownloadCommand() *ffcli.Command {
 
 Examples:
   asc performance download --app "APP_ID" --output ./metrics.json
-  asc performance download --build "BUILD_ID" --output ./metrics.json
+  asc performance download --build-id "BUILD_ID" --output ./metrics.json
   asc performance download --diagnostic-id "SIGNATURE_ID" --output ./diagnostic.json --decompress`,
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
@@ -61,13 +61,13 @@ Examples:
 			if selectionCount == 0 {
 				appFlag = shared.ResolveAppID(*appID)
 				if appFlag == "" {
-					fmt.Fprintln(os.Stderr, "Error: --app, --build, or --diagnostic-id is required")
-					return flag.ErrHelp
+					fmt.Fprintln(os.Stderr, "Error: --app, --build-id, or --diagnostic-id is required")
+					return shared.MissingRequiredUsageError("")
 				}
 				selectionCount = 1
 			}
 			if selectionCount > 1 {
-				return shared.UsageError("--app, --build, and --diagnostic-id are mutually exclusive")
+				return shared.UsageError("--app, --build-id, and --diagnostic-id are mutually exclusive")
 			}
 			if *limit != 0 && (*limit < 1 || *limit > 200) {
 				return shared.UsageError("--limit must be between 1 and 200")
@@ -93,7 +93,7 @@ Examples:
 				return fmt.Errorf("performance download: %w", err)
 			}
 
-			requestCtx, cancel := shared.ContextWithTimeout(ctx)
+			requestCtx, cancel := shared.ContextWithDownloadTimeout(ctx)
 			defer cancel()
 
 			switch {
@@ -140,7 +140,8 @@ Examples:
 			case trimmedBuildID != "":
 				defaultOutput := fmt.Sprintf("perf_power_metrics_%s.json", trimmedBuildID)
 
-				download, err := client.DownloadPerfPowerMetricsForBuild(requestCtx, trimmedBuildID,
+				download, err := client.DownloadPerfPowerMetricsForBuild(
+					requestCtx, trimmedBuildID,
 					asc.WithPerfPowerMetricsPlatforms(platforms),
 					asc.WithPerfPowerMetricsMetricTypes(metricTypes),
 					asc.WithPerfPowerMetricsDeviceTypes(shared.SplitCSV(*deviceType)),
@@ -184,7 +185,8 @@ Examples:
 			default:
 				defaultOutput := fmt.Sprintf("perf_power_metrics_%s.json", appFlag)
 
-				download, err := client.DownloadPerfPowerMetricsForApp(requestCtx, appFlag,
+				download, err := client.DownloadPerfPowerMetricsForApp(
+					requestCtx, appFlag,
 					asc.WithPerfPowerMetricsPlatforms(platforms),
 					asc.WithPerfPowerMetricsMetricTypes(metricTypes),
 					asc.WithPerfPowerMetricsDeviceTypes(shared.SplitCSV(*deviceType)),

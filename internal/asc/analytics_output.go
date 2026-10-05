@@ -10,6 +10,7 @@ type SalesReportResult struct {
 	Frequency        string `json:"frequency"`
 	ReportDate       string `json:"reportDate"`
 	Version          string `json:"version,omitempty"`
+	Available        *bool  `json:"available,omitempty"`
 	FilePath         string `json:"filePath"`
 	FileSize         int64  `json:"fileSize"`
 	Decompressed     bool   `json:"decompressed"`
@@ -19,11 +20,19 @@ type SalesReportResult struct {
 
 // AnalyticsReportRequestResult represents CLI output for created requests.
 type AnalyticsReportRequestResult struct {
-	RequestID   string `json:"requestId"`
-	AppID       string `json:"appId"`
-	AccessType  string `json:"accessType"`
-	State       string `json:"state,omitempty"`
-	CreatedDate string `json:"createdDate,omitempty"`
+	RequestID              string `json:"requestId"`
+	AppID                  string `json:"appId"`
+	AccessType             string `json:"accessType"`
+	StoppedDueToInactivity *bool  `json:"stoppedDueToInactivity,omitempty"`
+}
+
+// AnalyticsReportRequestReuseResult represents CLI output for reused or created requests.
+type AnalyticsReportRequestReuseResult struct {
+	RequestID              string `json:"requestId"`
+	AppID                  string `json:"appId"`
+	AccessType             string `json:"accessType"`
+	StoppedDueToInactivity *bool  `json:"stoppedDueToInactivity,omitempty"`
+	Created                bool   `json:"created"`
 }
 
 // AnalyticsReportRequestDeleteResult represents CLI output for deleted requests.
@@ -49,6 +58,16 @@ type AnalyticsReportGetResult struct {
 	RequestID string                     `json:"requestId"`
 	Data      []AnalyticsReportGetReport `json:"data"`
 	Links     Links                      `json:"links"`
+}
+
+// GetLinks returns pagination links for shared truncation warnings.
+func (r *AnalyticsReportGetResult) GetLinks() *Links {
+	return &r.Links
+}
+
+// GetData returns report data for shared pagination helpers.
+func (r *AnalyticsReportGetResult) GetData() any {
+	return r.Data
 }
 
 // AnalyticsReportGetReport represents an analytics report with instances.
@@ -81,6 +100,19 @@ type AnalyticsReportGetSegment struct {
 }
 
 func salesReportResultRows(result *SalesReportResult) ([]string, [][]string) {
+	if result.Available != nil {
+		headers := []string{"Vendor", "Type", "Subtype", "Frequency", "Date", "Version", "Available"}
+		rows := [][]string{{
+			result.VendorNumber,
+			result.ReportType,
+			result.ReportSubType,
+			result.Frequency,
+			result.ReportDate,
+			result.Version,
+			fmt.Sprintf("%t", *result.Available),
+		}}
+		return headers, rows
+	}
 	headers := []string{"Vendor", "Type", "Subtype", "Frequency", "Date", "Version", "Compressed File", "Compressed Size", "Decompressed File", "Decompressed Size"}
 	rows := [][]string{{
 		result.VendorNumber,
@@ -98,8 +130,20 @@ func salesReportResultRows(result *SalesReportResult) ([]string, [][]string) {
 }
 
 func analyticsReportRequestResultRows(result *AnalyticsReportRequestResult) ([]string, [][]string) {
-	headers := []string{"Request ID", "App ID", "Access Type", "State", "Created Date"}
-	rows := [][]string{{result.RequestID, result.AppID, result.AccessType, result.State, result.CreatedDate}}
+	headers := []string{"Request ID", "App ID", "Access Type", "Stopped Due To Inactivity"}
+	rows := [][]string{{result.RequestID, result.AppID, result.AccessType, formatAnalyticsOptionalBool(result.StoppedDueToInactivity)}}
+	return headers, rows
+}
+
+func analyticsReportRequestReuseResultRows(result *AnalyticsReportRequestReuseResult) ([]string, [][]string) {
+	headers := []string{"Request ID", "App ID", "Access Type", "Stopped Due To Inactivity", "Created"}
+	rows := [][]string{{
+		result.RequestID,
+		result.AppID,
+		result.AccessType,
+		formatAnalyticsOptionalBool(result.StoppedDueToInactivity),
+		fmt.Sprintf("%t", result.Created),
+	}}
 	return headers, rows
 }
 
@@ -110,7 +154,7 @@ func analyticsReportRequestDeleteResultRows(result *AnalyticsReportRequestDelete
 }
 
 func analyticsReportRequestsRows(resp *AnalyticsReportRequestsResponse) ([]string, [][]string) {
-	headers := []string{"ID", "Access Type", "State", "Created Date", "App ID"}
+	headers := []string{"ID", "Access Type", "Stopped Due To Inactivity", "App ID"}
 	rows := make([][]string, 0, len(resp.Data))
 	for _, item := range resp.Data {
 		appID := ""
@@ -120,12 +164,18 @@ func analyticsReportRequestsRows(resp *AnalyticsReportRequestsResponse) ([]strin
 		rows = append(rows, []string{
 			item.ID,
 			string(item.Attributes.AccessType),
-			string(item.Attributes.State),
-			item.Attributes.CreatedDate,
+			formatAnalyticsOptionalBool(item.Attributes.StoppedDueToInactivity),
 			appID,
 		})
 	}
 	return headers, rows
+}
+
+func formatAnalyticsOptionalBool(value *bool) string {
+	if value == nil {
+		return ""
+	}
+	return fmt.Sprintf("%t", *value)
 }
 
 func analyticsReportDownloadResultRows(result *AnalyticsReportDownloadResult) ([]string, [][]string) {

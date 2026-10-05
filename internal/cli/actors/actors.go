@@ -25,7 +25,7 @@ func ActorsCommand() *ffcli.Command {
 
 Examples:
   asc actors list --id "ACTOR_ID"
-  asc actors get --id "ACTOR_ID"`,
+  asc actors view --id "ACTOR_ID"`,
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
 		Subcommands: []*ffcli.Command{
@@ -62,15 +62,18 @@ Examples:
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
-			if *limit != 0 && (*limit < 1 || *limit > 200) {
-				return fmt.Errorf("actors list: --limit must be between 1 and 200")
-			}
 			if err := shared.ValidateNextURL(*next); err != nil {
-				return fmt.Errorf("actors list: %w", err)
+				return shared.UsageErrorf("actors list: %v", err)
+			}
+			if err := shared.RejectNextFlagConflicts(fs, *next, "actors list", "id", "fields", "limit"); err != nil {
+				return err
+			}
+			if *limit != 0 && (*limit < 1 || *limit > 200) {
+				return shared.UsageError("actors list: --limit must be between 1 and 200")
 			}
 			if strings.TrimSpace(*ids) == "" && strings.TrimSpace(*next) == "" {
 				fmt.Fprintln(os.Stderr, "Error: --id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--id")
 			}
 
 			fieldsValue, err := normalizeActorFields(*fields)
@@ -122,40 +125,40 @@ Examples:
 	}
 }
 
-// ActorsGetCommand returns the actors get subcommand.
+// ActorsGetCommand returns the actors view subcommand.
 func ActorsGetCommand() *ffcli.Command {
-	fs := flag.NewFlagSet("get", flag.ExitOnError)
+	fs := flag.NewFlagSet("view", flag.ExitOnError)
 
-	id := fs.String("id", "", "Actor ID")
+	id := shared.BindResourceIDFlag(fs, "id", "actors", "Actor ID")
 	fields := fs.String("fields", "", "Fields to include: "+strings.Join(actorFieldsList(), ", "))
 	output := shared.BindOutputFlags(fs)
 
 	return &ffcli.Command{
-		Name:       "get",
-		ShortUsage: "asc actors get --id ACTOR_ID [flags]",
-		ShortHelp:  "Get an actor by ID.",
-		LongHelp: `Get an actor by ID.
+		Name:       "view",
+		ShortUsage: "asc actors view --id ACTOR_ID [flags]",
+		ShortHelp:  "View an actor by ID.",
+		LongHelp: `View an actor by ID.
 
 Examples:
-  asc actors get --id "ACTOR_ID"
-  asc actors get --id "ACTOR_ID" --fields "actorType,userEmail"`,
+  asc actors view --id "ACTOR_ID"
+  asc actors view --id "ACTOR_ID" --fields "actorType,userEmail"`,
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
 			idValue := strings.TrimSpace(*id)
 			if idValue == "" {
 				fmt.Fprintln(os.Stderr, "Error: --id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--id")
 			}
 
 			fieldsValue, err := normalizeActorFields(*fields)
 			if err != nil {
-				return fmt.Errorf("actors get: %w", err)
+				return fmt.Errorf("actors view: %w", err)
 			}
 
 			client, err := shared.GetASCClient()
 			if err != nil {
-				return fmt.Errorf("actors get: %w", err)
+				return fmt.Errorf("actors view: %w", err)
 			}
 
 			requestCtx, cancel := shared.ContextWithTimeout(ctx)
@@ -163,7 +166,7 @@ Examples:
 
 			actor, err := client.GetActor(requestCtx, idValue, fieldsValue)
 			if err != nil {
-				return fmt.Errorf("actors get: failed to fetch: %w", err)
+				return fmt.Errorf("actors view: failed to fetch: %w", err)
 			}
 
 			return shared.PrintOutput(actor, *output.Output, *output.Pretty)

@@ -23,7 +23,13 @@ import (
 const (
 	sourceAnalytics = "analytics"
 	sourceSales     = "sales"
+
+	analyticsInstancePageLimit = 200
 )
+
+// analyticsInstanceGranularities covers every documented instance granularity so
+// the processing-date filter alone decides which instances count for a week.
+var analyticsInstanceGranularities = []string{"DAILY", "WEEKLY", "MONTHLY"}
 
 // InsightsCommand returns the insights command group.
 func InsightsCommand() *ffcli.Command {
@@ -269,6 +275,7 @@ type reportWeekWindow struct {
 type SalesMetrics struct {
 	RowCount                       int
 	UnitsColumnPresent             bool
+	DownloadUnitsAvailable         bool
 	DeveloperProceedsColumnPresent bool
 	CustomerPriceColumnPresent     bool
 	SubscriptionColumnPresent      bool
@@ -488,10 +495,10 @@ func collectSalesMetrics(ctx context.Context, client *asc.Client, vendor string,
 	metrics = append(metrics, metricFromOptionalTotals(
 		"download_units",
 		"count",
-		thisData.UnitsColumnPresent && prevData.UnitsColumnPresent && availabilityReason == "",
+		thisData.DownloadUnitsAvailable && prevData.DownloadUnitsAvailable && availabilityReason == "",
 		thisData.DownloadUnitsTotal,
 		prevData.DownloadUnitsTotal,
-		resolveSalesReason("download units", availabilityReason, thisData.UnitsColumnPresent, prevData.UnitsColumnPresent),
+		resolveSalesReason("download units", availabilityReason, thisData.DownloadUnitsAvailable, prevData.DownloadUnitsAvailable),
 	))
 	metrics = append(metrics, metricFromOptionalTotals(
 		"monetized_units",
@@ -607,6 +614,7 @@ func ParseSalesReportMetrics(reader io.Reader, scope salesScope) (salesWeekMetri
 	appleIdentifierIdx := findColumnIndex(headers, "appleidentifier")
 	parentIdentifierIdx := findColumnIndex(headers, "parentidentifier")
 	skuIdx := findColumnIndex(headers, "sku")
+	productTypeIdentifierIdx := findColumnIndex(headers, "producttypeidentifier")
 	subscriptionIdx := findColumnIndex(headers, "subscription")
 	unitsIdx := findColumnIndex(headers, "units")
 	developerProceedsIdx := findColumnIndex(headers, "developerproceeds")
@@ -618,6 +626,7 @@ func ParseSalesReportMetrics(reader io.Reader, scope salesScope) (salesWeekMetri
 	scope = EnrichSalesScopeFromRows(scope, rows[1:], appleIdentifierIdx, skuIdx)
 	metrics := salesWeekMetrics{
 		UnitsColumnPresent:             unitsIdx >= 0,
+		DownloadUnitsAvailable:         unitsIdx >= 0 && productTypeIdentifierIdx >= 0,
 		DeveloperProceedsColumnPresent: developerProceedsIdx >= 0,
 		CustomerPriceColumnPresent:     customerPriceIdx >= 0,
 		SubscriptionColumnPresent:      subscriptionIdx >= 0,
@@ -648,7 +657,7 @@ func ParseSalesReportMetrics(reader io.Reader, scope salesScope) (salesWeekMetri
 		if unitsIdx >= 0 {
 			if value, ok := parseNumericValue(valueAtIndex(row, unitsIdx)); ok {
 				metrics.UnitsTotal += value
-				if isAppRow {
+				if isAppRow && isInitialAppDownloadProductType(valueAtIndex(row, productTypeIdentifierIdx)) {
 					metrics.DownloadUnitsTotal += value
 				}
 				if isMonetizedRow {
@@ -687,6 +696,18 @@ func ParseSalesReportMetrics(reader io.Reader, scope salesScope) (salesWeekMetri
 	}
 
 	return metrics, nil
+}
+
+func isInitialAppDownloadProductType(value string) bool {
+	// Apple defines these as first-time app or app-bundle purchases. Redownload
+	// and update product types are intentionally excluded from download units.
+	// https://developer.apple.com/help/app-store-connect/reference/reporting/product-type-identifiers/
+	switch strings.ToUpper(strings.TrimSpace(value)) {
+	case "1", "1-B", "1E", "1EP", "1EU", "1F", "1T", "F1", "F1-B":
+		return true
+	default:
+		return false
+	}
 }
 
 // EnrichSalesScopeFromRows resolves the app SKU from report data when it is
@@ -743,11 +764,7 @@ func isRenewalSubscriptionState(value string) bool {
 }
 
 func collectAnalyticsMetrics(ctx context.Context, client *asc.Client, appID string, thisWeek, previousWeek reportWeekWindow) ([]weeklyMetric, int, error) {
-	requestsResp, err := client.GetAnalyticsReportRequests(
-		ctx,
-		appID,
-		asc.WithAnalyticsReportRequestsLimit(200),
-	)
+	requestsResp, err := fetchAllAnalyticsReportRequests(ctx, client, appID)
 	if err != nil {
 		if isLikelyForbidden(err) {
 			return analyticsUnavailableMetrics("analytics source is not permitted for the current API key"), 0, nil
@@ -758,42 +775,28 @@ func collectAnalyticsMetrics(ctx context.Context, client *asc.Client, appID stri
 		return nil, 0, err
 	}
 
-	completedRequests := make([]asc.AnalyticsReportRequestResource, 0, len(requestsResp.Data))
+	activeRequests := make([]asc.AnalyticsReportRequestResource, 0, len(requestsResp.Data))
 	for _, request := range requestsResp.Data {
-		if request.Attributes.State == asc.AnalyticsReportRequestStateCompleted {
-			completedRequests = append(completedRequests, request)
+		if analyticsReportRequestIsActive(request.Attributes) {
+			activeRequests = append(activeRequests, request)
 		}
 	}
 
-	requestCount := len(completedRequests)
+	requestCount := len(activeRequests)
 	if requestCount == 0 {
-		return analyticsUnavailableMetrics("no completed analytics report requests found"), 0, nil
+		return analyticsUnavailableMetrics("no active analytics report requests found"), 0, nil
 	}
 
 	var (
-		thisCompletedRequests int
-		lastCompletedRequests int
-		thisInstances         int
-		lastInstances         int
+		thisInstances int
+		lastInstances int
 	)
 	thisReportIDs := make(map[string]struct{})
 	lastReportIDs := make(map[string]struct{})
+	processingDates := weekWindowProcessingDates(thisWeek, previousWeek)
 
-	for _, request := range completedRequests {
-		if createdAt, ok := parseDateValue(request.Attributes.CreatedDate); ok {
-			if containsDate(thisWeek, createdAt) {
-				thisCompletedRequests++
-			}
-			if containsDate(previousWeek, createdAt) {
-				lastCompletedRequests++
-			}
-		}
-
-		reportsResp, reportsErr := client.GetAnalyticsReports(
-			ctx,
-			request.ID,
-			asc.WithAnalyticsReportsLimit(200),
-		)
+	for _, request := range activeRequests {
+		reportsResp, reportsErr := fetchAllAnalyticsReports(ctx, client, request.ID)
 		if reportsErr != nil {
 			if isLikelyForbidden(reportsErr) {
 				return analyticsUnavailableMetrics("analytics report metadata endpoints are not permitted for the current API key"), requestCount, nil
@@ -805,10 +808,12 @@ func collectAnalyticsMetrics(ctx context.Context, client *asc.Client, appID stri
 		}
 
 		for _, report := range reportsResp.Data {
-			instancesResp, instancesErr := client.GetAnalyticsReportInstances(
+			instances, instancesErr := fetchAnalyticsReportInstances(
 				ctx,
+				client,
 				report.ID,
-				asc.WithAnalyticsReportInstancesLimit(200),
+				asc.WithAnalyticsReportInstancesProcessingDates(processingDates),
+				asc.WithAnalyticsReportInstancesGranularities(analyticsInstanceGranularities),
 			)
 			if instancesErr != nil {
 				if isLikelyForbidden(instancesErr) {
@@ -820,16 +825,16 @@ func collectAnalyticsMetrics(ctx context.Context, client *asc.Client, appID stri
 				return nil, requestCount, instancesErr
 			}
 
-			for _, instance := range instancesResp.Data {
-				reportDate, ok := parseDateValue(instance.Attributes.ReportDate)
+			for _, instance := range instances {
+				processingDate, ok := parseDateValue(instance.Attributes.ProcessingDate)
 				if !ok {
 					continue
 				}
-				if containsDate(thisWeek, reportDate) {
+				if containsDate(thisWeek, processingDate) {
 					thisInstances++
 					thisReportIDs[report.ID] = struct{}{}
 				}
-				if containsDate(previousWeek, reportDate) {
+				if containsDate(previousWeek, processingDate) {
 					lastInstances++
 					lastReportIDs[report.ID] = struct{}{}
 				}
@@ -838,12 +843,116 @@ func collectAnalyticsMetrics(ctx context.Context, client *asc.Client, appID stri
 	}
 
 	metrics := []weeklyMetric{
-		comparableMetric("completed_requests", "count", float64(thisCompletedRequests), float64(lastCompletedRequests)),
+		unavailableMetric("completed_requests", "count", "request state and creation date are not exposed by the current API"),
 		comparableMetric("reports_available", "count", float64(len(thisReportIDs)), float64(len(lastReportIDs))),
 		comparableMetric("instances_available", "count", float64(thisInstances), float64(lastInstances)),
 		unavailableMetric("business_conversion_rate", "percent", "not derivable from analytics metadata alone"),
 	}
 	return metrics, requestCount, nil
+}
+
+func fetchAllAnalyticsReportRequests(ctx context.Context, client *asc.Client, appID string) (*asc.AnalyticsReportRequestsResponse, error) {
+	first, err := client.GetAnalyticsReportRequests(ctx, appID, asc.WithAnalyticsReportRequestsLimit(200))
+	if err != nil {
+		return nil, err
+	}
+
+	paginated, err := asc.PaginateAll(ctx, first, func(ctx context.Context, nextURL string) (asc.PaginatedResponse, error) {
+		return client.GetAnalyticsReportRequests(ctx, appID, asc.WithAnalyticsReportRequestsNextURL(nextURL))
+	})
+	if err != nil {
+		return nil, err
+	}
+	requests, ok := paginated.(*asc.AnalyticsReportRequestsResponse)
+	if !ok || requests == nil {
+		return nil, fmt.Errorf("insights: unexpected analytics report requests pagination response %T", paginated)
+	}
+	return requests, nil
+}
+
+func fetchAllAnalyticsReports(ctx context.Context, client *asc.Client, requestID string) (*asc.AnalyticsReportsResponse, error) {
+	first, err := client.GetAnalyticsReports(ctx, requestID, asc.WithAnalyticsReportsLimit(200))
+	if err != nil {
+		return nil, err
+	}
+
+	paginated, err := asc.PaginateAll(ctx, first, func(ctx context.Context, nextURL string) (asc.PaginatedResponse, error) {
+		return client.GetAnalyticsReports(ctx, requestID, asc.WithAnalyticsReportsNextURL(nextURL))
+	})
+	if err != nil {
+		return nil, err
+	}
+	reports, ok := paginated.(*asc.AnalyticsReportsResponse)
+	if !ok || reports == nil {
+		return nil, fmt.Errorf("insights: unexpected analytics reports pagination response %T", paginated)
+	}
+	return reports, nil
+}
+
+// weekWindowProcessingDates lists every processing date covered by the given
+// comparison windows so App Store Connect filters instances server side.
+func weekWindowProcessingDates(windows ...reportWeekWindow) []string {
+	dates := make([]string, 0, len(windows)*7)
+	seen := make(map[string]struct{}, len(windows)*7)
+	for _, window := range windows {
+		for day := window.start; !day.After(window.end); day = day.AddDate(0, 0, 1) {
+			formatted := day.Format("2006-01-02")
+			if _, exists := seen[formatted]; exists {
+				continue
+			}
+			seen[formatted] = struct{}{}
+			dates = append(dates, formatted)
+		}
+	}
+	return dates
+}
+
+// fetchAnalyticsReportInstances returns every instance page for a report so
+// weekly counts are not truncated when daily and weekly instances share pages.
+func fetchAnalyticsReportInstances(
+	ctx context.Context,
+	client *asc.Client,
+	reportID string,
+	opts ...asc.AnalyticsReportInstancesOption,
+) ([]asc.Resource[asc.AnalyticsReportInstanceAttributes], error) {
+	var (
+		instances []asc.Resource[asc.AnalyticsReportInstanceAttributes]
+		next      string
+	)
+	seen := make(map[string]struct{})
+
+	for {
+		var (
+			resp *asc.AnalyticsReportInstancesResponse
+			err  error
+		)
+		if next == "" {
+			pageOpts := make([]asc.AnalyticsReportInstancesOption, 0, len(opts)+1)
+			pageOpts = append(pageOpts, asc.WithAnalyticsReportInstancesLimit(analyticsInstancePageLimit))
+			pageOpts = append(pageOpts, opts...)
+			resp, err = client.GetAnalyticsReportInstances(ctx, reportID, pageOpts...)
+		} else {
+			identity := asc.PaginationURLIdentity(next)
+			if _, repeated := seen[identity]; repeated {
+				return nil, fmt.Errorf("insights: detected repeated analytics report instance pagination URL")
+			}
+			seen[identity] = struct{}{}
+			resp, err = client.GetAnalyticsReportInstances(ctx, reportID, asc.WithAnalyticsReportInstancesNextURL(next))
+		}
+		if err != nil {
+			return nil, err
+		}
+
+		instances = append(instances, resp.Data...)
+		if resp.Links.Next == "" {
+			return instances, nil
+		}
+		next = resp.Links.Next
+	}
+}
+
+func analyticsReportRequestIsActive(attributes asc.AnalyticsReportRequestAttributes) bool {
+	return attributes.StoppedDueToInactivity == nil || !*attributes.StoppedDueToInactivity
 }
 
 func analyticsUnavailableMetrics(reason string) []weeklyMetric {

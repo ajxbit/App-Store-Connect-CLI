@@ -2,6 +2,7 @@ package analytics
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -18,13 +19,14 @@ func AnalyticsSalesCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("sales", flag.ExitOnError)
 
 	vendor := fs.String("vendor", "", "Vendor number (or ASC_VENDOR_NUMBER/ASC_ANALYTICS_VENDOR_NUMBER env)")
-	reportType := fs.String("type", "", "Report type: SALES, PRE_ORDER, NEWSSTAND, SUBSCRIPTION, SUBSCRIPTION_EVENT")
-	reportSubType := fs.String("subtype", "", "Report subtype: SUMMARY, DETAILED")
+	reportType := fs.String("type", "", "Report type: SALES, PRE_ORDER, NEWSSTAND, SUBSCRIPTION, SUBSCRIPTION_EVENT, SUBSCRIBER, SUBSCRIPTION_OFFER_CODE_REDEMPTION, INSTALLS, FIRST_ANNUAL, WIN_BACK_ELIGIBILITY")
+	reportSubType := fs.String("subtype", "", "Report subtype: SUMMARY, DETAILED, SUMMARY_INSTALL_TYPE, SUMMARY_TERRITORY, SUMMARY_CHANNEL")
 	frequency := fs.String("frequency", "", "Frequency: DAILY, WEEKLY, MONTHLY, YEARLY")
-	date := fs.String("date", "", "Report date: daily YYYY-MM-DD, weekly Monday(start) or Sunday(end) YYYY-MM-DD, monthly YYYY-MM, yearly YYYY")
-	version := fs.String("version", "1_0", "Report format version: 1_0 (default), 1_1, 1_3")
-	output := fs.String("output", "", "Output file path (default: sales_report_{date}_{type}.tsv.gz)")
+	date := fs.String("date", "", "Report date: daily/weekly YYYY-MM-DD, monthly YYYY-MM or YYYY-MM-DD, yearly YYYY or YYYY-MM-DD (optional for DAILY)")
+	version := fs.String("version", "", "Report format version allowed for the selected type, subtype, and frequency")
+	output := fs.String("output", "", "Output file path (default: sales_report_{date|latest}_{type}.tsv.gz)")
 	decompress := fs.Bool("decompress", false, "Decompress gzip output to .tsv")
+	allowMissing := fs.Bool("allow-missing", false, "Return available=false instead of failing when no report exists for the requested date")
 	outputFlags := shared.BindMetadataOutputFlags(fs)
 
 	return &ffcli.Command{
@@ -35,8 +37,10 @@ func AnalyticsSalesCommand() *ffcli.Command {
 
 Examples:
   asc analytics sales --vendor "12345678" --type SALES --subtype SUMMARY --frequency DAILY --date "2024-01-20"
+  asc analytics sales --vendor "12345678" --type SALES --subtype SUMMARY --frequency DAILY
   asc analytics sales --vendor "12345678" --type SALES --subtype SUMMARY --frequency WEEKLY --date "2024-01-15" # Monday start accepted
-  asc analytics sales --vendor "12345678" --type SUBSCRIPTION --subtype DETAILED --frequency MONTHLY --date "2024-01"
+  asc analytics sales --vendor "12345678" --type SUBSCRIBER --subtype DETAILED --frequency DAILY
+  asc analytics sales --vendor "12345678" --type SALES --subtype SUMMARY --frequency DAILY --date "2024-01-20" --allow-missing
   asc analytics sales --vendor "12345678" --type SALES --subtype SUMMARY --frequency DAILY --date "2024-01-20" --decompress
   asc analytics sales --vendor "12345678" --type SALES --subtype SUMMARY --frequency DAILY --date "2024-01-20" --output "reports/daily_sales.tsv.gz"`,
 		FlagSet:   fs,
@@ -45,47 +49,46 @@ Examples:
 			vendorNumber := shared.ResolveVendorNumber(*vendor)
 			if vendorNumber == "" {
 				fmt.Fprintln(os.Stderr, "Error: --vendor is required (or set ASC_VENDOR_NUMBER/ASC_ANALYTICS_VENDOR_NUMBER)")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--vendor")
 			}
 			if strings.TrimSpace(*reportType) == "" {
 				fmt.Fprintln(os.Stderr, "Error: --type is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--type")
 			}
 			if strings.TrimSpace(*reportSubType) == "" {
 				fmt.Fprintln(os.Stderr, "Error: --subtype is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--subtype")
 			}
 			if strings.TrimSpace(*frequency) == "" {
 				fmt.Fprintln(os.Stderr, "Error: --frequency is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--frequency")
 			}
-			if strings.TrimSpace(*date) == "" {
-				fmt.Fprintln(os.Stderr, "Error: --date is required")
-				return flag.ErrHelp
-			}
-
 			salesType, err := normalizeSalesReportType(*reportType)
 			if err != nil {
-				return fmt.Errorf("analytics sales: %w", err)
+				return shared.UsageError(fmt.Sprintf("analytics sales: %v", err))
 			}
 			subType, err := normalizeSalesReportSubType(*reportSubType)
 			if err != nil {
-				return fmt.Errorf("analytics sales: %w", err)
+				return shared.UsageError(fmt.Sprintf("analytics sales: %v", err))
 			}
 			freq, err := normalizeSalesReportFrequency(*frequency)
 			if err != nil {
-				return fmt.Errorf("analytics sales: %w", err)
+				return shared.UsageError(fmt.Sprintf("analytics sales: %v", err))
 			}
 			reportDate, err := normalizeReportDate(*date, freq)
 			if err != nil {
-				return fmt.Errorf("analytics sales: %w", err)
+				return shared.UsageError(fmt.Sprintf("analytics sales: %v", err))
 			}
-			reportVersion, err := normalizeSalesReportVersion(*version)
+			reportVersion, err := normalizeSalesReportVersion(*version, salesType, subType, freq)
 			if err != nil {
-				return fmt.Errorf("analytics sales: %w", err)
+				return shared.UsageError(fmt.Sprintf("analytics sales: %v", err))
 			}
 
-			defaultOutput := fmt.Sprintf("sales_report_%s_%s.tsv.gz", reportDate, string(salesType))
+			outputDate := reportDate
+			if outputDate == "" {
+				outputDate = "latest"
+			}
+			defaultOutput := fmt.Sprintf("sales_report_%s_%s.tsv.gz", outputDate, string(salesType))
 			compressedPath, decompressedPath := shared.ResolveReportOutputPaths(*output, defaultOutput, ".tsv", *decompress)
 
 			client, err := shared.GetASCClient()
@@ -93,7 +96,7 @@ Examples:
 				return fmt.Errorf("analytics sales: %w", err)
 			}
 
-			requestCtx, cancel := shared.ContextWithTimeout(ctx)
+			requestCtx, cancel := shared.ContextWithDownloadTimeout(ctx)
 			defer cancel()
 
 			download, err := client.GetSalesReport(requestCtx, asc.SalesReportParams{
@@ -105,6 +108,18 @@ Examples:
 				Version:       reportVersion,
 			})
 			if err != nil {
+				if *allowMissing && isMissingSalesReportError(err) {
+					available := false
+					return shared.PrintOutput(&asc.SalesReportResult{
+						VendorNumber:  vendorNumber,
+						ReportType:    string(salesType),
+						ReportSubType: string(subType),
+						Frequency:     string(freq),
+						ReportDate:    reportDate,
+						Version:       string(reportVersion),
+						Available:     &available,
+					}, *outputFlags.OutputFormat, *outputFlags.Pretty)
+				}
 				return fmt.Errorf("analytics sales: failed to download report: %w", err)
 			}
 			defer download.Body.Close()
@@ -139,4 +154,17 @@ Examples:
 			return shared.PrintOutput(result, *outputFlags.OutputFormat, *outputFlags.Pretty)
 		},
 	}
+}
+
+func isMissingSalesReportError(err error) bool {
+	if !errors.Is(err, asc.ErrNotFound) {
+		return false
+	}
+
+	var apiErr *asc.APIError
+	if !errors.As(err, &apiErr) || apiErr == nil {
+		return false
+	}
+
+	return strings.Contains(strings.ToLower(apiErr.Detail), "no sales for the date specified")
 }

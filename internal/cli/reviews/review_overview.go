@@ -69,6 +69,14 @@ type reviewDoctorResult struct {
 	NextAction             string                   `json:"nextAction"`
 	BlockingChecks         []validation.CheckResult `json:"blockingChecks,omitempty"`
 	WarningChecks          []validation.CheckResult `json:"warningChecks,omitempty"`
+	CoverageWarnings       []reviewCoverageWarning  `json:"coverageWarnings"`
+}
+
+type reviewCoverageWarning struct {
+	ID          string `json:"id"`
+	Status      string `json:"status"`
+	Message     string `json:"message"`
+	Remediation string `json:"remediation"`
 }
 
 // ReviewStatusCommand returns an app-scoped review status command.
@@ -77,7 +85,7 @@ func ReviewStatusCommand() *ffcli.Command {
 
 	appID := fs.String("app", "", "App Store Connect app ID, bundle ID, or exact app name (required, or ASC_APP_ID)")
 	version := fs.String("version", "", "App Store version string to inspect")
-	versionID := fs.String("version-id", "", "App Store version ID to inspect")
+	versionID := shared.BindResourceIDFlag(fs, "version-id", "appStoreVersions", "App Store version ID to inspect")
 	platform := fs.String("platform", "", "Platform filter: IOS, MAC_OS, TV_OS, VISION_OS")
 	output := shared.BindOutputFlags(fs)
 
@@ -95,7 +103,7 @@ Examples:
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
 			if len(args) > 0 {
-				return shared.UsageError("review status does not accept positional arguments")
+				return shared.WithDiagnostic(shared.UsageError("review status does not accept positional arguments"), shared.DiagnosticInvalidInput, "")
 			}
 
 			resolvedAppID, versionValue, versionIDValue, platformValue, err := resolveReviewOverviewFlags(*appID, *version, *versionID, *platform)
@@ -139,7 +147,7 @@ func ReviewDoctorCommand() *ffcli.Command {
 
 	appID := fs.String("app", "", "App Store Connect app ID, bundle ID, or exact app name (required, or ASC_APP_ID)")
 	version := fs.String("version", "", "App Store version string to diagnose")
-	versionID := fs.String("version-id", "", "App Store version ID to diagnose")
+	versionID := shared.BindResourceIDFlag(fs, "version-id", "appStoreVersions", "App Store version ID to diagnose")
 	platform := fs.String("platform", "", "Platform filter: IOS, MAC_OS, TV_OS, VISION_OS")
 	output := shared.BindOutputFlags(fs)
 
@@ -157,7 +165,7 @@ Examples:
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
 			if len(args) > 0 {
-				return shared.UsageError("review doctor does not accept positional arguments")
+				return shared.WithDiagnostic(shared.UsageError("review doctor does not accept positional arguments"), shared.DiagnosticInvalidInput, "")
 			}
 
 			resolvedAppID, versionValue, versionIDValue, platformValue, err := resolveReviewOverviewFlags(*appID, *version, *versionID, *platform)
@@ -212,20 +220,20 @@ func resolveReviewOverviewFlags(appID, version, versionID, platform string) (str
 	resolvedAppID := shared.ResolveAppID(appID)
 	if strings.TrimSpace(resolvedAppID) == "" {
 		fmt.Fprintln(os.Stderr, "Error: --app is required (or set ASC_APP_ID)")
-		return "", "", "", "", flag.ErrHelp
+		return "", "", "", "", shared.MissingRequiredUsageError("--app")
 	}
 
 	versionValue := strings.TrimSpace(version)
 	versionIDValue := strings.TrimSpace(versionID)
 	if versionValue != "" && versionIDValue != "" {
-		return "", "", "", "", shared.UsageError("--version and --version-id are mutually exclusive")
+		return "", "", "", "", shared.WithDiagnostic(shared.UsageError("--version and --version-id are mutually exclusive"), shared.DiagnosticConflictingInput, "")
 	}
 
 	platformValue := strings.TrimSpace(platform)
 	if platformValue != "" {
 		normalizedPlatform, err := shared.NormalizeAppStoreVersionPlatform(platformValue)
 		if err != nil {
-			return "", "", "", "", shared.UsageError(err.Error())
+			return "", "", "", "", shared.WithDiagnostic(shared.UsageError(err.Error()), shared.DiagnosticInvalidInput, "--platform")
 		}
 		platformValue = normalizedPlatform
 	}
@@ -313,7 +321,7 @@ func resolveReviewVersion(ctx context.Context, client *asc.Client, appID, versio
 	}
 	if strings.TrimSpace(version) != "" {
 		if len(versions) > 1 {
-			return nil, fmt.Errorf("multiple app store versions found for version %q", strings.TrimSpace(version))
+			return nil, shared.AmbiguousAppStoreVersionError(version, platform, versions, "--platform", "--version-id")
 		}
 		versionContext := mapReviewVersion(versions[0])
 		return &versionContext, nil
@@ -397,24 +405,39 @@ func summarizeReviewSubmissionItems(ctx context.Context, client *asc.Client, sub
 		ctx,
 		submissionID,
 		asc.WithReviewSubmissionItemsLimit(200),
+		asc.WithReviewSubmissionItemsInclude([]string{"appStoreVersion"}),
 		asc.WithReviewSubmissionItemsFields([]string{"state", "appStoreVersion"}),
 	)
 	if err != nil {
 		return summary, err
 	}
 
-	for {
-		accumulateReviewSubmissionItems(&summary, resp.Data, versionID)
-
-		nextURL := strings.TrimSpace(resp.Links.Next)
-		if nextURL == "" {
-			return summary, nil
-		}
-
-		resp, err = client.GetReviewSubmissionItems(ctx, submissionID, asc.WithReviewSubmissionItemsNextURL(nextURL))
+	trimReviewSubmissionItemsNextURL(resp)
+	err = asc.PaginateEach(ctx, resp, func(ctx context.Context, nextURL string) (asc.PaginatedResponse, error) {
+		nextPage, err := client.GetReviewSubmissionItems(ctx, submissionID, asc.WithReviewSubmissionItemsNextURL(strings.TrimSpace(nextURL)))
 		if err != nil {
-			return summary, err
+			return nil, err
 		}
+		trimReviewSubmissionItemsNextURL(nextPage)
+		return nextPage, nil
+	}, func(page asc.PaginatedResponse) error {
+		pageResp, ok := page.(*asc.ReviewSubmissionItemsResponse)
+		if !ok || pageResp == nil {
+			return fmt.Errorf("unexpected review submission items pagination response type %T", page)
+		}
+		accumulateReviewSubmissionItems(&summary, pageResp.Data, versionID)
+		return nil
+	})
+	if err != nil {
+		return summary, err
+	}
+
+	return summary, nil
+}
+
+func trimReviewSubmissionItemsNextURL(resp *asc.ReviewSubmissionItemsResponse) {
+	if resp != nil {
+		resp.Links.Next = strings.TrimSpace(resp.Links.Next)
 	}
 }
 
@@ -530,10 +553,10 @@ func buildReviewStatusResult(snapshot reviewSnapshot) reviewStatusResult {
 	}
 
 	if snapshot.LatestSubmission == nil {
-		switch versionState {
-		case "READY_FOR_SALE":
+		switch {
+		case shared.IsLiveAppStoreVersionState(versionState):
 			result.NextAction = "No action needed."
-		case "PENDING_DEVELOPER_RELEASE":
+		case versionState == "PENDING_DEVELOPER_RELEASE":
 			result.NextAction = "Release the approved version when ready."
 		default:
 			result.NextAction = "Submit the version for App Review when ready."
@@ -554,6 +577,7 @@ func buildReviewDoctorResult(snapshot reviewSnapshot, report validation.Report) 
 		NextAction:             "Create or select an App Store version before diagnosing review blockers.",
 		BlockingChecks:         make([]validation.CheckResult, 0),
 		WarningChecks:          make([]validation.CheckResult, 0),
+		CoverageWarnings:       reviewDoctorCoverageWarnings(snapshot.AppID),
 	}
 
 	if snapshot.Version == nil {
@@ -574,6 +598,14 @@ func buildReviewDoctorResult(snapshot reviewSnapshot, report validation.Report) 
 		result.ReviewState = "NOT_SUBMITTED"
 	}
 
+	if shared.IsLiveAppStoreVersionState(snapshot.Version.State) {
+		// A live version does not need another submission.
+		// Keep all other readiness findings and leave submission validation intact.
+		report.Checks = slices.DeleteFunc(slices.Clone(report.Checks), func(check validation.CheckResult) bool {
+			return check.ID == "version.state.editable"
+		})
+		report.Summary = validation.SummarizeChecks(report.Checks, report.Strict)
+	}
 	result.Summary = report.Summary
 	for _, check := range report.Checks {
 		switch check.Severity {
@@ -623,20 +655,47 @@ func buildReviewDoctorResult(snapshot reviewSnapshot, report validation.Report) 
 		result.NextAction = result.BlockingChecks[0].Message
 	case strings.EqualFold(result.ReviewState, string(asc.ReviewSubmissionStateWaitingForReview)) || strings.EqualFold(result.ReviewState, string(asc.ReviewSubmissionStateInReview)):
 		result.NextAction = "No submission blockers detected. Wait for App Store review outcome."
-	case strings.EqualFold(strings.TrimSpace(snapshot.Version.State), "READY_FOR_SALE"):
+	case shared.IsLiveAppStoreVersionState(snapshot.Version.State):
 		result.NextAction = "No action needed."
 	default:
-		result.NextAction = "No submission blockers detected. Submit the version when ready."
+		result.NextAction = "No public-API submission blockers detected. Run `" + reviewDeclarationsListCommand(snapshot.AppID) + "` before submission."
 	}
 
 	return result
 }
 
+func reviewDeclarationsListCommand(appID string) string {
+	appID = strings.TrimSpace(appID)
+	if appID == "" {
+		return "asc web apps declarations list"
+	}
+	return "asc web apps declarations list --app \"" + appID + "\""
+}
+
+func reviewMedicalDeviceSetCommand(appID string) string {
+	appID = strings.TrimSpace(appID)
+	if appID == "" {
+		return "asc web apps medical-device set --declared false"
+	}
+	return "asc web apps medical-device set --app \"" + appID + "\" --declared false"
+}
+
+func reviewDoctorCoverageWarnings(appID string) []reviewCoverageWarning {
+	return []reviewCoverageWarning{
+		{
+			ID:          "review.coverage.app_store_regulations_and_permits",
+			Status:      "NOT_CHECKED",
+			Message:     "App Store Regulations and Permits declarations, including the personal-service declaration, are managed on the App Store Connect website and are not checked by asc review doctor.",
+			Remediation: "Run `" + reviewDeclarationsListCommand(appID) + "` with a web session, then answer outstanding requirements in App Store Connect or with `" + reviewMedicalDeviceSetCommand(appID) + "`.",
+		},
+	}
+}
+
 func reviewPostCompleteAction(versionState string) string {
-	switch strings.ToUpper(strings.TrimSpace(versionState)) {
-	case "READY_FOR_SALE":
+	switch {
+	case shared.IsLiveAppStoreVersionState(versionState):
 		return "No action needed."
-	case "PENDING_DEVELOPER_RELEASE":
+	case strings.EqualFold(strings.TrimSpace(versionState), "PENDING_DEVELOPER_RELEASE"):
 		return "Release the approved version when ready."
 	default:
 		return "Review the completed App Review outcome."
@@ -695,6 +754,12 @@ func renderReviewDoctor(result reviewDoctorResult, markdown bool) {
 		{"latestSubmissionId", shared.OrNA(reviewSubmissionField(result.LatestSubmission, func(s *reviewSubmissionContext) string { return s.ID }))},
 	}
 	shared.RenderSection("Current Review", []string{"field", "value"}, contextRows, markdown)
+
+	coverageRows := make([][]string, 0, len(result.CoverageWarnings))
+	for _, warning := range result.CoverageWarnings {
+		coverageRows = append(coverageRows, []string{warning.ID, warning.Status, warning.Message, warning.Remediation})
+	}
+	shared.RenderSection("Coverage Warnings", []string{"id", "status", "message", "remediation"}, coverageRows, markdown)
 
 	if len(result.BlockingChecks) > 0 {
 		blockerRows := make([][]string, 0, len(result.BlockingChecks))

@@ -39,7 +39,7 @@ type webAuthCapabilitiesResult struct {
 	GeneratedBy           *webcoreKeyActorResult          `json:"generatedBy,omitempty"`
 	RevokedBy             *webcoreKeyActorResult          `json:"revokedBy,omitempty"`
 	RoleDetails           []webAuthRoleDetailResult       `json:"roleDetails,omitempty"`
-	Capabilities          []webAuthCapabilityResult       `json:"capabilities,omitempty"`
+	Capabilities          []webAuthCapabilityResult       `json:"capabilities"`
 	DocumentedAccess      []webAuthDocumentedAccessResult `json:"documentedAccess,omitempty"`
 	Sources               []webAuthSourceResult           `json:"sources,omitempty"`
 	Scope                 *webAuthScopeResult             `json:"scope,omitempty"`
@@ -114,8 +114,8 @@ func WebAuthCapabilitiesCommand() *ffcli.Command {
 	return &ffcli.Command{
 		Name:       "capabilities",
 		ShortUsage: "asc web auth capabilities [--key-id ID] [flags]",
-		ShortHelp:  "[experimental] Show exact web-visible API key roles and full documented capability metadata.",
-		LongHelp: `EXPERIMENTAL / UNOFFICIAL / DISCOURAGED
+		ShortHelp:  "Show exact web-visible API key roles and full documented capability metadata.",
+		LongHelp: `WEB SESSION WORKFLOWS
 
 Return exact role metadata for an App Store Connect API key using Apple web-session endpoints, then map those roles to the bundled Apple capability reference.
 Unlike "asc auth capabilities", which probes effective public-API access, this command reads the web-visible key role assignment directly and expands it with documented role capabilities.
@@ -132,7 +132,7 @@ If --key-id is omitted, the command resolves the current API key ID from the sel
 That metadata-only resolution avoids loading private key material just to pick the key ID.
 For deterministic cache selection, prefer passing --apple-id like other "asc web" commands.
 
-` + webWarningText + `
+
 
 Examples:
   asc web auth capabilities --apple-id "user@example.com"
@@ -164,12 +164,10 @@ Examples:
 				return shared.UsageError("unable to resolve current API key ID; run 'asc auth login' or provide --key-id")
 			}
 
-			requestCtx, cancel := shared.ContextWithTimeout(ctx)
+			session, requestCtx, cancel, err := resolveWebSessionForCommand(ctx, authFlags)
 			defer cancel()
-
-			session, err := resolveWebSessionForCommand(requestCtx, authFlags)
 			if err != nil {
-				return err
+				return wrapWebAuthCapabilitiesSessionError(err)
 			}
 
 			client := newWebAuthClientFn(session)
@@ -237,15 +235,68 @@ func convertKeyActor(actor *webcore.KeyActor) *webcoreKeyActorResult {
 
 func wrapWebAuthCapabilitiesError(keyID string, err error) error {
 	if errors.Is(err, webcore.ErrAPIKeyNotFound) {
-		return fmt.Errorf("web auth capabilities failed: key %q not found in App Store Connect web key lists", keyID)
+		return webAuthCapabilitiesError(
+			fmt.Sprintf("web auth capabilities failed: key %q not found in App Store Connect web key lists", keyID),
+			err,
+		)
 	}
 	if errors.Is(err, webcore.ErrAPIKeyNotVisible) {
-		return fmt.Errorf("web auth capabilities failed: key %q is not visible in the accessible App Store Connect web key lists (team key list may be unavailable to this account)", keyID)
+		return webAuthCapabilitiesError(
+			fmt.Sprintf("web auth capabilities failed: key %q is not visible in the accessible App Store Connect web key lists (team key list may be unavailable to this account)", keyID),
+			err,
+		)
 	}
 	if errors.Is(err, webcore.ErrAPIKeyRolesUnresolved) {
-		return fmt.Errorf("web auth capabilities failed: exact roles could not be resolved for key %q", keyID)
+		return webAuthCapabilitiesError(
+			fmt.Sprintf("web auth capabilities failed: exact roles could not be resolved for key %q", keyID),
+			err,
+		)
 	}
-	return withWebAuthHint(err, "web auth capabilities")
+	var apiErr *webcore.APIError
+	if errors.As(err, &apiErr) {
+		switch apiErr.Status {
+		case 401:
+			return webAuthCapabilitiesError("web auth capabilities failed: web session expired (run 'asc web auth login')", err)
+		case 403:
+			return webAuthCapabilitiesError("web auth capabilities failed: capability discovery is not permitted for this account or provider; verify the selected provider and account role", err)
+		}
+		return webAuthCapabilitiesError(
+			fmt.Sprintf("web auth capabilities failed: capability discovery is unavailable; retry or run 'asc web auth login': %s", apiErr.Error()),
+			err,
+		)
+	}
+	return webAuthCapabilitiesError("web auth capabilities failed: capability discovery is unavailable; retry or run 'asc web auth login'", err)
+}
+
+func wrapWebAuthCapabilitiesSessionError(err error) error {
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, webcore.ErrCachedSessionExpired) {
+		return webAuthCapabilitiesError("web auth capabilities failed: cached web session expired; run 'asc web auth login' and retry", err)
+	}
+	if errors.Is(err, shared.ErrMissingWebSession) || errors.Is(err, errNoCachedWebSession) || errors.Is(err, flag.ErrHelp) {
+		// The session resolver already explains these: a missing session carries
+		// its own sign-in hint and usage exit code, and the usage errors
+		// for an ambiguous cache have written their --apple-id guidance. Preserve
+		// them unchanged so the root renderer prints that guidance once and the
+		// command keeps the resolver's exit code.
+		return err
+	}
+	var apiErr *webcore.APIError
+	if errors.As(err, &apiErr) {
+		switch apiErr.Status {
+		case 401:
+			return webAuthCapabilitiesError("web auth capabilities failed: web session expired (run 'asc web auth login')", err)
+		case 403:
+			return webAuthCapabilitiesError("web auth capabilities failed: capability discovery is not permitted for this account or provider; verify the selected provider and account role", err)
+		}
+	}
+	return webAuthCapabilitiesError("web auth capabilities failed: unable to establish a web session; run 'asc web auth login' and retry", err)
+}
+
+func webAuthCapabilitiesError(message string, cause error) error {
+	return shared.NewErrorWithCause(errors.New(message), cause)
 }
 
 func renderWebAuthCapabilitiesTable(result webAuthCapabilitiesResult) error {
@@ -330,7 +381,7 @@ func convertWebAuthRoleDetails(src []webref.Role) []webAuthRoleDetailResult {
 
 func convertWebAuthCapabilities(src []webref.CapabilityGroup) []webAuthCapabilityResult {
 	if len(src) == 0 {
-		return nil
+		return []webAuthCapabilityResult{}
 	}
 	dst := make([]webAuthCapabilityResult, 0, len(src))
 	for _, capability := range src {

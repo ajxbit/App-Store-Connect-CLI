@@ -24,7 +24,7 @@ func AppClipReviewDetailsCommand() *ffcli.Command {
 		LongHelp: `Manage App Clip App Store review details (invocation URLs).
 
 Examples:
-  asc app-clips review-details get --id "DETAIL_ID"
+  asc app-clips review-details view --id "DETAIL_ID"
   asc app-clips review-details create --experience-id "EXP_ID" --url "https://example.com/clip"
   asc app-clips review-details update --id "DETAIL_ID" --url "https://example.com/clip"`,
 		FlagSet:   fs,
@@ -42,31 +42,31 @@ Examples:
 
 // AppClipReviewDetailsGetCommand gets review details by ID.
 func AppClipReviewDetailsGetCommand() *ffcli.Command {
-	fs := flag.NewFlagSet("get", flag.ExitOnError)
+	fs := flag.NewFlagSet("view", flag.ExitOnError)
 
-	detailID := fs.String("id", "", "Review detail ID")
+	detailID := shared.BindResourceIDFlag(fs, "id", "appClipAppStoreReviewDetails", "Review detail ID")
 	output := shared.BindOutputFlags(fs)
 
 	return &ffcli.Command{
-		Name:       "get",
-		ShortUsage: "asc app-clips review-details get --id \"DETAIL_ID\"",
-		ShortHelp:  "Get App Clip review details by ID.",
-		LongHelp: `Get App Clip review details by ID.
+		Name:       "view",
+		ShortUsage: "asc app-clips review-details view --id \"DETAIL_ID\"",
+		ShortHelp:  "View App Clip review details by ID.",
+		LongHelp: `View App Clip review details by ID.
 
 Examples:
-  asc app-clips review-details get --id "DETAIL_ID"`,
+  asc app-clips review-details view --id "DETAIL_ID"`,
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
 			detailValue := strings.TrimSpace(*detailID)
 			if detailValue == "" {
 				fmt.Fprintln(os.Stderr, "Error: --id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--id")
 			}
 
 			client, err := shared.GetASCClient()
 			if err != nil {
-				return fmt.Errorf("app-clips review-details get: %w", err)
+				return fmt.Errorf("app-clips review-details view: %w", err)
 			}
 
 			requestCtx, cancel := shared.ContextWithTimeout(ctx)
@@ -74,7 +74,7 @@ Examples:
 
 			resp, err := client.GetAppClipAppStoreReviewDetail(requestCtx, detailValue)
 			if err != nil {
-				return fmt.Errorf("app-clips review-details get: failed to fetch: %w", err)
+				return fmt.Errorf("app-clips review-details view: failed to fetch: %w", err)
 			}
 
 			return shared.PrintOutput(resp, *output.Output, *output.Pretty)
@@ -86,8 +86,8 @@ Examples:
 func AppClipReviewDetailsCreateCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("create", flag.ExitOnError)
 
-	experienceID := fs.String("experience-id", "", "Default experience ID")
-	urls := fs.String("url", "", "Invocation URL(s), comma-separated")
+	experienceID := shared.BindResourceIDFlag(fs, "experience-id", "appClipDefaultExperiences", "Default experience ID")
+	urls := shared.BindOnceCSVFlag(fs, "url", "Invocation URL(s), comma-separated")
 	output := shared.BindOutputFlags(fs)
 
 	return &ffcli.Command{
@@ -104,13 +104,13 @@ Examples:
 			experienceValue := strings.TrimSpace(*experienceID)
 			if experienceValue == "" {
 				fmt.Fprintln(os.Stderr, "Error: --experience-id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--experience-id")
 			}
 
-			urlValues := shared.SplitCSV(*urls)
+			urlValues := shared.SplitCSV(urls.String())
 			if len(urlValues) == 0 {
 				fmt.Fprintln(os.Stderr, "Error: --url is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--url")
 			}
 
 			client, err := shared.GetASCClient()
@@ -136,8 +136,8 @@ Examples:
 func AppClipReviewDetailsUpdateCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("update", flag.ExitOnError)
 
-	detailID := fs.String("id", "", "Review detail ID")
-	urls := fs.String("url", "", "Invocation URL(s), comma-separated")
+	detailID := shared.BindResourceIDFlag(fs, "id", "appClipAppStoreReviewDetails", "Review detail ID")
+	urls := shared.BindOnceCSVFlag(fs, "url", "Invocation URL(s), comma-separated")
 	output := shared.BindOutputFlags(fs)
 
 	return &ffcli.Command{
@@ -154,7 +154,7 @@ Examples:
 			detailValue := strings.TrimSpace(*detailID)
 			if detailValue == "" {
 				fmt.Fprintln(os.Stderr, "Error: --id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--id")
 			}
 
 			visited := map[string]bool{}
@@ -163,10 +163,10 @@ Examples:
 			})
 			if !visited["url"] {
 				fmt.Fprintln(os.Stderr, "Error: at least one update flag is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("")
 			}
 
-			urlValues := shared.SplitCSV(*urls)
+			urlValues := shared.SplitCSV(urls.String())
 			attrs := &asc.AppClipAppStoreReviewDetailUpdateAttributes{InvocationURLs: urlValues}
 
 			client, err := shared.GetASCClient()

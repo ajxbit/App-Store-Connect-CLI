@@ -6,11 +6,11 @@ import (
 	"fmt"
 	"os"
 	"strings"
-	"time"
 
 	"github.com/peterbourgon/ff/v3/ffcli"
 
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/asc"
+	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/ascterritory"
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/cli/shared"
 )
 
@@ -45,11 +45,11 @@ Examples:
 
 // IAPPriceSchedulesGetCommand returns the price schedules get subcommand.
 func IAPPriceSchedulesGetCommand() *ffcli.Command {
-	fs := flag.NewFlagSet("schedules get", flag.ExitOnError)
+	fs := flag.NewFlagSet("schedules view", flag.ExitOnError)
 
-	iapID := fs.String("iap-id", "", "In-app purchase ID, product ID, or exact current name")
+	iapID := shared.BindResourceIDFlag(fs, "iap-id", "inAppPurchases", "In-app purchase ID, product ID, or exact current name")
 	appID := addIAPLookupAppFlag(fs)
-	scheduleID := fs.String("schedule-id", "", "Price schedule ID")
+	scheduleID := shared.BindResourceIDFlag(fs, "schedule-id", "inAppPurchasePriceSchedules", "Price schedule ID")
 	include := fs.String("include", "", "Include relationships: baseTerritory,manualPrices,automaticPrices")
 	scheduleFields := fs.String("schedule-fields", "", "fields[inAppPurchasePriceSchedules] (comma-separated)")
 	territoryFields := fs.String("territory-fields", "", "fields[territories] (comma-separated)")
@@ -59,10 +59,10 @@ func IAPPriceSchedulesGetCommand() *ffcli.Command {
 	output := shared.BindOutputFlags(fs)
 
 	return &ffcli.Command{
-		Name:       "get",
+		Name:       "view",
 		ShortUsage: "asc iap pricing schedules view --iap-id \"IAP_ID\"",
-		ShortHelp:  "Get in-app purchase price schedule.",
-		LongHelp: `Get in-app purchase price schedule.
+		ShortHelp:  "View in-app purchase price schedule.",
+		LongHelp: `View in-app purchase price schedule.
 
 Examples:
   asc iap pricing schedules view --iap-id "IAP_ID"
@@ -75,7 +75,7 @@ Examples:
 			scheduleValue := strings.TrimSpace(*scheduleID)
 			if iapValue == "" && scheduleValue == "" {
 				fmt.Fprintln(os.Stderr, "Error: --iap-id or --schedule-id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("")
 			}
 			if iapValue != "" && scheduleValue != "" {
 				fmt.Fprintln(os.Stderr, "Error: --iap-id and --schedule-id are mutually exclusive")
@@ -98,7 +98,7 @@ Examples:
 
 			client, err := shared.GetASCClient()
 			if err != nil {
-				return fmt.Errorf("iap pricing schedules get: %w", err)
+				return fmt.Errorf("iap pricing schedules view: %w", err)
 			}
 
 			opts := make([]asc.IAPPriceScheduleOption, 0, 6)
@@ -127,7 +127,7 @@ Examples:
 
 				resp, err := client.GetInAppPurchasePriceScheduleByID(requestCtx, scheduleValue, opts...)
 				if err != nil {
-					return fmt.Errorf("iap pricing schedules get: failed to fetch: %w", err)
+					return fmt.Errorf("iap pricing schedules view: failed to fetch: %w", err)
 				}
 
 				return shared.PrintOutput(resp, *output.Output, *output.Pretty)
@@ -143,7 +143,7 @@ Examples:
 
 			resp, err := client.GetInAppPurchasePriceSchedule(requestCtx, iapValue, opts...)
 			if err != nil {
-				return fmt.Errorf("iap pricing schedules get: failed to fetch: %w", err)
+				return fmt.Errorf("iap pricing schedules view: failed to fetch: %w", err)
 			}
 
 			return shared.PrintOutput(resp, *output.Output, *output.Pretty)
@@ -182,7 +182,7 @@ func normalizeIAPPriceScheduleInclude(value string) ([]string, error) {
 func IAPPriceSchedulesBaseTerritoryCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("schedules base-territory", flag.ExitOnError)
 
-	scheduleID := fs.String("schedule-id", "", "Price schedule ID")
+	scheduleID := shared.BindResourceIDFlag(fs, "schedule-id", "inAppPurchasePriceSchedules", "Price schedule ID")
 	output := shared.BindOutputFlags(fs)
 
 	return &ffcli.Command{
@@ -199,7 +199,7 @@ Examples:
 			id := strings.TrimSpace(*scheduleID)
 			if id == "" {
 				fmt.Fprintln(os.Stderr, "Error: --schedule-id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--schedule-id")
 			}
 
 			client, err := shared.GetASCClient()
@@ -224,9 +224,9 @@ Examples:
 func IAPPriceSchedulesCreateCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("schedules create", flag.ExitOnError)
 
-	iapID := fs.String("iap-id", "", "In-app purchase ID, product ID, or exact current name")
+	iapID := shared.BindResourceIDFlag(fs, "iap-id", "inAppPurchases", "In-app purchase ID, product ID, or exact current name")
 	appID := fs.String("app", "", iapLookupAppUsage)
-	baseTerritory := fs.String("base-territory", "", "Base territory ID (e.g., USA)")
+	baseTerritory := fs.String("base-territory", "", "Base territory: alpha-2, alpha-3, or English country name (e.g., US, USA, United States)")
 	prices := fs.String("prices", "", "Manual prices: PRICE_POINT_ID[:START_DATE[:END_DATE]] entries")
 	tier := fs.Int("tier", 0, "Pricing tier number (use instead of --prices for single-price schedule)")
 	price := fs.String("price", "", "Customer price (use instead of --prices for single-price schedule)")
@@ -250,12 +250,16 @@ Examples:
 			iapValue := strings.TrimSpace(*iapID)
 			if iapValue == "" {
 				fmt.Fprintln(os.Stderr, "Error: --iap-id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--iap-id")
 			}
 			baseTerritoryValue := strings.TrimSpace(*baseTerritory)
 			if baseTerritoryValue == "" {
 				fmt.Fprintln(os.Stderr, "Error: --base-territory is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--base-territory")
+			}
+			baseTerritoryValue, err := ascterritory.Normalize(baseTerritoryValue)
+			if err != nil {
+				return shared.UsageError(err.Error())
 			}
 
 			tierValue := *tier
@@ -287,7 +291,7 @@ Examples:
 				}
 				if len(parsedPrices) == 0 {
 					fmt.Fprintln(os.Stderr, "Error: --prices (or --tier/--price) is required")
-					return flag.ErrHelp
+					return shared.MissingRequiredUsageError("")
 				}
 			}
 
@@ -363,7 +367,7 @@ Examples:
 func IAPPriceSchedulesManualPricesCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("schedules manual-prices", flag.ExitOnError)
 
-	scheduleID := fs.String("schedule-id", "", "Price schedule ID")
+	scheduleID := shared.BindResourceIDFlag(fs, "schedule-id", "inAppPurchasePriceSchedules", "Price schedule ID")
 	limit := fs.Int("limit", 0, "Maximum results per page (1-200)")
 	next := fs.String("next", "", "Fetch next page using a links.next URL")
 	paginate := fs.Bool("paginate", false, "Automatically fetch all pages (aggregate results)")
@@ -384,10 +388,10 @@ Examples:
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
 			if *limit != 0 && (*limit < 1 || *limit > 200) {
-				return fmt.Errorf("iap pricing schedules manual-prices: --limit must be between 1 and 200")
+				return shared.UsageError("iap pricing schedules manual-prices: --limit must be between 1 and 200")
 			}
 			if err := shared.ValidateNextURL(*next); err != nil {
-				return fmt.Errorf("iap pricing schedules manual-prices: %w", err)
+				return shared.UsageErrorf("iap pricing schedules manual-prices: %v", err)
 			}
 			if *resolved && strings.TrimSpace(*next) != "" {
 				fmt.Fprintln(os.Stderr, "Error: --resolved cannot be combined with --next")
@@ -397,7 +401,7 @@ Examples:
 			id := strings.TrimSpace(*scheduleID)
 			if id == "" && strings.TrimSpace(*next) == "" {
 				fmt.Fprintln(os.Stderr, "Error: --schedule-id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--schedule-id")
 			}
 
 			client, err := shared.GetASCClient()
@@ -409,7 +413,7 @@ Examples:
 			defer cancel()
 
 			if *resolved {
-				resp, err := fetchResolvedIAPSchedulePrices(requestCtx, client, id, "manual", *limit, *next, time.Now().UTC())
+				resp, err := fetchResolvedIAPSchedulePrices(requestCtx, client, id, "manual", *limit, *next, shared.PricingNow())
 				if err != nil {
 					return fmt.Errorf("iap pricing schedules manual-prices: failed to resolve: %w", err)
 				}
@@ -452,7 +456,7 @@ Examples:
 func IAPPriceSchedulesAutomaticPricesCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("schedules automatic-prices", flag.ExitOnError)
 
-	scheduleID := fs.String("schedule-id", "", "Price schedule ID")
+	scheduleID := shared.BindResourceIDFlag(fs, "schedule-id", "inAppPurchasePriceSchedules", "Price schedule ID")
 	limit := fs.Int("limit", 0, "Maximum results per page (1-200)")
 	next := fs.String("next", "", "Fetch next page using a links.next URL")
 	paginate := fs.Bool("paginate", false, "Automatically fetch all pages (aggregate results)")
@@ -473,10 +477,10 @@ Examples:
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
 			if *limit != 0 && (*limit < 1 || *limit > 200) {
-				return fmt.Errorf("iap pricing schedules automatic-prices: --limit must be between 1 and 200")
+				return shared.UsageError("iap pricing schedules automatic-prices: --limit must be between 1 and 200")
 			}
 			if err := shared.ValidateNextURL(*next); err != nil {
-				return fmt.Errorf("iap pricing schedules automatic-prices: %w", err)
+				return shared.UsageErrorf("iap pricing schedules automatic-prices: %v", err)
 			}
 			if *resolved && strings.TrimSpace(*next) != "" {
 				fmt.Fprintln(os.Stderr, "Error: --resolved cannot be combined with --next")
@@ -486,7 +490,7 @@ Examples:
 			id := strings.TrimSpace(*scheduleID)
 			if id == "" && strings.TrimSpace(*next) == "" {
 				fmt.Fprintln(os.Stderr, "Error: --schedule-id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--schedule-id")
 			}
 
 			client, err := shared.GetASCClient()
@@ -498,7 +502,7 @@ Examples:
 			defer cancel()
 
 			if *resolved {
-				resp, err := fetchResolvedIAPSchedulePrices(requestCtx, client, id, "automatic", *limit, *next, time.Now().UTC())
+				resp, err := fetchResolvedIAPSchedulePrices(requestCtx, client, id, "automatic", *limit, *next, shared.PricingNow())
 				if err != nil {
 					return fmt.Errorf("iap pricing schedules automatic-prices: failed to resolve: %w", err)
 				}

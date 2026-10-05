@@ -46,9 +46,10 @@ jobs:
           ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
           ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
           ASC_PRIVATE_KEY_B64: ${{ secrets.ASC_PRIVATE_KEY_B64 }}
+          ASC_APP_ID: ${{ secrets.APP_ID }}
         run: |
           asc builds upload \
-            --app "${{ secrets.APP_ID }}" \
+            --app "$ASC_APP_ID" \
             --ipa "MyApp.ipa"
 ```
 
@@ -176,10 +177,11 @@ jobs:
           ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
           ASC_PRIVATE_KEY_B64: ${{ secrets.ASC_PRIVATE_KEY_B64 }}
           ASC_APP_ID: ${{ secrets.APP_ID }}
+          VERSION: ${{ inputs.version }}
         run: |
           asc validate \
             --app "$ASC_APP_ID" \
-            --version "${{ inputs.version }}"
+            --version "$VERSION"
       
       - name: Publish to the App Store
         env:
@@ -187,18 +189,21 @@ jobs:
           ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
           ASC_PRIVATE_KEY_B64: ${{ secrets.ASC_PRIVATE_KEY_B64 }}
           ASC_APP_ID: ${{ secrets.APP_ID }}
+          VERSION: ${{ inputs.version }}
         run: |
           asc publish appstore \
             --app "$ASC_APP_ID" \
             --ipa "./build/MyApp.ipa" \
-            --version "${{ inputs.version }}" \
+            --version "$VERSION" \
             --submit \
             --confirm
       
       - name: Notify on success
         if: success()
+        env:
+          VERSION: ${{ inputs.version }}
         run: |
-          echo "::notice::Version ${{ inputs.version }} submitted successfully"
+          echo "::notice::Version $VERSION submitted successfully"
 ```
 
 ### Metadata Sync
@@ -331,13 +336,16 @@ jobs:
         uses: rudrankriyam/setup-asc@v1
       
       - name: Build ${{ matrix.app.name }}
+        env:
+          APP_NAME: ${{ matrix.app.name }}
+          APP_SCHEME: ${{ matrix.app.scheme }}
         run: |
-          xcodebuild -scheme ${{ matrix.app.scheme }} \
-            -archivePath build/${{ matrix.app.name }}.xcarchive \
+          xcodebuild -scheme "$APP_SCHEME" \
+            -archivePath "build/$APP_NAME.xcarchive" \
             archive
           
           xcodebuild -exportArchive \
-            -archivePath build/${{ matrix.app.name }}.xcarchive \
+            -archivePath "build/$APP_NAME.xcarchive" \
             -exportPath build \
             -exportOptionsPlist ExportOptions.plist
       
@@ -346,10 +354,12 @@ jobs:
           ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
           ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
           ASC_PRIVATE_KEY_B64: ${{ secrets.ASC_PRIVATE_KEY_B64 }}
+          APP_ID: ${{ matrix.app.id }}
+          APP_NAME: ${{ matrix.app.name }}
         run: |
           asc builds upload \
-            --app "${{ matrix.app.id }}" \
-            --ipa build/${{ matrix.app.name }}.ipa
+            --app "$APP_ID" \
+            --ipa "build/$APP_NAME.ipa"
 ```
 
 ## Authentication Setup
@@ -384,8 +394,10 @@ If you prefer not to use base64 encoding:
 ```yaml  theme={null}
 steps:
   - name: Write private key
+    env:
+      ASC_PRIVATE_KEY: ${{ secrets.ASC_PRIVATE_KEY }}
     run: |
-      echo "${{ secrets.ASC_PRIVATE_KEY }}" > /tmp/AuthKey.p8
+      printf '%s' "$ASC_PRIVATE_KEY" > /tmp/AuthKey.p8
       chmod 600 /tmp/AuthKey.p8
   
   - name: Run asc command
@@ -503,7 +515,7 @@ jobs:
   <Accordion title="Version not found">
     The setup-asc action failed to find the specified version:
 
-    * Check [releases](https://github.com/rudrankriyam/App-Store-Connect-CLI/releases) for available versions
+    * Check [releases](https://github.com/rorkai/App-Store-Connect-CLI/releases) for available versions
     * Use `latest` for the most recent release
     * Ensure version format is correct (e.g., `1.0.0`, not `v1.0.0`)
   </Accordion>

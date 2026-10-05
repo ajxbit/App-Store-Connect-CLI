@@ -337,8 +337,8 @@ Manual pagination:
 # First page
 asc builds list --app "123456789" --limit 20
 
-# Next page (use the 'next' link from JSON output)
-asc builds list --app "123456789" --limit 20 --next "CURSOR_VALUE"
+# Next page (pass the full links.next URL from JSON output; --limit cannot be combined with --next)
+asc builds list --app "123456789" --next "NEXT_URL"
 ```
 
 Automatic pagination:
@@ -440,5 +440,5 @@ See [Environment Variables Reference](/configuration/environment-variables) for 
 ## Get help
 
 * **Built-in docs**: `asc --help` or `asc <command> --help`
-* **GitHub Issues**: [Report bugs or request features](https://github.com/rudrankriyam/App-Store-Connect-CLI/issues)
-* **Discussions**: [Ask questions and share workflows](https://github.com/rudrankriyam/App-Store-Connect-CLI/discussions)
+* **GitHub Issues**: [Report bugs or request features](https://github.com/rorkai/App-Store-Connect-CLI/issues)
+* **Discussions**: [Ask questions and share workflows](https://github.com/rorkai/App-Store-Connect-CLI/discussions)

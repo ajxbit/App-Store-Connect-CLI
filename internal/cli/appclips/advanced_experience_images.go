@@ -9,7 +9,6 @@ import (
 
 	"github.com/peterbourgon/ff/v3/ffcli"
 
-	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/asc"
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/cli/shared"
 )
 
@@ -24,15 +23,14 @@ func AppClipAdvancedExperienceImagesCommand() *ffcli.Command {
 		LongHelp: `Manage App Clip advanced experience images.
 
 Examples:
-  asc app-clips advanced-experiences images get --id "IMAGE_ID"
-  asc app-clips advanced-experiences images create --experience-id "EXP_ID" --file path/to/image.png
-  asc app-clips advanced-experiences images delete --id "IMAGE_ID" --confirm`,
+  asc app-clips advanced-experiences images view --id "IMAGE_ID"
+  asc app-clips advanced-experiences images create --file path/to/image.png
+  asc app-clips advanced-experiences images create --file path/to/image.png --experience-id "EXP_ID"`,
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
 		Subcommands: []*ffcli.Command{
 			AppClipAdvancedExperienceImagesGetCommand(),
 			AppClipAdvancedExperienceImagesCreateCommand(),
-			AppClipAdvancedExperienceImagesDeleteCommand(),
 		},
 		Exec: func(ctx context.Context, args []string) error {
 			return flag.ErrHelp
@@ -42,31 +40,31 @@ Examples:
 
 // AppClipAdvancedExperienceImagesGetCommand retrieves an image by ID.
 func AppClipAdvancedExperienceImagesGetCommand() *ffcli.Command {
-	fs := flag.NewFlagSet("get", flag.ExitOnError)
+	fs := flag.NewFlagSet("view", flag.ExitOnError)
 
-	imageID := fs.String("id", "", "Image ID")
+	imageID := shared.BindResourceIDFlag(fs, "id", "appClipAdvancedExperienceImages", "Image ID")
 	output := shared.BindOutputFlags(fs)
 
 	return &ffcli.Command{
-		Name:       "get",
-		ShortUsage: "asc app-clips advanced-experiences images get --id \"IMAGE_ID\"",
-		ShortHelp:  "Get an advanced experience image by ID.",
-		LongHelp: `Get an advanced experience image by ID.
+		Name:       "view",
+		ShortUsage: "asc app-clips advanced-experiences images view --id \"IMAGE_ID\"",
+		ShortHelp:  "View an advanced experience image by ID.",
+		LongHelp: `View an advanced experience image by ID.
 
 Examples:
-  asc app-clips advanced-experiences images get --id "IMAGE_ID"`,
+  asc app-clips advanced-experiences images view --id "IMAGE_ID"`,
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
 			idValue := strings.TrimSpace(*imageID)
 			if idValue == "" {
 				fmt.Fprintln(os.Stderr, "Error: --id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--id")
 			}
 
 			client, err := shared.GetASCClient()
 			if err != nil {
-				return fmt.Errorf("app-clips advanced-experiences images get: %w", err)
+				return fmt.Errorf("app-clips advanced-experiences images view: %w", err)
 			}
 
 			requestCtx, cancel := shared.ContextWithTimeout(ctx)
@@ -74,7 +72,7 @@ Examples:
 
 			resp, err := client.GetAppClipAdvancedExperienceImage(requestCtx, idValue)
 			if err != nil {
-				return fmt.Errorf("app-clips advanced-experiences images get: failed to fetch: %w", err)
+				return fmt.Errorf("app-clips advanced-experiences images view: failed to fetch: %w", err)
 			}
 
 			return shared.PrintOutput(resp, *output.Output, *output.Pretty)
@@ -86,37 +84,34 @@ Examples:
 func AppClipAdvancedExperienceImagesCreateCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("create", flag.ExitOnError)
 
-	experienceID := fs.String("experience-id", "", "Advanced experience ID")
+	experienceID := shared.BindResourceIDFlag(fs, "experience-id", "appClipAdvancedExperiences", "Advanced experience ID to attach after upload (optional)")
 	filePath := fs.String("file", "", "Path to image file (PNG)")
 	output := shared.BindOutputFlags(fs)
 
 	return &ffcli.Command{
 		Name:       "create",
-		ShortUsage: "asc app-clips advanced-experiences images create --experience-id \"EXP_ID\" --file path/to/image.png",
+		ShortUsage: "asc app-clips advanced-experiences images create --file path/to/image.png [--experience-id \"EXP_ID\"]",
 		ShortHelp:  "Upload an image for an advanced experience.",
 		LongHelp: `Upload an image for an advanced experience.
 
-The upload process reserves an upload slot, uploads the image, commits the upload,
-and associates the image with the experience.
+The upload process reserves an upload slot, uploads the image, and commits the upload.
+The returned image ID can be passed to advanced-experiences create with --header-image-id.
+When --experience-id is provided, the command also attaches the uploaded image to
+that existing experience.
 
 Examples:
-  asc app-clips advanced-experiences images create --experience-id "EXP_ID" --file path/to/image.png`,
+  asc app-clips advanced-experiences images create --file path/to/image.png
+  asc app-clips advanced-experiences images create --file path/to/image.png --experience-id "EXP_ID"`,
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
-			experienceValue := strings.TrimSpace(*experienceID)
-			if experienceValue == "" {
-				fmt.Fprintln(os.Stderr, "Error: --experience-id is required")
-				return flag.ErrHelp
-			}
-
 			fileValue := strings.TrimSpace(*filePath)
 			if fileValue == "" {
 				fmt.Fprintln(os.Stderr, "Error: --file is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--file")
 			}
 
-			client, err := shared.GetASCClient()
+			client, err := appClipsClientFactory()
 			if err != nil {
 				return fmt.Errorf("app-clips advanced-experiences images create: %w", err)
 			}
@@ -129,60 +124,12 @@ Examples:
 				return fmt.Errorf("app-clips advanced-experiences images create: %w", err)
 			}
 
-			if _, err := client.UpdateAppClipAdvancedExperience(requestCtx, experienceValue, nil, "", result.ID, nil); err != nil {
-				return fmt.Errorf("app-clips advanced-experiences images create: failed to attach image: %w", err)
-			}
-
-			result.ExperienceID = experienceValue
-			return shared.PrintOutput(result, *output.Output, *output.Pretty)
-		},
-	}
-}
-
-// AppClipAdvancedExperienceImagesDeleteCommand deletes an image.
-func AppClipAdvancedExperienceImagesDeleteCommand() *ffcli.Command {
-	fs := flag.NewFlagSet("delete", flag.ExitOnError)
-
-	imageID := fs.String("id", "", "Image ID")
-	confirm := fs.Bool("confirm", false, "Confirm deletion")
-	output := shared.BindOutputFlags(fs)
-
-	return &ffcli.Command{
-		Name:       "delete",
-		ShortUsage: "asc app-clips advanced-experiences images delete --id \"IMAGE_ID\" --confirm",
-		ShortHelp:  "Delete an advanced experience image.",
-		LongHelp: `Delete an advanced experience image.
-
-Examples:
-  asc app-clips advanced-experiences images delete --id "IMAGE_ID" --confirm`,
-		FlagSet:   fs,
-		UsageFunc: shared.DefaultUsageFunc,
-		Exec: func(ctx context.Context, args []string) error {
-			idValue := strings.TrimSpace(*imageID)
-			if idValue == "" {
-				fmt.Fprintln(os.Stderr, "Error: --id is required")
-				return flag.ErrHelp
-			}
-			if !*confirm {
-				fmt.Fprintln(os.Stderr, "Error: --confirm is required to delete")
-				return flag.ErrHelp
-			}
-
-			client, err := shared.GetASCClient()
-			if err != nil {
-				return fmt.Errorf("app-clips advanced-experiences images delete: %w", err)
-			}
-
-			requestCtx, cancel := shared.ContextWithTimeout(ctx)
-			defer cancel()
-
-			if err := client.DeleteAppClipAdvancedExperienceImage(requestCtx, idValue); err != nil {
-				return fmt.Errorf("app-clips advanced-experiences images delete: failed to delete: %w", err)
-			}
-
-			result := &asc.AppClipAdvancedExperienceImageDeleteResult{
-				ID:      idValue,
-				Deleted: true,
+			experienceValue := strings.TrimSpace(*experienceID)
+			if experienceValue != "" {
+				if _, err := client.UpdateAppClipAdvancedExperience(requestCtx, experienceValue, nil, "", result.ID, nil); err != nil {
+					return fmt.Errorf("app-clips advanced-experiences images create: failed to attach uploaded image %q: %w", result.ID, err)
+				}
+				result.ExperienceID = experienceValue
 			}
 
 			return shared.PrintOutput(result, *output.Output, *output.Pretty)

@@ -24,8 +24,8 @@ func EULACommand() *ffcli.Command {
 		LongHelp: `Manage End User License Agreements (EULA).
 
 Examples:
-  asc eula get --id "EULA_ID"
-  asc eula get --app "APP_ID"
+  asc eula view --id "EULA_ID"
+  asc eula view --app "APP_ID"
   asc eula list --app "APP_ID"
   asc eula create --app "APP_ID" --agreement-text "Terms..." --territory "US,Canada"
   asc eula update --id "EULA_ID" --agreement-text "Updated terms"
@@ -46,23 +46,23 @@ Examples:
 	}
 }
 
-// EULAGetCommand returns the eula get subcommand.
+// EULAGetCommand returns the eula view subcommand.
 func EULAGetCommand() *ffcli.Command {
-	fs := flag.NewFlagSet("get", flag.ExitOnError)
+	fs := flag.NewFlagSet("view", flag.ExitOnError)
 
-	id := fs.String("id", "", "EULA ID")
+	id := shared.BindResourceIDFlag(fs, "id", "endUserLicenseAgreements", "EULA ID")
 	appID := fs.String("app", "", "App Store Connect app ID (or ASC_APP_ID env)")
 	output := shared.BindOutputFlags(fs)
 
 	return &ffcli.Command{
-		Name:       "get",
-		ShortUsage: "asc eula get --id \"EULA_ID\" | asc eula get --app \"APP_ID\"",
-		ShortHelp:  "Get an EULA by ID or app.",
-		LongHelp: `Get an End User License Agreement (EULA).
+		Name:       "view",
+		ShortUsage: "asc eula view --id \"EULA_ID\" | asc eula view --app \"APP_ID\"",
+		ShortHelp:  "View an EULA by ID or app.",
+		LongHelp: `View an End User License Agreement (EULA).
 
 Examples:
-  asc eula get --id "EULA_ID"
-  asc eula get --app "APP_ID"`,
+  asc eula view --id "EULA_ID"
+  asc eula view --app "APP_ID"`,
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
@@ -73,7 +73,7 @@ Examples:
 			}
 			if idValue == "" && appValue == "" {
 				fmt.Fprintln(os.Stderr, "Error: --id or --app is required (or set ASC_APP_ID)")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("")
 			}
 			if idValue != "" && strings.TrimSpace(*appID) != "" {
 				fmt.Fprintln(os.Stderr, "Error: --id and --app are mutually exclusive")
@@ -82,7 +82,7 @@ Examples:
 
 			client, err := shared.GetASCClient()
 			if err != nil {
-				return fmt.Errorf("eula get: %w", err)
+				return fmt.Errorf("eula view: %w", err)
 			}
 
 			requestCtx, cancel := shared.ContextWithTimeout(ctx)
@@ -95,7 +95,7 @@ Examples:
 				resp, err = client.GetEndUserLicenseAgreement(requestCtx, idValue)
 			}
 			if err != nil {
-				return fmt.Errorf("eula get: failed to fetch: %w", err)
+				return fmt.Errorf("eula view: failed to fetch: %w", err)
 			}
 
 			return shared.PrintOutput(resp, *output.Output, *output.Pretty)
@@ -124,7 +124,7 @@ Examples:
 			appValue := shared.ResolveAppID(*appID)
 			if appValue == "" {
 				fmt.Fprintln(os.Stderr, "Error: --app is required (or set ASC_APP_ID)")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--app")
 			}
 
 			client, err := shared.GetASCClient()
@@ -151,7 +151,7 @@ func EULACreateCommand() *ffcli.Command {
 
 	appID := fs.String("app", "", "App Store Connect app ID (or ASC_APP_ID env)")
 	agreementText := fs.String("agreement-text", "", "Agreement text")
-	territories := fs.String("territory", "", "Territory inputs, comma-separated (accepts alpha-2, alpha-3, or exact English country names)")
+	territories := shared.BindOnceCSVFlag(fs, "territory", "Territory inputs, comma-separated (accepts alpha-2, alpha-3, or exact English country names)")
 	output := shared.BindOutputFlags(fs)
 
 	return &ffcli.Command{
@@ -168,21 +168,21 @@ Examples:
 			appValue := shared.ResolveAppID(*appID)
 			if appValue == "" {
 				fmt.Fprintln(os.Stderr, "Error: --app is required (or set ASC_APP_ID)")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--app")
 			}
 			agreementValue := strings.TrimSpace(*agreementText)
 			if agreementValue == "" {
 				fmt.Fprintln(os.Stderr, "Error: --agreement-text is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--agreement-text")
 			}
 
-			territoryIDs, err := shared.NormalizeASCTerritoryCSV(*territories)
+			territoryIDs, err := shared.NormalizeASCTerritoryCSV(territories.String())
 			if err != nil {
 				return shared.UsageError(err.Error())
 			}
 			if len(territoryIDs) == 0 {
 				fmt.Fprintln(os.Stderr, "Error: --territory is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--territory")
 			}
 
 			client, err := shared.GetASCClient()
@@ -207,9 +207,9 @@ Examples:
 func EULAUpdateCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("update", flag.ExitOnError)
 
-	id := fs.String("id", "", "EULA ID")
+	id := shared.BindResourceIDFlag(fs, "id", "endUserLicenseAgreements", "EULA ID")
 	agreementText := fs.String("agreement-text", "", "Agreement text")
-	territories := fs.String("territory", "", "Territory inputs, comma-separated (accepts alpha-2, alpha-3, or exact English country names)")
+	territories := shared.BindOnceCSVFlag(fs, "territory", "Territory inputs, comma-separated (accepts alpha-2, alpha-3, or exact English country names)")
 	output := shared.BindOutputFlags(fs)
 
 	return &ffcli.Command{
@@ -227,7 +227,7 @@ Examples:
 			idValue := strings.TrimSpace(*id)
 			if idValue == "" {
 				fmt.Fprintln(os.Stderr, "Error: --id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--id")
 			}
 
 			var agreementValue *string
@@ -236,13 +236,13 @@ Examples:
 				agreementValue = &value
 			}
 
-			territoryIDs, err := shared.NormalizeASCTerritoryCSV(*territories)
+			territoryIDs, err := shared.NormalizeASCTerritoryCSV(territories.String())
 			if err != nil {
 				return shared.UsageError(err.Error())
 			}
 			if agreementValue == nil && len(territoryIDs) == 0 {
 				fmt.Fprintln(os.Stderr, "Error: --agreement-text or --territory is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("")
 			}
 
 			client, err := shared.GetASCClient()
@@ -267,7 +267,7 @@ Examples:
 func EULADeleteCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("delete", flag.ExitOnError)
 
-	id := fs.String("id", "", "EULA ID")
+	id := shared.BindResourceIDFlag(fs, "id", "endUserLicenseAgreements", "EULA ID")
 	confirm := fs.Bool("confirm", false, "Confirm deletion")
 	output := shared.BindOutputFlags(fs)
 
@@ -285,11 +285,11 @@ Examples:
 			idValue := strings.TrimSpace(*id)
 			if idValue == "" {
 				fmt.Fprintln(os.Stderr, "Error: --id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--id")
 			}
 			if !*confirm {
 				fmt.Fprintln(os.Stderr, "Error: --confirm is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--confirm")
 			}
 
 			client, err := shared.GetASCClient()

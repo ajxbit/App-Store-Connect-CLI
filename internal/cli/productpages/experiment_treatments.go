@@ -47,7 +47,7 @@ Examples:
 func ExperimentTreatmentsListCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("experiment-treatments list", flag.ExitOnError)
 
-	experimentID := fs.String("experiment-id", "", "Experiment ID")
+	experimentID := shared.BindResourceIDFlag(fs, "experiment-id", "appStoreVersionExperiments", "Experiment ID")
 	limit := fs.Int("limit", 0, "Maximum results per page (1-200)")
 	next := fs.String("next", "", "Fetch next page using a links.next URL")
 	paginate := fs.Bool("paginate", false, "Automatically fetch all pages (aggregate results)")
@@ -68,16 +68,16 @@ Examples:
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
 			if *limit != 0 && (*limit < 1 || *limit > productPagesMaxLimit) {
-				return fmt.Errorf("experiments treatments list: --limit must be between 1 and %d", productPagesMaxLimit)
+				return shared.UsageErrorf("experiments treatments list: --limit must be between 1 and %d", productPagesMaxLimit)
 			}
 			if err := shared.ValidateNextURL(*next); err != nil {
-				return fmt.Errorf("experiments treatments list: %w", err)
+				return shared.UsageErrorf("experiments treatments list: %v", err)
 			}
 
 			trimmedID := strings.TrimSpace(*experimentID)
 			if trimmedID == "" {
 				fmt.Fprintln(os.Stderr, "Error: --experiment-id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--experiment-id")
 			}
 
 			client, err := shared.GetASCClient()
@@ -135,31 +135,31 @@ Examples:
 
 // ExperimentTreatmentsGetCommand returns the treatments get subcommand.
 func ExperimentTreatmentsGetCommand() *ffcli.Command {
-	fs := flag.NewFlagSet("experiment-treatments get", flag.ExitOnError)
+	fs := flag.NewFlagSet("experiment-treatments view", flag.ExitOnError)
 
-	treatmentID := fs.String("treatment-id", "", "Treatment ID")
+	treatmentID := shared.BindResourceIDFlag(fs, "treatment-id", "appStoreVersionExperimentTreatments", "Treatment ID")
 	output := shared.BindOutputFlags(fs)
 
 	return &ffcli.Command{
-		Name:       "get",
-		ShortUsage: "asc product-pages experiments treatments get --treatment-id \"TREATMENT_ID\"",
-		ShortHelp:  "Get a treatment by ID.",
-		LongHelp: `Get a treatment by ID.
+		Name:       "view",
+		ShortUsage: "asc product-pages experiments treatments view --treatment-id \"TREATMENT_ID\"",
+		ShortHelp:  "View a treatment by ID.",
+		LongHelp: `View a treatment by ID.
 
 Examples:
-  asc product-pages experiments treatments get --treatment-id "TREATMENT_ID"`,
+  asc product-pages experiments treatments view --treatment-id "TREATMENT_ID"`,
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
 			trimmedID := strings.TrimSpace(*treatmentID)
 			if trimmedID == "" {
 				fmt.Fprintln(os.Stderr, "Error: --treatment-id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--treatment-id")
 			}
 
 			client, err := shared.GetASCClient()
 			if err != nil {
-				return fmt.Errorf("experiments treatments get: %w", err)
+				return fmt.Errorf("experiments treatments view: %w", err)
 			}
 
 			requestCtx, cancel := shared.ContextWithTimeout(ctx)
@@ -167,7 +167,7 @@ Examples:
 
 			resp, err := client.GetAppStoreVersionExperimentTreatment(requestCtx, trimmedID)
 			if err != nil {
-				return fmt.Errorf("experiments treatments get: failed to fetch: %w", err)
+				return fmt.Errorf("experiments treatments view: failed to fetch: %w", err)
 			}
 
 			return shared.PrintOutput(resp, *output.Output, *output.Pretty)
@@ -179,7 +179,7 @@ Examples:
 func ExperimentTreatmentsCreateCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("experiment-treatments create", flag.ExitOnError)
 
-	experimentID := fs.String("experiment-id", "", "Experiment ID")
+	experimentID := shared.BindResourceIDFlag(fs, "experiment-id", "appStoreVersionExperiments", "Experiment ID")
 	name := fs.String("name", "", "Treatment name")
 	appIconName := fs.String("app-icon-name", "", "App icon asset name")
 	output := shared.BindOutputFlags(fs)
@@ -199,13 +199,13 @@ Examples:
 			trimmedID := strings.TrimSpace(*experimentID)
 			if trimmedID == "" {
 				fmt.Fprintln(os.Stderr, "Error: --experiment-id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--experiment-id")
 			}
 
 			nameValue := strings.TrimSpace(*name)
 			if nameValue == "" {
 				fmt.Fprintln(os.Stderr, "Error: --name is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--name")
 			}
 
 			client, err := shared.GetASCClient()
@@ -230,7 +230,7 @@ Examples:
 func ExperimentTreatmentsUpdateCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("experiment-treatments update", flag.ExitOnError)
 
-	treatmentID := fs.String("treatment-id", "", "Treatment ID")
+	treatmentID := shared.BindResourceIDFlag(fs, "treatment-id", "appStoreVersionExperimentTreatments", "Treatment ID")
 	name := fs.String("name", "", "Update treatment name")
 	appIconName := fs.String("app-icon-name", "", "Update app icon asset name")
 	output := shared.BindOutputFlags(fs)
@@ -250,14 +250,14 @@ Examples:
 			trimmedID := strings.TrimSpace(*treatmentID)
 			if trimmedID == "" {
 				fmt.Fprintln(os.Stderr, "Error: --treatment-id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--treatment-id")
 			}
 
 			nameValue := strings.TrimSpace(*name)
 			appIconValue := strings.TrimSpace(*appIconName)
 			if nameValue == "" && appIconValue == "" {
 				fmt.Fprintln(os.Stderr, "Error: --name or --app-icon-name is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("")
 			}
 
 			attrs := asc.AppStoreVersionExperimentTreatmentUpdateAttributes{}
@@ -290,7 +290,7 @@ Examples:
 func ExperimentTreatmentsDeleteCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("experiment-treatments delete", flag.ExitOnError)
 
-	treatmentID := fs.String("treatment-id", "", "Treatment ID")
+	treatmentID := shared.BindResourceIDFlag(fs, "treatment-id", "appStoreVersionExperimentTreatments", "Treatment ID")
 	confirm := fs.Bool("confirm", false, "Confirm deletion")
 	output := shared.BindOutputFlags(fs)
 
@@ -308,11 +308,11 @@ Examples:
 			trimmedID := strings.TrimSpace(*treatmentID)
 			if trimmedID == "" {
 				fmt.Fprintln(os.Stderr, "Error: --treatment-id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--treatment-id")
 			}
 			if !*confirm {
 				fmt.Fprintln(os.Stderr, "Error: --confirm is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--confirm")
 			}
 
 			client, err := shared.GetASCClient()

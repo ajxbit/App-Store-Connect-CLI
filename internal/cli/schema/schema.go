@@ -20,12 +20,26 @@ var schemaIndexData []byte
 
 // Endpoint is a compact representation of an API endpoint.
 type Endpoint struct {
-	Method            string         `json:"method"`
-	Path              string         `json:"path"`
-	Parameters        []Parameter    `json:"parameters,omitempty"`
-	RequestSchema     string         `json:"requestSchema,omitempty"`
-	RequestAttributes map[string]any `json:"requestAttributes,omitempty"`
-	ResponseSchema    string         `json:"responseSchema,omitempty"`
+	Method               string                         `json:"method"`
+	Path                 string                         `json:"path"`
+	Parameters           []Parameter                    `json:"parameters,omitempty"`
+	RequestSchema        string                         `json:"requestSchema,omitempty"`
+	RequestAttributes    map[string]any                 `json:"requestAttributes,omitempty"`
+	RequestRelationships map[string]RequestRelationship `json:"requestRelationships,omitempty"`
+	ResponseSchema       string                         `json:"responseSchema,omitempty"`
+	getAction            string
+}
+
+type indexedEndpoint struct {
+	Endpoint
+	GetAction string `json:"getAction,omitempty"`
+}
+
+// RequestRelationship describes a JSON:API relationship accepted by a request.
+type RequestRelationship struct {
+	ResourceType string `json:"resourceType"`
+	Cardinality  string `json:"cardinality"`
+	Required     bool   `json:"required"`
 }
 
 // Parameter describes a query/path parameter.
@@ -37,15 +51,39 @@ type Parameter struct {
 }
 
 func loadIndex() ([]Endpoint, error) {
-	var endpoints []Endpoint
-	if err := json.Unmarshal(schemaIndexData, &endpoints); err != nil {
+	var indexed []indexedEndpoint
+	if err := json.Unmarshal(schemaIndexData, &indexed); err != nil {
 		return nil, fmt.Errorf("schema index: %w", err)
+	}
+
+	endpoints := make([]Endpoint, 0, len(indexed))
+	for _, item := range indexed {
+		endpoint := item.Endpoint
+		endpoint.getAction = item.GetAction
+		endpoints = append(endpoints, endpoint)
 	}
 	return endpoints, nil
 }
 
+// EndpointCount returns the number of endpoints in the embedded schema index.
+func EndpointCount() (int, error) {
+	endpoints, err := loadIndex()
+	if err != nil {
+		return 0, err
+	}
+	return len(endpoints), nil
+}
+
 func matchEndpoint(e Endpoint, query string) bool {
-	q := strings.ToLower(query)
+	if method, path, exact := parseExactEndpointQuery(query); exact {
+		return strings.EqualFold(e.Method, method) && e.Path == path
+	}
+
+	q := strings.ToLower(strings.TrimSpace(query))
+	if isActionDotNotationQuery(q) {
+		return strings.EqualFold(pathToActionDotNotation(e), q) ||
+			strings.EqualFold(pathToVersionedActionDotNotation(e), q)
+	}
 	if strings.Contains(strings.ToLower(e.Path), q) {
 		return true
 	}
@@ -55,6 +93,36 @@ func matchEndpoint(e Endpoint, query string) bool {
 	}
 	dotNotation := pathToDotNotation(e.Method, e.Path)
 	return strings.Contains(strings.ToLower(dotNotation), q)
+}
+
+func isActionDotNotationQuery(query string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(query))
+	lastDot := strings.LastIndex(normalized, ".")
+	if lastDot <= 0 {
+		return false
+	}
+	action := normalized[lastDot+1:]
+	switch action {
+	case "list", "get", "create", "update", "delete":
+		return true
+	default:
+		return false
+	}
+}
+
+func parseExactEndpointQuery(query string) (string, string, bool) {
+	parts := strings.Fields(strings.TrimSpace(query))
+	if len(parts) != 2 || !strings.HasPrefix(parts[1], "/") {
+		return "", "", false
+	}
+
+	method := strings.ToUpper(parts[0])
+	switch method {
+	case http.MethodGet, http.MethodPost, http.MethodPatch, http.MethodDelete:
+		return method, parts[1], true
+	default:
+		return "", "", false
+	}
 }
 
 func pathToDotNotation(method, path string) string {
@@ -77,6 +145,56 @@ func pathToDotNotation(method, path string) string {
 		result = strings.ToLower(method) + ":" + result
 	}
 	return result
+}
+
+func pathToActionDotNotation(endpoint Endpoint) string {
+	dotPath := pathToDotNotation("", endpoint.Path)
+	if dotPath == "" {
+		return ""
+	}
+
+	action := strings.ToLower(endpoint.Method)
+	switch endpoint.Method {
+	case http.MethodGet:
+		action = getEndpointAction(endpoint)
+	case http.MethodPost:
+		action = "create"
+	case http.MethodPatch:
+		action = "update"
+	case http.MethodDelete:
+		action = "delete"
+	}
+
+	if action == "" {
+		return dotPath
+	}
+	return dotPath + "." + action
+}
+
+func pathToVersionedActionDotNotation(endpoint Endpoint) string {
+	actionPath := pathToActionDotNotation(endpoint)
+	trimmed := strings.TrimPrefix(endpoint.Path, "/")
+	version, _, found := strings.Cut(trimmed, "/")
+	if !found || !strings.HasPrefix(version, "v") || len(version) > 3 {
+		return actionPath
+	}
+	return version + "." + actionPath
+}
+
+func getEndpointAction(endpoint Endpoint) string {
+	switch endpoint.getAction {
+	case "get", "list":
+		return endpoint.getAction
+	}
+
+	trimmed := strings.TrimSuffix(endpoint.Path, "/")
+	if lastSlash := strings.LastIndex(trimmed, "/"); lastSlash >= 0 {
+		lastSegment := trimmed[lastSlash+1:]
+		if strings.HasPrefix(lastSegment, "{") && strings.HasSuffix(lastSegment, "}") {
+			return "get"
+		}
+	}
+	return "list"
 }
 
 func normalizeMethodFilter(raw string) (string, error) {
@@ -106,9 +224,11 @@ func SchemaCommand() *ffcli.Command {
 		ShortHelp:  "Inspect App Store Connect API endpoint schemas at runtime.",
 		LongHelp: `Inspect App Store Connect API endpoint schemas at runtime.
 
-Query by path substring, dot-notation, or method+path. Returns endpoint
-details including parameters, request attributes, and response schema
-names as machine-readable JSON.
+Query by fuzzy path substring, exact method+path, or exact action dot notation.
+Dot notation uses .list, .get, .create, .update, or .delete actions. Prefix an
+action with v1. or v2. to select an exact API version when both exist. Queries
+with no matches return an empty JSON array. Results include parameters, request
+attributes and relationships, and response schema names as machine-readable JSON.
 
 This lets agents self-serve API field names, parameter types, and allowed
 values without pre-stuffed documentation.
@@ -117,6 +237,7 @@ Examples:
   asc schema apps                           # All endpoints matching "apps"
   asc schema "GET /v1/apps"                 # Exact method+path match
   asc schema apps.list                      # Dot-notation query
+  asc schema v2.gameCenterAchievements.get  # Version-qualified dot notation
   asc schema --method POST apps             # Only POST endpoints for apps
   asc schema --list                         # List all 1200+ endpoints
   asc schema --list --method DELETE          # List all DELETE endpoints
@@ -124,6 +245,11 @@ Examples:
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
+			queryArgs, err := shared.ParseInterspersedFlags(fs, args)
+			if err != nil {
+				return shared.UsageError(err.Error())
+			}
+
 			endpoints, err := loadIndex()
 			if err != nil {
 				return err
@@ -135,14 +261,17 @@ Examples:
 			}
 
 			if *listAll {
+				if len(queryArgs) > 0 {
+					return shared.UsageError("--list does not accept a query")
+				}
 				return listEndpoints(endpoints, methodFilter, *pretty)
 			}
 
-			if len(args) == 0 {
+			if len(queryArgs) == 0 || strings.TrimSpace(strings.Join(queryArgs, " ")) == "" {
 				return shared.UsageError("query argument is required (or use --list)")
 			}
 
-			query := strings.Join(args, " ")
+			query := strings.Join(queryArgs, " ")
 			return queryEndpoints(endpoints, query, methodFilter, *pretty)
 		},
 	}
@@ -156,7 +285,7 @@ func listEndpoints(endpoints []Endpoint, methodFilter string, pretty bool) error
 		ParamCount     int    `json:"paramCount"`
 	}
 
-	var results []summary
+	results := make([]summary, 0)
 	for _, e := range endpoints {
 		if methodFilter != "" && e.Method != methodFilter {
 			continue
@@ -173,7 +302,7 @@ func listEndpoints(endpoints []Endpoint, methodFilter string, pretty bool) error
 }
 
 func queryEndpoints(endpoints []Endpoint, query, methodFilter string, pretty bool) error {
-	var results []Endpoint
+	results := make([]Endpoint, 0)
 	for _, e := range endpoints {
 		if methodFilter != "" && e.Method != methodFilter {
 			continue
@@ -181,11 +310,6 @@ func queryEndpoints(endpoints []Endpoint, query, methodFilter string, pretty boo
 		if matchEndpoint(e, query) {
 			results = append(results, e)
 		}
-	}
-
-	if len(results) == 0 {
-		fmt.Fprintf(os.Stderr, "No endpoints matching %q\n", query)
-		return nil
 	}
 
 	return printJSON(results, pretty)

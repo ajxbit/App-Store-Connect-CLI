@@ -4,10 +4,12 @@ import (
 	"encoding/json"
 	"errors"
 	"flag"
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
 
+	"github.com/peterbourgon/ff/v3/ffcli"
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/asc"
 )
 
@@ -17,6 +19,7 @@ func TestBuildsListCommand_VersionAndBuildNumberDescriptions(t *testing.T) {
 	versionFlag := cmd.FlagSet.Lookup("version")
 	if versionFlag == nil {
 		t.Fatal("expected --version flag to be defined")
+		return
 	}
 	if !strings.Contains(versionFlag.Usage, "CFBundleShortVersionString") {
 		t.Fatalf("expected --version usage to mention marketing version, got %q", versionFlag.Usage)
@@ -25,9 +28,26 @@ func TestBuildsListCommand_VersionAndBuildNumberDescriptions(t *testing.T) {
 	buildNumberFlag := cmd.FlagSet.Lookup("build-number")
 	if buildNumberFlag == nil {
 		t.Fatal("expected --build-number flag to be defined")
+		return
 	}
 	if !strings.Contains(buildNumberFlag.Usage, "CFBundleVersion") {
 		t.Fatalf("expected --build-number usage to mention build number, got %q", buildNumberFlag.Usage)
+	}
+}
+
+func TestBuildsAddGroupsCommandDryRunHelpDescribesNoMutation(t *testing.T) {
+	cmd := BuildsAddGroupsCommand()
+	dryRunFlag := cmd.FlagSet.Lookup("dry-run")
+	if dryRunFlag == nil {
+		t.Fatal("expected --dry-run flag to be registered")
+	}
+	if !strings.Contains(dryRunFlag.Usage, "without adding groups") {
+		t.Fatalf("expected --dry-run usage to describe no mutation, got %q", dryRunFlag.Usage)
+	}
+	for _, want := range []string{"--dry-run", "without adding groups", "observational and advisory", "does not predict"} {
+		if !strings.Contains(cmd.LongHelp, want) {
+			t.Fatalf("expected add-groups help to contain %q, got %q", want, cmd.LongHelp)
+		}
 	}
 }
 
@@ -38,15 +58,115 @@ func TestBuildsListCommand_HelpMentionsCombinedFilters(t *testing.T) {
 	}
 }
 
+func TestBuildsListQueryFlagsAreRegistered(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		cmd  *ffcli.Command
+		flag string
+	}{
+		{name: "list beta review state", cmd: BuildsListCommand(), flag: "beta-review-state"},
+		{name: "list include", cmd: BuildsListCommand(), flag: "include"},
+		{name: "count beta review state", cmd: BuildsCountCommand(), flag: "beta-review-state"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			queryFlag := test.cmd.FlagSet.Lookup(test.flag)
+			if queryFlag == nil {
+				t.Fatalf("%s flag is not registered", test.flag)
+			}
+		})
+	}
+}
+
+func TestBuildsUploadCommand_HelpShowsConcurrencyDefaultOnce(t *testing.T) {
+	cmd := BuildsUploadCommand()
+	usage := cmd.UsageFunc(cmd)
+
+	var concurrencyLine string
+	for line := range strings.SplitSeq(usage, "\n") {
+		if strings.Contains(line, "--concurrency") {
+			concurrencyLine = line
+			break
+		}
+	}
+	if concurrencyLine == "" {
+		t.Fatalf("expected rendered help to include --concurrency, got %q", usage)
+	}
+	if count := strings.Count(concurrencyLine, "default"); count != 1 {
+		t.Fatalf("expected one concurrency default annotation, got %q", concurrencyLine)
+	}
+	wantDefault := fmt.Sprintf("(default: %d)", asc.DefaultUploadConcurrency)
+	if !strings.Contains(concurrencyLine, wantDefault) {
+		t.Fatalf("expected concurrency default annotation %q, got %q", wantDefault, concurrencyLine)
+	}
+}
+
+func TestBuildsUploadCommandHasExplicitSensitiveOutputOptIn(t *testing.T) {
+	cmd := BuildsUploadCommand()
+	flag := cmd.FlagSet.Lookup("include-sensitive")
+	if flag == nil {
+		t.Fatal("expected --include-sensitive to be registered")
+	}
+	if !strings.Contains(flag.Usage, "secret") {
+		t.Fatalf("expected sensitive-output warning in flag usage, got %q", flag.Usage)
+	}
+}
+
+func TestBuildsUploadCommandAppHelpDescribesExactIPAIdentityLookup(t *testing.T) {
+	cmd := BuildsUploadCommand()
+	appFlag := cmd.FlagSet.Lookup("app")
+	if appFlag == nil {
+		t.Fatal("expected --app flag to be registered")
+	}
+	for _, want := range []string{"IPA uploads", "exact bundle ID", "exact name"} {
+		if !strings.Contains(appFlag.Usage, want) {
+			t.Fatalf("expected --app usage to include %q, got %q", want, appFlag.Usage)
+		}
+	}
+}
+
+func TestBuildsUploadCommandTestNotesHelpDescribesDiscoveryOnlyWait(t *testing.T) {
+	cmd := BuildsUploadCommand()
+	testNotesFlag := cmd.FlagSet.Lookup("test-notes")
+	if testNotesFlag == nil {
+		t.Fatal("expected --test-notes flag to be registered")
+	}
+	if !strings.Contains(testNotesFlag.Usage, "build discovery") {
+		t.Fatalf("expected --test-notes usage to describe discovery wait, got %q", testNotesFlag.Usage)
+	}
+	if !strings.Contains(cmd.LongHelp, "Add --wait") {
+		t.Fatalf("expected long help to explain the optional processing wait, got %q", cmd.LongHelp)
+	}
+}
+
 func TestBuildsListCommand_ProcessingStateFlagDescription(t *testing.T) {
 	cmd := BuildsListCommand()
 
 	processingStateFlag := cmd.FlagSet.Lookup("processing-state")
 	if processingStateFlag == nil {
 		t.Fatal("expected --processing-state flag to be defined")
+		return
 	}
 	if !strings.Contains(processingStateFlag.Usage, "VALID") || !strings.Contains(processingStateFlag.Usage, "all") {
 		t.Fatalf("expected --processing-state usage to mention supported values, got %q", processingStateFlag.Usage)
+	}
+}
+
+func TestBuildsListCommand_ExcludeExpiredFlagsExist(t *testing.T) {
+	cmd := BuildsListCommand()
+
+	excludeExpiredFlag := cmd.FlagSet.Lookup("exclude-expired")
+	if excludeExpiredFlag == nil {
+		t.Fatal("expected --exclude-expired flag to be defined")
+	}
+	if !strings.Contains(excludeExpiredFlag.Usage, "expired") {
+		t.Fatalf("expected --exclude-expired usage to mention expired builds, got %q", excludeExpiredFlag.Usage)
+	}
+
+	if cmd.FlagSet.Lookup("not-expired") == nil {
+		t.Fatal("expected --not-expired alias to be defined")
+	}
+	if !strings.Contains(cmd.LongHelp, "--exclude-expired") {
+		t.Fatalf("expected long help to include --exclude-expired example, got %q", cmd.LongHelp)
 	}
 }
 
@@ -122,9 +242,8 @@ func TestBuildsUpdateCommand_Shape(t *testing.T) {
 		t.Fatal("expected --build-id flag to be defined")
 	}
 
-	buildFlag := cmd.FlagSet.Lookup("build")
-	if buildFlag == nil {
-		t.Fatal("expected hidden legacy --build flag to be defined")
+	if buildFlag := cmd.FlagSet.Lookup("build"); buildFlag != nil {
+		t.Fatal("expected removed --build alias to be undefined")
 	}
 
 	appFlag := cmd.FlagSet.Lookup("app")
@@ -148,6 +267,29 @@ func TestBuildsUpdateCommand_Shape(t *testing.T) {
 	}
 }
 
+func TestBuildSelectorCommandsExposeExcludeExpiredFlags(t *testing.T) {
+	tests := []struct {
+		name string
+		cmd  func() *ffcli.Command
+	}{
+		{name: "add-groups", cmd: BuildsAddGroupsCommand},
+		{name: "dsyms", cmd: BuildsDsymsCommand},
+		{name: "update", cmd: BuildsUpdateCommand},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			flags := test.cmd().FlagSet
+			if flags.Lookup("exclude-expired") == nil {
+				t.Fatal("expected --exclude-expired flag to be defined")
+			}
+			if flags.Lookup("not-expired") == nil {
+				t.Fatal("expected --not-expired flag to be defined")
+			}
+		})
+	}
+}
+
 func TestBuildsUpdateCommand_HelpContainsExamples(t *testing.T) {
 	cmd := BuildsUpdateCommand()
 	if !strings.Contains(cmd.LongHelp, "--uses-non-exempt-encryption=false") {
@@ -157,7 +299,7 @@ func TestBuildsUpdateCommand_HelpContainsExamples(t *testing.T) {
 
 func TestBuildsUpdateCommand_ShortUsageShowsRequiredFlag(t *testing.T) {
 	cmd := BuildsUpdateCommand()
-	want := "asc builds update (--build-id BUILD_ID | --app APP --latest | --app APP --build-number BUILD_NUMBER [--version VERSION] [--platform PLATFORM]) --uses-non-exempt-encryption [true|false] [flags]"
+	want := "asc builds update (--build-id BUILD_ID | --app APP --latest | --app APP --build-number BUILD_NUMBER --platform PLATFORM [--version VERSION]) --uses-non-exempt-encryption [true|false] [flags]"
 	if cmd.ShortUsage != want {
 		t.Fatalf("expected ShortUsage %q, got %q", want, cmd.ShortUsage)
 	}

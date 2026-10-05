@@ -52,7 +52,7 @@ Examples:
 func AppClipDefaultExperiencesListCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("list", flag.ExitOnError)
 
-	appClipID := fs.String("app-clip-id", "", "App Clip ID")
+	appClipID := shared.BindResourceIDFlag(fs, "app-clip-id", "appClips", "App Clip ID")
 	limit := fs.Int("limit", 0, "Maximum results per page (1-200)")
 	next := fs.String("next", "", "Fetch next page using a links.next URL")
 	paginate := fs.Bool("paginate", false, "Automatically fetch all pages (aggregate results)")
@@ -71,16 +71,16 @@ Examples:
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
 			if *limit != 0 && (*limit < 1 || *limit > 200) {
-				return fmt.Errorf("app-clips default-experiences list: --limit must be between 1 and 200")
+				return shared.UsageError("app-clips default-experiences list: --limit must be between 1 and 200")
 			}
 			if err := shared.ValidateNextURL(*next); err != nil {
-				return fmt.Errorf("app-clips default-experiences list: %w", err)
+				return shared.UsageErrorf("app-clips default-experiences list: %v", err)
 			}
 
 			appClipValue := strings.TrimSpace(*appClipID)
 			if appClipValue == "" {
 				fmt.Fprintln(os.Stderr, "Error: --app-clip-id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--app-clip-id")
 			}
 
 			client, err := shared.GetASCClient()
@@ -133,37 +133,37 @@ Examples:
 
 // AppClipDefaultExperiencesGetCommand gets a default experience by ID.
 func AppClipDefaultExperiencesGetCommand() *ffcli.Command {
-	fs := flag.NewFlagSet("get", flag.ExitOnError)
+	fs := flag.NewFlagSet("view", flag.ExitOnError)
 
-	experienceID := fs.String("experience-id", "", "Default experience ID")
+	experienceID := shared.BindResourceIDFlag(fs, "experience-id", "appClipDefaultExperiences", "Default experience ID")
 	include := fs.String("include", "", "Include relationships: "+strings.Join(appClipDefaultExperienceIncludeList(), ", "))
 	output := shared.BindOutputFlags(fs)
 
 	return &ffcli.Command{
-		Name:       "get",
-		ShortUsage: "asc app-clips default-experiences get --experience-id \"EXP_ID\"",
-		ShortHelp:  "Get a default experience by ID.",
-		LongHelp: `Get a default experience by ID.
+		Name:       "view",
+		ShortUsage: "asc app-clips default-experiences view --experience-id \"EXP_ID\"",
+		ShortHelp:  "View a default experience by ID.",
+		LongHelp: `View a default experience by ID.
 
 Examples:
-  asc app-clips default-experiences get --experience-id "EXP_ID"`,
+  asc app-clips default-experiences view --experience-id "EXP_ID"`,
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
 			idValue := strings.TrimSpace(*experienceID)
 			if idValue == "" {
 				fmt.Fprintln(os.Stderr, "Error: --experience-id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--experience-id")
 			}
 
 			includeValue, err := normalizeAppClipDefaultExperienceInclude(*include)
 			if err != nil {
-				return fmt.Errorf("app-clips default-experiences get: %w", err)
+				return fmt.Errorf("app-clips default-experiences view: %w", err)
 			}
 
 			client, err := shared.GetASCClient()
 			if err != nil {
-				return fmt.Errorf("app-clips default-experiences get: %w", err)
+				return fmt.Errorf("app-clips default-experiences view: %w", err)
 			}
 
 			requestCtx, cancel := shared.ContextWithTimeout(ctx)
@@ -171,7 +171,7 @@ Examples:
 
 			resp, err := client.GetAppClipDefaultExperience(requestCtx, idValue, asc.WithAppClipDefaultExperienceInclude(includeValue))
 			if err != nil {
-				return fmt.Errorf("app-clips default-experiences get: failed to fetch: %w", err)
+				return fmt.Errorf("app-clips default-experiences view: failed to fetch: %w", err)
 			}
 
 			return shared.PrintOutput(resp, *output.Output, *output.Pretty)
@@ -183,9 +183,10 @@ Examples:
 func AppClipDefaultExperiencesCreateCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("create", flag.ExitOnError)
 
-	appClipID := fs.String("app-clip-id", "", "App Clip ID")
+	appClipID := shared.BindResourceIDFlag(fs, "app-clip-id", "appClips", "App Clip ID")
 	action := fs.String("action", "", "Action (OPEN, VIEW, PLAY)")
-	releaseVersionID := fs.String("release-version-id", "", "Release with App Store version ID")
+	releaseVersionID := shared.BindResourceIDFlag(fs, "release-version-id", "appStoreVersions", "Release with App Store version ID")
+	templateID := shared.BindResourceIDFlag(fs, "template-id", "appClipDefaultExperiences", "Existing default experience ID to use as a template")
 	output := shared.BindOutputFlags(fs)
 
 	return &ffcli.Command{
@@ -194,16 +195,30 @@ func AppClipDefaultExperiencesCreateCommand() *ffcli.Command {
 		ShortHelp:  "Create a default experience.",
 		LongHelp: `Create a default experience.
 
+Use --template-id to clone an existing default experience. Apple copies the
+template's metadata (header image and localizations) onto the new experience,
+so they do not have to be re-uploaded or recreated.
+
 Examples:
   asc app-clips default-experiences create --app-clip-id "CLIP_ID" --action OPEN
-  asc app-clips default-experiences create --app-clip-id "CLIP_ID" --release-version-id "VERSION_ID"`,
+  asc app-clips default-experiences create --app-clip-id "CLIP_ID" --release-version-id "VERSION_ID"
+  asc app-clips default-experiences create --app-clip-id "CLIP_ID" --release-version-id "VERSION_ID" --template-id "CURRENT_EXPERIENCE_ID"`,
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
 			appClipValue := strings.TrimSpace(*appClipID)
 			if appClipValue == "" {
 				fmt.Fprintln(os.Stderr, "Error: --app-clip-id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--app-clip-id")
+			}
+
+			templateValue := strings.TrimSpace(*templateID)
+			templateProvided := false
+			fs.Visit(func(f *flag.Flag) {
+				templateProvided = templateProvided || f.Name == "template-id"
+			})
+			if templateProvided && templateValue == "" {
+				return fmt.Errorf("app-clips default-experiences create: --template-id must not be empty")
 			}
 
 			var attrs *asc.AppClipDefaultExperienceCreateAttributes
@@ -217,7 +232,7 @@ Examples:
 				}
 			}
 
-			client, err := shared.GetASCClient()
+			client, err := appClipsClientFactory()
 			if err != nil {
 				return fmt.Errorf("app-clips default-experiences create: %w", err)
 			}
@@ -225,7 +240,7 @@ Examples:
 			requestCtx, cancel := shared.ContextWithTimeout(ctx)
 			defer cancel()
 
-			resp, err := client.CreateAppClipDefaultExperience(requestCtx, appClipValue, attrs, *releaseVersionID, "")
+			resp, err := client.CreateAppClipDefaultExperience(requestCtx, appClipValue, attrs, *releaseVersionID, templateValue)
 			if err != nil {
 				return fmt.Errorf("app-clips default-experiences create: failed to create: %w", err)
 			}
@@ -239,9 +254,9 @@ Examples:
 func AppClipDefaultExperiencesUpdateCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("update", flag.ExitOnError)
 
-	experienceID := fs.String("experience-id", "", "Default experience ID")
+	experienceID := shared.BindResourceIDFlag(fs, "experience-id", "appClipDefaultExperiences", "Default experience ID")
 	action := fs.String("action", "", "Action (OPEN, VIEW, PLAY)")
-	releaseVersionID := fs.String("release-version-id", "", "Release with App Store version ID")
+	releaseVersionID := shared.BindResourceIDFlag(fs, "release-version-id", "appStoreVersions", "Release with App Store version ID")
 	output := shared.BindOutputFlags(fs)
 
 	return &ffcli.Command{
@@ -259,7 +274,7 @@ Examples:
 			experienceValue := strings.TrimSpace(*experienceID)
 			if experienceValue == "" {
 				fmt.Fprintln(os.Stderr, "Error: --experience-id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--experience-id")
 			}
 
 			visited := map[string]bool{}
@@ -269,7 +284,7 @@ Examples:
 
 			if !visited["action"] && !visited["release-version-id"] {
 				fmt.Fprintln(os.Stderr, "Error: at least one update flag is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("")
 			}
 
 			var attrs *asc.AppClipDefaultExperienceUpdateAttributes
@@ -305,7 +320,7 @@ Examples:
 func AppClipDefaultExperiencesDeleteCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("delete", flag.ExitOnError)
 
-	experienceID := fs.String("experience-id", "", "Default experience ID")
+	experienceID := shared.BindResourceIDFlag(fs, "experience-id", "appClipDefaultExperiences", "Default experience ID")
 	confirm := fs.Bool("confirm", false, "Confirm deletion")
 	output := shared.BindOutputFlags(fs)
 
@@ -323,11 +338,11 @@ Examples:
 			experienceValue := strings.TrimSpace(*experienceID)
 			if experienceValue == "" {
 				fmt.Fprintln(os.Stderr, "Error: --experience-id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--experience-id")
 			}
 			if !*confirm {
 				fmt.Fprintln(os.Stderr, "Error: --confirm is required to delete")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--confirm")
 			}
 
 			client, err := shared.GetASCClient()
@@ -356,7 +371,7 @@ Examples:
 func AppClipDefaultExperienceReviewDetailCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("review-detail", flag.ExitOnError)
 
-	experienceID := fs.String("experience-id", "", "Default experience ID")
+	experienceID := shared.BindResourceIDFlag(fs, "experience-id", "appClipDefaultExperiences", "Default experience ID")
 	output := shared.BindOutputFlags(fs)
 
 	return &ffcli.Command{
@@ -373,7 +388,7 @@ Examples:
 			experienceValue := strings.TrimSpace(*experienceID)
 			if experienceValue == "" {
 				fmt.Fprintln(os.Stderr, "Error: --experience-id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--experience-id")
 			}
 
 			client, err := shared.GetASCClient()
@@ -398,7 +413,7 @@ Examples:
 func AppClipDefaultExperienceReleaseWithAppStoreVersionCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("release-with-app-store-version", flag.ExitOnError)
 
-	experienceID := fs.String("experience-id", "", "Default experience ID")
+	experienceID := shared.BindResourceIDFlag(fs, "experience-id", "appClipDefaultExperiences", "Default experience ID")
 	output := shared.BindOutputFlags(fs)
 
 	return &ffcli.Command{
@@ -415,7 +430,7 @@ Examples:
 			experienceValue := strings.TrimSpace(*experienceID)
 			if experienceValue == "" {
 				fmt.Fprintln(os.Stderr, "Error: --experience-id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--experience-id")
 			}
 
 			client, err := shared.GetASCClient()

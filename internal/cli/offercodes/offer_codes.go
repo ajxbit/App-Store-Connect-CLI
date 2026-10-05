@@ -2,6 +2,7 @@ package offercodes
 
 import (
 	"context"
+	"encoding/csv"
 	"errors"
 	"flag"
 	"fmt"
@@ -21,10 +22,10 @@ const offerCodesMaxLimit = 200
 func OfferCodesGenerateCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("generate", flag.ExitOnError)
 
-	offerCodeID := fs.String("offer-code-id", "", "Subscription offer code ID (required)")
+	offerCodeID := shared.BindResourceIDFlag(fs, "offer-code-id", "subscriptionOfferCodes", "Subscription offer code ID (required)")
 	quantity := fs.Int("quantity", 0, "Number of one-time use codes to generate (required)")
 	expirationDate := fs.String("expiration-date", "", "Expiration date (YYYY-MM-DD) (required)")
-	outputPath := fs.String("output", "", "Output file path for offer codes (one per line)")
+	outputPath := fs.String("output", "", "Output file path for offer codes")
 	output := shared.BindMetadataOutputFlags(fs)
 
 	return &ffcli.Command{
@@ -42,11 +43,11 @@ Examples:
 			trimmedOfferCodeID := strings.TrimSpace(*offerCodeID)
 			if trimmedOfferCodeID == "" {
 				fmt.Fprintf(os.Stderr, "Error: --offer-code-id is required\n\n")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--offer-code-id")
 			}
 			if *quantity <= 0 {
 				fmt.Fprintln(os.Stderr, "Error: --quantity is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--quantity")
 			}
 			normalizedExpirationDate, err := normalizeOfferCodeExpirationDate(*expirationDate)
 			if err != nil {
@@ -96,7 +97,7 @@ Examples:
 						writeErr = fmt.Errorf("offer-codes generate: failed to fetch values: %w", err)
 					} else if len(codes) == 0 {
 						writeErr = fmt.Errorf("offer-codes generate: no codes returned to write")
-					} else if err := writeOfferCodesFile(*outputPath, codes); err != nil {
+					} else if err := writeOfferCodesFile(*outputPath, codes, "text"); err != nil {
 						writeErr = fmt.Errorf("offer-codes generate: %w", err)
 					}
 				}
@@ -117,8 +118,9 @@ Examples:
 func OfferCodesValuesCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("values", flag.ExitOnError)
 
-	id := fs.String("batch-id", "", "One-time use offer code batch ID (required)")
-	outputPath := fs.String("output", "", "Output file path for offer codes (one per line)")
+	id := shared.BindResourceIDFlag(fs, "batch-id", "subscriptionOfferCodeOneTimeUseCodes", "One-time use offer code batch ID (required)")
+	outputPath := fs.String("output", "", "Output file path for offer codes")
+	outputFormat := fs.String("format", "text", "Output file format: text, csv")
 
 	return &ffcli.Command{
 		Name:       "values",
@@ -128,14 +130,19 @@ func OfferCodesValuesCommand() *ffcli.Command {
 
 Examples:
   asc offer-codes values --batch-id "ONE_TIME_USE_CODE_ID"
-  asc offer-codes values --batch-id "ONE_TIME_USE_CODE_ID" --output "./offer-codes.txt"`,
+  asc offer-codes values --batch-id "ONE_TIME_USE_CODE_ID" --output "./offer-codes.txt"
+  asc offer-codes values --batch-id "ONE_TIME_USE_CODE_ID" --output "./offer-codes.csv" --format csv`,
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
 			trimmedID := strings.TrimSpace(*id)
 			if trimmedID == "" {
 				fmt.Fprintln(os.Stderr, "Error: --batch-id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--batch-id")
+			}
+			format, err := normalizeOfferCodeValuesFormat(*outputFormat)
+			if err != nil {
+				return err
 			}
 
 			client, err := shared.GetASCClient()
@@ -155,22 +162,13 @@ Examples:
 			}
 
 			if strings.TrimSpace(*outputPath) != "" {
-				if err := writeOfferCodesFile(*outputPath, codes); err != nil {
+				if err := writeOfferCodesFile(*outputPath, codes, format); err != nil {
 					return fmt.Errorf("offer-codes values: %w", err)
 				}
 				return nil
 			}
 
-			for _, code := range codes {
-				trimmed := strings.TrimSpace(code)
-				if trimmed == "" {
-					continue
-				}
-				if _, err := fmt.Fprintln(os.Stdout, trimmed); err != nil {
-					return err
-				}
-			}
-			return nil
+			return writeOfferCodes(os.Stdout, codes, format)
 		},
 	}
 }
@@ -179,7 +177,20 @@ func normalizeOfferCodeExpirationDate(value string) (string, error) {
 	return shared.NormalizeDate(value, "--expiration-date")
 }
 
-func writeOfferCodesFile(path string, codes []string) error {
+func normalizeOfferCodeValuesFormat(value string) (string, error) {
+	format := strings.ToLower(strings.TrimSpace(value))
+	if format == "" {
+		return "text", nil
+	}
+	switch format {
+	case "text", "csv":
+		return format, nil
+	default:
+		return "", shared.UsageError("--format must be text or csv")
+	}
+}
+
+func writeOfferCodesFile(path string, codes []string, format string) error {
 	path = strings.TrimSpace(path)
 	if path == "" {
 		return nil
@@ -196,6 +207,31 @@ func writeOfferCodesFile(path string, codes []string) error {
 	}
 	defer file.Close()
 
+	if err := writeOfferCodes(file, codes, format); err != nil {
+		return err
+	}
+	return file.Sync()
+}
+
+func writeOfferCodes(file *os.File, codes []string, format string) error {
+	if format == "csv" {
+		writer := csv.NewWriter(file)
+		if err := writer.Write([]string{"code"}); err != nil {
+			return err
+		}
+		for _, code := range codes {
+			trimmed := strings.TrimSpace(code)
+			if trimmed == "" {
+				continue
+			}
+			if err := writer.Write([]string{trimmed}); err != nil {
+				return err
+			}
+		}
+		writer.Flush()
+		return writer.Error()
+	}
+
 	for _, code := range codes {
 		trimmed := strings.TrimSpace(code)
 		if trimmed == "" {
@@ -205,5 +241,5 @@ func writeOfferCodesFile(path string, codes []string) error {
 			return err
 		}
 	}
-	return file.Sync()
+	return nil
 }

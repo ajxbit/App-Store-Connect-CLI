@@ -41,15 +41,27 @@ func bundleIDsRows(resp *BundleIDsResponse) ([]string, [][]string) {
 	headers := []string{"ID", "Name", "Identifier", "Platform", "Seed ID"}
 	rows := make([][]string, 0, len(resp.Data))
 	for _, item := range resp.Data {
-		rows = append(rows, []string{
-			item.ID,
-			compactWhitespace(item.Attributes.Name),
-			item.Attributes.Identifier,
-			string(item.Attributes.Platform),
-			item.Attributes.SeedID,
-		})
+		rows = append(rows, bundleIDRow(item))
 	}
 	return headers, rows
+}
+
+func bundleIDResponseRows(resp *BundleIDResponse) ([]string, [][]string) {
+	item := resp.Data
+	return []string{"ID", "Name", "Identifier", "Platform", "Seed ID"}, [][]string{bundleIDRow(Resource[BundleIDAttributes]{
+		ID:         item.ID,
+		Attributes: item.Attributes,
+	})}
+}
+
+func bundleIDRow(item Resource[BundleIDAttributes]) []string {
+	return []string{
+		item.ID,
+		compactWhitespace(item.Attributes.Name),
+		item.Attributes.Identifier,
+		string(item.Attributes.Platform),
+		item.Attributes.SeedID,
+	}
 }
 
 func bundleIDCapabilitiesRows(resp *BundleIDCapabilitiesResponse) ([]string, [][]string) {
@@ -148,7 +160,29 @@ func signingFetchResultRows(result *SigningFetchResult) ([]string, [][]string) {
 		joinSigningList(result.CertificateFiles),
 		fmt.Sprintf("%t", result.Created),
 	}}
+	if stale := result.StaleProfiles; stale != nil {
+		headers = append(headers, "Stale Dry Run", "Stale Planned", "Stale Deleted", "Stale Failed")
+		failed := make([]string, 0, len(stale.Failed))
+		for _, item := range stale.Failed {
+			failed = append(failed, item.ID+": "+item.Error)
+		}
+		rows[0] = append(
+			rows[0],
+			fmt.Sprintf("%t", stale.DryRun),
+			joinSigningList(signingStaleProfileIDs(stale.Planned)),
+			joinSigningList(signingStaleProfileIDs(stale.Deleted)),
+			joinSigningList(failed),
+		)
+	}
 	return headers, rows
+}
+
+func signingStaleProfileIDs(profiles []SigningStaleProfile) []string {
+	ids := make([]string, 0, len(profiles))
+	for _, profile := range profiles {
+		ids = append(ids, profile.ID)
+	}
+	return ids
 }
 
 func formatCapabilitySettings(settings []CapabilitySetting) string {
@@ -159,7 +193,7 @@ func formatCapabilitySettings(settings []CapabilitySetting) string {
 	if err != nil {
 		return ""
 	}
-	return sanitizeTerminal(string(payload))
+	return SanitizeTerminalText(string(payload))
 }
 
 func certificateDisplayName(attrs CertificateAttributes) string {

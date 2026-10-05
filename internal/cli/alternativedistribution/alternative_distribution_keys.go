@@ -25,7 +25,7 @@ func AlternativeDistributionKeysCommand() *ffcli.Command {
 
 Examples:
   asc alternative-distribution keys list
-  asc alternative-distribution keys get --key-id "KEY_ID"
+  asc alternative-distribution keys view --key-id "KEY_ID"
   asc alternative-distribution keys create --app "APP_ID" --public-key-path "./key.pem"
   asc alternative-distribution keys delete --key-id "KEY_ID" --confirm
   asc alternative-distribution keys app --app "APP_ID"`,
@@ -67,10 +67,10 @@ Examples:
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
 			if *limit != 0 && (*limit < 1 || *limit > alternativeDistributionMaxLimit) {
-				return fmt.Errorf("alternative-distribution keys list: --limit must be between 1 and %d", alternativeDistributionMaxLimit)
+				return shared.UsageErrorf("alternative-distribution keys list: --limit must be between 1 and %d", alternativeDistributionMaxLimit)
 			}
 			if err := shared.ValidateNextURL(*next); err != nil {
-				return fmt.Errorf("alternative-distribution keys list: %w", err)
+				return shared.UsageErrorf("alternative-distribution keys list: %v", err)
 			}
 
 			client, err := shared.GetASCClient()
@@ -115,31 +115,31 @@ Examples:
 
 // AlternativeDistributionKeysGetCommand returns the keys get subcommand.
 func AlternativeDistributionKeysGetCommand() *ffcli.Command {
-	fs := flag.NewFlagSet("get", flag.ExitOnError)
+	fs := flag.NewFlagSet("view", flag.ExitOnError)
 
-	keyID := fs.String("key-id", "", "Alternative distribution key ID")
+	keyID := shared.BindResourceIDFlag(fs, "key-id", "alternativeDistributionKeys", "Alternative distribution key ID")
 	output := shared.BindOutputFlags(fs)
 
 	return &ffcli.Command{
-		Name:       "get",
-		ShortUsage: "asc alternative-distribution keys get --key-id \"KEY_ID\"",
-		ShortHelp:  "Get an alternative distribution key.",
-		LongHelp: `Get an alternative distribution key.
+		Name:       "view",
+		ShortUsage: "asc alternative-distribution keys view --key-id \"KEY_ID\"",
+		ShortHelp:  "View an alternative distribution key.",
+		LongHelp: `View an alternative distribution key.
 
 Examples:
-  asc alternative-distribution keys get --key-id "KEY_ID"`,
+  asc alternative-distribution keys view --key-id "KEY_ID"`,
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
 			trimmedID := strings.TrimSpace(*keyID)
 			if trimmedID == "" {
 				fmt.Fprintln(os.Stderr, "Error: --key-id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--key-id")
 			}
 
 			client, err := shared.GetASCClient()
 			if err != nil {
-				return fmt.Errorf("alternative-distribution keys get: %w", err)
+				return fmt.Errorf("alternative-distribution keys view: %w", err)
 			}
 
 			requestCtx, cancel := shared.ContextWithTimeout(ctx)
@@ -147,7 +147,7 @@ Examples:
 
 			resp, err := client.GetAlternativeDistributionKey(requestCtx, trimmedID)
 			if err != nil {
-				return fmt.Errorf("alternative-distribution keys get: failed to fetch: %w", err)
+				return fmt.Errorf("alternative-distribution keys view: failed to fetch: %w", err)
 			}
 
 			return shared.PrintOutput(resp, *output.Output, *output.Pretty)
@@ -179,7 +179,7 @@ Examples:
 			resolvedAppID := shared.ResolveAppID(*appID)
 			if resolvedAppID == "" {
 				fmt.Fprintln(os.Stderr, "Error: --app is required (or set ASC_APP_ID)")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--app")
 			}
 
 			keyValue := strings.TrimSpace(*publicKey)
@@ -189,7 +189,7 @@ Examples:
 			}
 			if keyValue == "" && keyPath == "" {
 				fmt.Fprintln(os.Stderr, "Error: --public-key or --public-key-path is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("")
 			}
 			if keyValue == "" && keyPath != "" {
 				var err error
@@ -221,7 +221,7 @@ Examples:
 func AlternativeDistributionKeysDeleteCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("delete", flag.ExitOnError)
 
-	keyID := fs.String("key-id", "", "Alternative distribution key ID")
+	keyID := shared.BindResourceIDFlag(fs, "key-id", "alternativeDistributionKeys", "Alternative distribution key ID")
 	confirm := fs.Bool("confirm", false, "Confirm deletion")
 	output := shared.BindOutputFlags(fs)
 
@@ -239,11 +239,11 @@ Examples:
 			trimmedID := strings.TrimSpace(*keyID)
 			if trimmedID == "" {
 				fmt.Fprintln(os.Stderr, "Error: --key-id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--key-id")
 			}
 			if !*confirm {
 				fmt.Fprintln(os.Stderr, "Error: --confirm is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--confirm")
 			}
 
 			client, err := shared.GetASCClient()
@@ -289,7 +289,7 @@ Examples:
 			resolvedAppID := shared.ResolveAppID(*appID)
 			if resolvedAppID == "" {
 				fmt.Fprintln(os.Stderr, "Error: --app is required (or set ASC_APP_ID)")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--app")
 			}
 
 			client, err := shared.GetASCClient()

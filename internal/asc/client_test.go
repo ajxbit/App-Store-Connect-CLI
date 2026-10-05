@@ -19,6 +19,9 @@ func TestBuildReviewQuery(t *testing.T) {
 		WithTerritory("us"),
 		WithLimit(25),
 		WithReviewSort("-createdDate"),
+		WithPublishedResponseExists(false),
+		WithReviewIncludeResponse(),
+		WithReviewResponseFields([]string{"responseBody", "state"}),
 	})
 
 	values, err := url.ParseQuery(query)
@@ -40,6 +43,18 @@ func TestBuildReviewQuery(t *testing.T) {
 
 	if got := values.Get("sort"); got != "-createdDate" {
 		t.Fatalf("expected sort=-createdDate, got %q", got)
+	}
+
+	if got := values.Get("exists[publishedResponse]"); got != "false" {
+		t.Fatalf("expected exists[publishedResponse]=false, got %q", got)
+	}
+
+	if got := values.Get("include"); got != "response" {
+		t.Fatalf("expected include=response, got %q", got)
+	}
+
+	if got := values.Get("fields[customerReviewResponses]"); got != "responseBody,state" {
+		t.Fatalf("expected fields[customerReviewResponses]=responseBody,state, got %q", got)
 	}
 }
 
@@ -118,7 +133,7 @@ func TestBuildFeedbackQuery_IncludesScreenshots(t *testing.T) {
 		t.Fatalf("failed to parse query: %v", err)
 	}
 
-	expected := "createdDate,comment,email,deviceModel,osVersion,appPlatform,devicePlatform,screenshots"
+	expected := "createdDate,comment,email,deviceModel,osVersion,locale,timeZone,architecture,connectionType,pairedAppleWatch,appUptimeInMilliseconds,diskBytesAvailable,diskBytesTotal,batteryPercentage,screenWidthInPoints,screenHeightInPoints,appPlatform,devicePlatform,deviceFamily,buildBundleId,screenshots,build,tester"
 	if got := values.Get("fields[betaFeedbackScreenshotSubmissions]"); got != expected {
 		t.Fatalf("expected fields to be %q, got %q", expected, got)
 	}
@@ -175,9 +190,121 @@ func TestBuildCrashQuery(t *testing.T) {
 	}
 }
 
+func TestBuildCrashQueryIncludeBuild(t *testing.T) {
+	query := &crashQuery{}
+	WithCrashInclude([]string{"build"})(query)
+
+	values, err := url.ParseQuery(buildCrashQuery(query))
+	if err != nil {
+		t.Fatalf("failed to parse query: %v", err)
+	}
+
+	if got := values.Get("include"); got != "build" {
+		t.Fatalf("expected include=build, got %q", got)
+	}
+	// Including the build relationship narrows the build fields so callers can
+	// resolve the build number (version) and marketing version (preReleaseVersion).
+	if got := values.Get("fields[builds]"); got != "version,preReleaseVersion" {
+		t.Fatalf("expected fields[builds]=version,preReleaseVersion, got %q", got)
+	}
+}
+
+func TestBuildCrashQueryIncludeTesterOnly(t *testing.T) {
+	query := &crashQuery{}
+	WithCrashInclude([]string{"tester"})(query)
+
+	values, err := url.ParseQuery(buildCrashQuery(query))
+	if err != nil {
+		t.Fatalf("failed to parse query: %v", err)
+	}
+
+	if got := values.Get("include"); got != "tester" {
+		t.Fatalf("expected include=tester, got %q", got)
+	}
+	// fields[builds] should only be set when the build relationship is included.
+	if got := values.Get("fields[builds]"); got != "" {
+		t.Fatalf("expected no fields[builds] without build include, got %q", got)
+	}
+}
+
+func TestBuildCrashQueryNoIncludeByDefault(t *testing.T) {
+	values, err := url.ParseQuery(buildCrashQuery(&crashQuery{}))
+	if err != nil {
+		t.Fatalf("failed to parse query: %v", err)
+	}
+	if got := values.Get("include"); got != "" {
+		t.Fatalf("expected no include by default, got %q", got)
+	}
+}
+
+func TestBuildFeedbackQueryIncludeBuild(t *testing.T) {
+	query := &feedbackQuery{}
+	WithFeedbackInclude([]string{"build"})(query)
+
+	values, err := url.ParseQuery(buildFeedbackQuery(query))
+	if err != nil {
+		t.Fatalf("failed to parse query: %v", err)
+	}
+
+	if got := values.Get("include"); got != "build" {
+		t.Fatalf("expected include=build, got %q", got)
+	}
+	if got := values.Get("fields[builds]"); got != "version,preReleaseVersion" {
+		t.Fatalf("expected fields[builds]=version,preReleaseVersion, got %q", got)
+	}
+}
+
+// When --include-screenshots and --include build are combined, the requested
+// relationship must appear in the screenshot sparse fieldset, otherwise ASC
+// drops the included build from the response.
+func TestBuildFeedbackQueryIncludeBuildWithScreenshots(t *testing.T) {
+	query := &feedbackQuery{}
+	WithFeedbackIncludeScreenshots()(query)
+	WithFeedbackInclude([]string{"build"})(query)
+
+	values, err := url.ParseQuery(buildFeedbackQuery(query))
+	if err != nil {
+		t.Fatalf("failed to parse query: %v", err)
+	}
+
+	if got := values.Get("include"); got != "build" {
+		t.Fatalf("expected include=build, got %q", got)
+	}
+	fields := values.Get("fields[betaFeedbackScreenshotSubmissions]")
+	if !strings.Contains(fields, "build") {
+		t.Fatalf("expected screenshot fieldset to contain build, got %q", fields)
+	}
+	if !strings.Contains(fields, "screenshots") {
+		t.Fatalf("expected screenshot fieldset to retain screenshots, got %q", fields)
+	}
+}
+
+func TestBuildCrashQueryIncludeBuildAndTester(t *testing.T) {
+	query := &crashQuery{}
+	WithCrashInclude([]string{"build", "tester"})(query)
+
+	values, err := url.ParseQuery(buildCrashQuery(query))
+	if err != nil {
+		t.Fatalf("failed to parse query: %v", err)
+	}
+
+	if got := values.Get("include"); got != "build,tester" {
+		t.Fatalf("expected include=build,tester, got %q", got)
+	}
+	if got := values.Get("fields[builds]"); got != "version,preReleaseVersion" {
+		t.Fatalf("expected fields[builds]=version,preReleaseVersion, got %q", got)
+	}
+}
+
 func TestBuildBetaGroupsQuery(t *testing.T) {
 	query := &betaGroupsQuery{}
 	WithBetaGroupsLimit(10)(query)
+	WithBetaGroupsApps([]string{" app-1 ", "app-2"})(query)
+	WithBetaGroupsBuilds([]string{"build-1"})(query)
+	WithBetaGroupsFields([]string{"name", "isInternalGroup", "hasAccessToAllBuilds"})(query)
+	WithBetaGroupsIsInternal(true)(query)
+	WithBetaGroupsName("  QA Testers  ")(query)
+	WithBetaGroupsSort(" -createdDate ")(query)
 
 	values, err := url.ParseQuery(buildBetaGroupsQuery(query))
 	if err != nil {
@@ -185,6 +312,99 @@ func TestBuildBetaGroupsQuery(t *testing.T) {
 	}
 	if got := values.Get("limit"); got != "10" {
 		t.Fatalf("expected limit=10, got %q", got)
+	}
+	if got := values.Get("filter[app]"); got != "app-1,app-2" {
+		t.Fatalf("expected filter[app]=app-1,app-2, got %q", got)
+	}
+	if got := values.Get("filter[builds]"); got != "build-1" {
+		t.Fatalf("expected filter[builds]=build-1, got %q", got)
+	}
+	if got := values.Get("fields[betaGroups]"); got != "name,isInternalGroup,hasAccessToAllBuilds" {
+		t.Fatalf("unexpected beta group fields %q", got)
+	}
+	if got := values.Get("filter[isInternalGroup]"); got != "true" {
+		t.Fatalf("expected filter[isInternalGroup]=true, got %q", got)
+	}
+	if got := values.Get("filter[name]"); got != "QA Testers" {
+		t.Fatalf("expected filter[name]=QA Testers, got %q", got)
+	}
+	if got := values.Get("sort"); got != "-createdDate" {
+		t.Fatalf("expected sort=-createdDate, got %q", got)
+	}
+}
+
+func TestBuildBetaGroupsQueryOmitsUnsetNameAndSort(t *testing.T) {
+	query := &betaGroupsQuery{}
+	WithBetaGroupsName("   ")(query)
+	WithBetaGroupsSort("")(query)
+
+	values, err := url.ParseQuery(buildBetaGroupsQuery(query))
+	if err != nil {
+		t.Fatalf("failed to parse query: %v", err)
+	}
+	if _, ok := values["filter[name]"]; ok {
+		t.Fatalf("expected no filter[name], got %q", values.Get("filter[name]"))
+	}
+	if _, ok := values["sort"]; ok {
+		t.Fatalf("expected no sort, got %q", values.Get("sort"))
+	}
+}
+
+func TestBuildBetaGroupsQueryOpenAPIParity(t *testing.T) {
+	query := &betaGroupsQuery{}
+	opts := []BetaGroupsOption{
+		WithBetaGroupsIDs([]string{" group-1 ", "group-2"}),
+		WithBetaGroupsPublicLinkEnabled(true),
+		WithBetaGroupsPublicLinkLimitEnabled(false),
+		WithBetaGroupsPublicLink(" https://example.com/public "),
+		WithBetaGroupsFields([]string{"name", "publicLink"}),
+		WithBetaGroupsAppFields([]string{"name", "bundleId"}),
+		WithBetaGroupsBuildFields([]string{"version"}),
+		WithBetaGroupsBetaTesterFields([]string{"email"}),
+		WithBetaGroupsBetaRecruitmentCriteriaFields([]string{"lastModifiedDate"}),
+		WithBetaGroupsInclude([]string{"app", "builds", "betaTesters", "betaRecruitmentCriteria"}),
+		WithBetaGroupsBetaTestersLimit(25),
+		WithBetaGroupsBuildsLimit(100),
+	}
+	for _, opt := range opts {
+		opt(query)
+	}
+
+	values, err := url.ParseQuery(buildBetaGroupsQuery(query))
+	if err != nil {
+		t.Fatalf("failed to parse query: %v", err)
+	}
+	for key, want := range map[string]string{
+		"filter[id]":                      "group-1,group-2",
+		"filter[publicLinkEnabled]":       "true",
+		"filter[publicLinkLimitEnabled]":  "false",
+		"filter[publicLink]":              "https://example.com/public",
+		"fields[betaGroups]":              "name,publicLink,app,builds,betaTesters,betaRecruitmentCriteria",
+		"fields[apps]":                    "name,bundleId",
+		"fields[builds]":                  "version",
+		"fields[betaTesters]":             "email",
+		"fields[betaRecruitmentCriteria]": "lastModifiedDate",
+		"include":                         "app,builds,betaTesters,betaRecruitmentCriteria",
+		"limit[betaTesters]":              "25",
+		"limit[builds]":                   "100",
+	} {
+		if got := values.Get(key); got != want {
+			t.Errorf("%s = %q, want %q", key, got, want)
+		}
+	}
+}
+
+func TestBuildBetaGroupsQueryAddsIncludedRelationshipsToSparseFields(t *testing.T) {
+	query := &betaGroupsQuery{}
+	WithBetaGroupsFields([]string{"name"})(query)
+	WithBetaGroupsInclude([]string{"app", "builds"})(query)
+
+	values, err := url.ParseQuery(buildBetaGroupsQuery(query))
+	if err != nil {
+		t.Fatalf("failed to parse query: %v", err)
+	}
+	if got := values.Get("fields[betaGroups]"); got != "name,app,builds" {
+		t.Fatalf("fields[betaGroups] = %q, want included relationships retained", got)
 	}
 }
 
@@ -689,6 +909,9 @@ func TestBuildBetaTestersQuery(t *testing.T) {
 	opts := []BetaTestersOption{
 		WithBetaTestersLimit(25),
 		WithBetaTestersEmail("tester@example.com"),
+		WithBetaTestersFirstName("Ada"),
+		WithBetaTestersLastName("Lovelace"),
+		WithBetaTestersIDs([]string{"tester-1", " tester-2 "}),
 	}
 	for _, opt := range opts {
 		opt(query)
@@ -707,6 +930,15 @@ func TestBuildBetaTestersQuery(t *testing.T) {
 	}
 	if got := values.Get("filter[email]"); got != "tester@example.com" {
 		t.Fatalf("expected filter[email]=tester@example.com, got %q", got)
+	}
+	if got := values.Get("filter[firstName]"); got != "Ada" {
+		t.Fatalf("expected filter[firstName]=Ada, got %q", got)
+	}
+	if got := values.Get("filter[lastName]"); got != "Lovelace" {
+		t.Fatalf("expected filter[lastName]=Lovelace, got %q", got)
+	}
+	if got := values.Get("filter[id]"); got != "tester-1,tester-2" {
+		t.Fatalf("expected filter[id]=tester-1,tester-2, got %q", got)
 	}
 	if got := values.Get("filter[betaGroups]"); got != "" {
 		t.Fatalf("expected no filter[betaGroups], got %q", got)
@@ -767,6 +999,7 @@ func TestBuildAppStoreVersionsQuery(t *testing.T) {
 		WithAppStoreVersionsPlatforms([]string{"ios", "MAC_OS"}),
 		WithAppStoreVersionsVersionStrings([]string{"1.0.0", "1.1.0"}),
 		WithAppStoreVersionsStates([]string{"ready_for_review"}),
+		WithAppStoreVersionsVersionStates([]string{"ready_for_distribution"}),
 		WithAppStoreVersionsInclude([]string{"appStoreReviewDetail"}),
 	}
 	for _, opt := range opts {
@@ -786,11 +1019,46 @@ func TestBuildAppStoreVersionsQuery(t *testing.T) {
 	if got := values.Get("filter[appStoreState]"); got != "READY_FOR_REVIEW" {
 		t.Fatalf("expected filter[appStoreState]=READY_FOR_REVIEW, got %q", got)
 	}
+	if got := values.Get("filter[appVersionState]"); got != "READY_FOR_DISTRIBUTION" {
+		t.Fatalf("expected filter[appVersionState]=READY_FOR_DISTRIBUTION, got %q", got)
+	}
 	if got := values.Get("include"); got != "appStoreReviewDetail" {
 		t.Fatalf("expected include=appStoreReviewDetail, got %q", got)
 	}
 	if got := values.Get("limit"); got != "20" {
 		t.Fatalf("expected limit=20, got %q", got)
+	}
+}
+
+func TestBuildAppStoreVersionsQueryMixedReadyStatesUseAppVersionStateFilter(t *testing.T) {
+	query := &appStoreVersionsQuery{}
+	WithAppStoreVersionsStates([]string{"READY_FOR_REVIEW", "READY_FOR_DISTRIBUTION"})(query)
+
+	values, err := url.ParseQuery(buildAppStoreVersionsQuery(query))
+	if err != nil {
+		t.Fatalf("failed to parse query: %v", err)
+	}
+	if got := values.Get("filter[appVersionState]"); got != "READY_FOR_REVIEW,READY_FOR_DISTRIBUTION" {
+		t.Fatalf("expected filter[appVersionState]=READY_FOR_REVIEW,READY_FOR_DISTRIBUTION, got %q", got)
+	}
+	if got := values.Get("filter[appStoreState]"); got != "" {
+		t.Fatalf("expected no filter[appStoreState], got %q", got)
+	}
+}
+
+func TestBuildAppStoreVersionsQueryMixedExclusiveStatesKeepSeparateFilters(t *testing.T) {
+	query := &appStoreVersionsQuery{}
+	WithAppStoreVersionsStates([]string{"READY_FOR_SALE", "READY_FOR_DISTRIBUTION"})(query)
+
+	values, err := url.ParseQuery(buildAppStoreVersionsQuery(query))
+	if err != nil {
+		t.Fatalf("failed to parse query: %v", err)
+	}
+	if got := values.Get("filter[appStoreState]"); got != "READY_FOR_SALE" {
+		t.Fatalf("expected filter[appStoreState]=READY_FOR_SALE, got %q", got)
+	}
+	if got := values.Get("filter[appVersionState]"); got != "READY_FOR_DISTRIBUTION" {
+		t.Fatalf("expected filter[appVersionState]=READY_FOR_DISTRIBUTION, got %q", got)
 	}
 }
 
@@ -820,29 +1088,90 @@ func TestBuildAppSearchKeywordsQuery(t *testing.T) {
 	}
 }
 
+func TestBuildAppClipDefaultExperiencesQuery(t *testing.T) {
+	query := &appClipDefaultExperiencesQuery{}
+	WithAppClipDefaultExperiencesReleaseWithVersionExists(true)(query)
+
+	values, err := url.ParseQuery(buildAppClipDefaultExperiencesQuery(query))
+	if err != nil {
+		t.Fatalf("ParseQuery() error: %v", err)
+	}
+	if got := values.Get("exists[releaseWithAppStoreVersion]"); got != "true" {
+		t.Fatalf("exists[releaseWithAppStoreVersion] = %q, want true", got)
+	}
+}
+
+func TestAppStoreVersionStateOptionsPreserveExistingComposition(t *testing.T) {
+	query := &appStoreVersionsQuery{}
+	WithAppStoreVersionsStates([]string{"READY_FOR_SALE", "READY_FOR_DISTRIBUTION"})(query)
+	WithAppStoreVersionsStates([]string{"PREPARE_FOR_SUBMISSION"})(query)
+
+	if got := strings.Join(query.states, ","); got != "READY_FOR_SALE,PREPARE_FOR_SUBMISSION" {
+		t.Fatalf("app store states = %q, want READY_FOR_SALE,PREPARE_FOR_SUBMISSION", got)
+	}
+	if got := strings.Join(query.appVersionStates, ","); got != "READY_FOR_DISTRIBUTION" {
+		t.Fatalf("app version states = %q, want READY_FOR_DISTRIBUTION", got)
+	}
+
+	WithAppStoreVersionsVersionStates([]string{"WAITING_FOR_REVIEW"})(query)
+	if got := strings.Join(query.appVersionStates, ","); got != "WAITING_FOR_REVIEW" {
+		t.Fatalf("app version states = %q, want explicit value to replace inferred states", got)
+	}
+
+	WithAppStoreVersionsVersionStates([]string{"PROCESSING_FOR_DISTRIBUTION"})(query)
+	if got := strings.Join(query.appVersionStates, ","); got != "PROCESSING_FOR_DISTRIBUTION" {
+		t.Fatalf("app version states = %q, want last explicit value", got)
+	}
+}
+
 func TestBuildAppStoreVersionQuery(t *testing.T) {
 	query := &appStoreVersionQuery{}
-	WithAppStoreVersionInclude([]string{"appStoreReviewDetail", "ageRatingDeclaration"})(query)
+	WithAppStoreVersionInclude([]string{"app", "appStoreReviewDetail"})(query)
+	WithAppStoreVersionLocalizationsIncludeLimit(50)(query)
 
 	values, err := url.ParseQuery(buildAppStoreVersionQuery(query))
 	if err != nil {
 		t.Fatalf("failed to parse query: %v", err)
 	}
-	if got := values.Get("include"); got != "appStoreReviewDetail,ageRatingDeclaration" {
-		t.Fatalf("expected include=appStoreReviewDetail,ageRatingDeclaration, got %q", got)
+	if got := values.Get("include"); got != "app,appStoreReviewDetail" {
+		t.Fatalf("expected include=app,appStoreReviewDetail, got %q", got)
+	}
+	if got := values.Get("limit[appStoreVersionLocalizations]"); got != "50" {
+		t.Fatalf("expected localization include limit 50, got %q", got)
 	}
 }
 
 func TestBuildAppInfoQuery(t *testing.T) {
 	query := &appInfoQuery{}
-	WithAppInfoInclude([]string{"ageRatingDeclaration", "territoryAgeRatings"})(query)
+	WithAppInfoInclude([]string{"ageRatingDeclaration", "primaryCategory"})(query)
+	WithAppInfoLocalizationsIncludeLimit(50)(query)
 
 	values, err := url.ParseQuery(buildAppInfoQuery(query))
 	if err != nil {
 		t.Fatalf("failed to parse query: %v", err)
 	}
-	if got := values.Get("include"); got != "ageRatingDeclaration,territoryAgeRatings" {
-		t.Fatalf("expected include=ageRatingDeclaration,territoryAgeRatings, got %q", got)
+	if got := values.Get("include"); got != "ageRatingDeclaration,primaryCategory" {
+		t.Fatalf("expected include=ageRatingDeclaration,primaryCategory, got %q", got)
+	}
+	if got := values.Get("limit[appInfoLocalizations]"); got != "50" {
+		t.Fatalf("expected localization include limit 50, got %q", got)
+	}
+}
+
+func TestBuildAppInfoQueryAddsIncludedRelationshipsToSparseFields(t *testing.T) {
+	query := &appInfoQuery{}
+	WithAppInfoFields([]string{"kidsAgeBand", "ageRatingDeclaration"})(query)
+	WithAppInfoInclude([]string{"ageRatingDeclaration", "primaryCategory", "ageRatingDeclaration"})(query)
+
+	values, err := url.ParseQuery(buildAppInfoQuery(query))
+	if err != nil {
+		t.Fatalf("failed to parse query: %v", err)
+	}
+	if got := values["fields[appInfos]"]; len(got) != 1 || got[0] != "kidsAgeBand,ageRatingDeclaration,primaryCategory" {
+		t.Fatalf("fields[appInfos] = %q, want one ordered, deduplicated value", got)
+	}
+	if got := values["include"]; len(got) != 1 || got[0] != "ageRatingDeclaration,primaryCategory" {
+		t.Fatalf("include = %q, want one ordered, deduplicated value", got)
 	}
 }
 
@@ -1855,10 +2184,9 @@ func TestBuildAndroidToIosAppMappingDetailsQuery(t *testing.T) {
 }
 
 func TestBuildAlternativeDistributionDomainsQuery(t *testing.T) {
-	query := &alternativeDistributionDomainsQuery{
-		listQuery: listQuery{limit: 20},
-		fields:    []string{"domain", "referenceName"},
-	}
+	query := &alternativeDistributionDomainsQuery{}
+	WithAlternativeDistributionDomainsLimit(20)(query)
+	WithAlternativeDistributionDomainsFields([]string{"domain", "referenceName"})(query)
 	values, err := url.ParseQuery(buildAlternativeDistributionDomainsQuery(query))
 	if err != nil {
 		t.Fatalf("ParseQuery() error: %v", err)
@@ -1872,12 +2200,10 @@ func TestBuildAlternativeDistributionDomainsQuery(t *testing.T) {
 }
 
 func TestBuildAlternativeDistributionKeysQuery(t *testing.T) {
-	existsApp := true
-	query := &alternativeDistributionKeysQuery{
-		listQuery: listQuery{limit: 15},
-		fields:    []string{"publicKey"},
-		existsApp: &existsApp,
-	}
+	query := &alternativeDistributionKeysQuery{}
+	WithAlternativeDistributionKeysLimit(15)(query)
+	WithAlternativeDistributionKeysFields([]string{"publicKey"})(query)
+	WithAlternativeDistributionKeysExistsApp(true)(query)
 	values, err := url.ParseQuery(buildAlternativeDistributionKeysQuery(query))
 	if err != nil {
 		t.Fatalf("ParseQuery() error: %v", err)
@@ -1907,10 +2233,9 @@ func TestBuildAlternativeDistributionPackageVersionsQuery(t *testing.T) {
 }
 
 func TestBuildAlternativeDistributionPackageVariantsQuery(t *testing.T) {
-	query := &alternativeDistributionPackageVariantsQuery{
-		listQuery: listQuery{limit: 9},
-		fields:    []string{"url", "fileChecksum"},
-	}
+	query := &alternativeDistributionPackageVariantsQuery{}
+	WithAlternativeDistributionPackageVariantsLimit(9)(query)
+	WithAlternativeDistributionPackageVariantsFields([]string{"url", "fileChecksum"})(query)
 	values, err := url.ParseQuery(buildAlternativeDistributionPackageVariantsQuery(query))
 	if err != nil {
 		t.Fatalf("ParseQuery() error: %v", err)
@@ -1924,10 +2249,9 @@ func TestBuildAlternativeDistributionPackageVariantsQuery(t *testing.T) {
 }
 
 func TestBuildAlternativeDistributionPackageDeltasQuery(t *testing.T) {
-	query := &alternativeDistributionPackageDeltasQuery{
-		listQuery: listQuery{limit: 11},
-		fields:    []string{"url", "fileChecksum"},
-	}
+	query := &alternativeDistributionPackageDeltasQuery{}
+	WithAlternativeDistributionPackageDeltasLimit(11)(query)
+	WithAlternativeDistributionPackageDeltasFields([]string{"url", "fileChecksum"})(query)
 	values, err := url.ParseQuery(buildAlternativeDistributionPackageDeltasQuery(query))
 	if err != nil {
 		t.Fatalf("ParseQuery() error: %v", err)
@@ -2946,6 +3270,22 @@ func TestWithRetry_SuccessOnFirstTry(t *testing.T) {
 	}
 	if callCount != 1 {
 		t.Fatalf("expected 1 call, got %d", callCount)
+	}
+}
+
+func TestWithRetry_ExplicitCancellationWinsOverRetryableError(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	cancel()
+
+	_, err := WithRetry(ctx, func() (string, error) {
+		return "", &RetryableError{
+			Err:        errors.New("retryable failure"),
+			RetryAfter: time.Hour,
+		}
+	}, RetryOptions{MaxRetries: 1})
+
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("error = %v, want explicit context cancellation", err)
 	}
 }
 

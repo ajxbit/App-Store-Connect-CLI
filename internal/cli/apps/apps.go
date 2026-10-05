@@ -2,9 +2,9 @@ package apps
 
 import (
 	"context"
-	"errors"
 	"flag"
 	"fmt"
+	"net/url"
 	"os"
 	"strings"
 
@@ -12,18 +12,22 @@ import (
 
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/asc"
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/cli/shared"
-	cliweb "github.com/rudrankriyam/App-Store-Connect-CLI/internal/cli/web"
 )
 
-func appsListFlags(fs *flag.FlagSet) (output shared.OutputFlags, bundleID *string, name *string, sku *string, sort *string, limit *int, next *string, paginate *bool) {
+func appsListFlags(fs *flag.FlagSet) (output shared.OutputFlags, bundleID *string, name *string, sku *string, versionState *string, reviewSubmissionState *string, sort *string, limit *int, next *string, paginate *bool, appInfoFields *string, iapFields *string, subscriptionGroupFields *string) {
 	output = shared.BindOutputFlags(fs)
 	bundleID = fs.String("bundle-id", "", "Filter by bundle ID(s), comma-separated")
 	name = fs.String("name", "", "Filter by app name(s), comma-separated")
 	sku = fs.String("sku", "", "Filter by SKU(s), comma-separated")
-	sort = fs.String("sort", "", "Sort by name, -name, bundleId, or -bundleId")
+	versionState = fs.String("version-state", "", "Filter by App Store version state(s), comma-separated: "+strings.Join(appVersionStateFilterList(), ", "))
+	reviewSubmissionState = fs.String("review-submission-state", "", "Filter by review submission state(s), comma-separated: "+strings.Join(reviewSubmissionStateFilterList(), ", "))
+	sort = fs.String("sort", "", "Sort by name, -name, bundleId, -bundleId, sku, or -sku")
 	limit = fs.Int("limit", 0, "Maximum results per page (1-200)")
 	next = fs.String("next", "", "Fetch next page using a links.next URL")
 	paginate = fs.Bool("paginate", false, "Automatically fetch all pages (aggregate results)")
+	appInfoFields = fs.String("app-info-fields", "", "Sparse fields for included app info records: kidsAgeBand (deprecated; removed from API 4.5; prefer asc age-rating view)")
+	iapFields = fs.String("iap-fields", "", "Sparse fields for included in-app purchases: versions")
+	subscriptionGroupFields = fs.String("subscription-group-fields", "", "Sparse fields for included subscription groups: versions")
 	return
 }
 
@@ -31,7 +35,27 @@ func appsListFlags(fs *flag.FlagSet) (output shared.OutputFlags, bundleID *strin
 func AppsCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("apps", flag.ExitOnError)
 
-	output, bundleID, name, sku, sort, limit, next, paginate := appsListFlags(fs)
+	output, bundleID, name, sku, versionState, reviewSubmissionState, sort, limit, next, paginate, appInfoFields, iapFields, subscriptionGroupFields := appsListFlags(fs)
+	subcommands := []*ffcli.Command{
+		AppsListCommand(),
+		AppsPublishedCommand(),
+		AppsWallCommand(),
+		AppsPublicCommand(),
+		AppsRegistryCommand(),
+		AppsGetCommand(),
+		AppsRenameCommand(),
+		AppsInfoCommand(),
+		AppsCIProductCommand(),
+		AppsUpdateCommand(),
+		AppsRemoveBetaTestersCommand(),
+		AppsSubscriptionGracePeriodCommand(),
+		AppsSearchKeywordsCommand(),
+		AppEncryptionDeclarationsCommand(),
+		AppsContentRightsCommand(),
+	}
+	for _, subcommand := range subcommands {
+		rejectAppsListFlagsBeforeSubcommand(fs, subcommand)
+	}
 
 	return &ffcli.Command{
 		Name:       "apps",
@@ -39,16 +63,22 @@ func AppsCommand() *ffcli.Command {
 		ShortHelp:  "List and manage apps in App Store Connect.",
 		LongHelp: `List and manage apps in App Store Connect.
 
+Creating an app record runs through a web session, not this command group:
+  asc web apps create --name "My App" --bundle-id "com.example.app" --sku "MYAPP123"
+
 Examples:
   asc apps
   asc apps list --bundle-id "com.example.app"
-  asc web apps create --name "My App" --bundle-id "com.example.app" --sku "MYAPP123"
+  asc apps published
   asc apps wall
   asc apps wall submit --app "1234567890" --confirm
   asc apps public view --app "1234567890"
   asc apps public search --term "focus" --country us
+  asc apps public rank --app "1234567890" --term "focus timer" --country us --platform TV_OS
   asc apps public storefronts list
+  asc apps registry pull --path ".asc/app-registry.json"
   asc apps view --id "APP_ID"
+  asc apps rename --app "APP_ID" --locale "en-US" --name "New Name"
   asc apps info view --app "APP_ID"
   asc apps info edit --app "APP_ID" --locale "en-US" --whats-new "Bug fixes"
   asc apps ci-product view --id "APP_ID"
@@ -58,53 +88,64 @@ Examples:
   asc apps content-rights edit --app "APP_ID" --uses-third-party-content=false
   asc apps --limit 10
   asc apps --sort name
+  asc apps --sort sku
+  asc apps --version-state IN_REVIEW,WAITING_FOR_REVIEW
+  asc apps --review-submission-state IN_REVIEW
+  asc apps --app-info-fields kidsAgeBand --iap-fields versions --subscription-group-fields versions
   asc apps --output table
   asc apps --next "<links.next>"
   asc apps --paginate`,
-		FlagSet:   fs,
-		UsageFunc: shared.VisibleUsageFunc,
-		Subcommands: []*ffcli.Command{
-			AppsListCommand(),
-			RemovedAppsCreateCommand(),
-			AppsWallCommand(),
-			AppsPublicCommand(),
-			AppsGetCommand(),
-			AppsInfoCommand(),
-			AppsCIProductCommand(),
-			AppsUpdateCommand(),
-			AppsRemoveBetaTestersCommand(),
-			AppsSubscriptionGracePeriodCommand(),
-			AppsSearchKeywordsCommand(),
-			AppEncryptionDeclarationsCommand(),
-			AppsContentRightsCommand(),
-		},
+		FlagSet:     fs,
+		UsageFunc:   shared.VisibleUsageFunc,
+		Subcommands: subcommands,
 		Exec: func(ctx context.Context, args []string) error {
 			if len(args) > 0 {
-				fmt.Fprintf(os.Stderr, "Error: unknown subcommand %q\n", strings.TrimSpace(args[0]))
+				subcommand := strings.TrimSpace(args[0])
+				if subcommand == "create" {
+					fmt.Fprintln(os.Stderr, "Error: `asc apps create` was removed. Use `asc web apps create` instead.")
+					return flag.ErrHelp
+				}
+				fmt.Fprintf(os.Stderr, "Error: unknown subcommand %q\n", subcommand)
 				return flag.ErrHelp
 			}
-			return appsList(ctx, *output.Output, *output.Pretty, *bundleID, *name, *sku, *sort, *limit, *next, *paginate)
+			return appsList(ctx, fs, *output.Output, *output.Pretty, *bundleID, *name, *sku, *versionState, *reviewSubmissionState, *sort, *limit, *next, *paginate, *appInfoFields, *iapFields, *subscriptionGroupFields)
 		},
 	}
 }
 
-func RemovedAppsCreateCommand() *ffcli.Command {
-	cmd := AppsCreateCommand()
-	cmd.ShortHelp = "DEPRECATED: removed; use `asc web apps create`."
-	cmd.LongHelp = "Removed legacy command. Use `asc web apps create` instead."
-	cmd.UsageFunc = shared.DeprecatedUsageFunc
-	cmd.Exec = func(ctx context.Context, args []string) error {
-		fmt.Fprintln(os.Stderr, "Error: `asc apps create` was removed. Use `asc web apps create` instead.")
-		return flag.ErrHelp
+var appsListOnlyFlagNames = []string{
+	"bundle-id", "name", "sku", "version-state", "review-submission-state",
+	"sort", "limit", "next", "paginate", "app-info-fields", "iap-fields",
+	"subscription-group-fields",
+}
+
+// rejectAppsListFlagsBeforeSubcommand prevents ffcli from accepting a parent
+// list flag and then silently dropping it when dispatching to a child command.
+// Direct `asc apps [flags]` listing remains supported; subcommand flags belong
+// after `list` so the selected command owns their values and validation.
+func rejectAppsListFlagsBeforeSubcommand(parentFS *flag.FlagSet, command *ffcli.Command) {
+	if command == nil {
+		return
 	}
-	return cmd
+	if command.Exec != nil {
+		exec := command.Exec
+		command.Exec = func(ctx context.Context, args []string) error {
+			if flagName, ok := appFlagWasProvided(parentFS, appsListOnlyFlagNames...); ok {
+				return shared.UsageErrorf("%s cannot be placed before an apps subcommand; use asc apps [flags] or place it after asc apps list", flagName)
+			}
+			return exec(ctx, args)
+		}
+	}
+	for _, subcommand := range command.Subcommands {
+		rejectAppsListFlagsBeforeSubcommand(parentFS, subcommand)
+	}
 }
 
 // AppsListCommand returns the apps list subcommand.
 func AppsListCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("apps list", flag.ExitOnError)
 
-	output, bundleID, name, sku, sort, limit, next, paginate := appsListFlags(fs)
+	output, bundleID, name, sku, versionState, reviewSubmissionState, sort, limit, next, paginate, appInfoFields, iapFields, subscriptionGroupFields := appsListFlags(fs)
 
 	return &ffcli.Command{
 		Name:       "list",
@@ -118,139 +159,104 @@ Examples:
   asc apps list --name "My App"
   asc apps list --limit 10
   asc apps list --sort name
+  asc apps list --sort sku
+  asc apps list --version-state IN_REVIEW,WAITING_FOR_REVIEW
+  asc apps list --review-submission-state IN_REVIEW
+  asc apps list --app-info-fields kidsAgeBand --iap-fields versions --subscription-group-fields versions
   asc apps list --output table
   asc apps list --next "<links.next>"
   asc apps list --paginate`,
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
-			return appsList(ctx, *output.Output, *output.Pretty, *bundleID, *name, *sku, *sort, *limit, *next, *paginate)
+			return appsList(ctx, fs, *output.Output, *output.Pretty, *bundleID, *name, *sku, *versionState, *reviewSubmissionState, *sort, *limit, *next, *paginate, *appInfoFields, *iapFields, *subscriptionGroupFields)
 		},
 	}
 }
 
-// AppsGetCommand returns the apps get subcommand.
+// AppsGetCommand returns the apps view subcommand.
 func AppsGetCommand() *ffcli.Command {
-	fs := flag.NewFlagSet("apps get", flag.ExitOnError)
+	fs := flag.NewFlagSet("apps view", flag.ExitOnError)
 
-	id := fs.String("id", "", "App Store Connect app ID")
+	id := shared.BindResourceIDFlag(fs, "id", "apps", "App Store Connect app ID")
+	fields := fs.String("fields", "", "App attribute fields to return, comma-separated: "+strings.Join(appAttributeFields, ", "))
+	appInfoFields := fs.String("app-info-fields", "", "Sparse fields for included app info records: kidsAgeBand (deprecated; removed from API 4.5; prefer asc age-rating view)")
+	iapFields := fs.String("iap-fields", "", "Sparse fields for included in-app purchases: versions")
+	subscriptionGroupFields := fs.String("subscription-group-fields", "", "Sparse fields for included subscription groups: versions")
 	output := shared.BindOutputFlags(fs)
 
 	return &ffcli.Command{
-		Name:       "get",
+		Name:       "view",
 		ShortUsage: "asc apps view --id APP_ID",
 		ShortHelp:  "View app details by ID.",
 		LongHelp: `View app details by ID.
 
 Examples:
   asc apps view --id "APP_ID"
-  asc apps view --id "APP_ID" --output table`,
+  asc apps view --id "APP_ID" --app-info-fields kidsAgeBand --iap-fields versions --subscription-group-fields versions
+  asc apps view --id "APP_ID" --output table
+  asc apps view --id "APP_ID" --fields "subscriptionStatusUrl,subscriptionStatusUrlVersion,subscriptionStatusUrlForSandbox,subscriptionStatusUrlVersionForSandbox" --output json`,
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
 			idValue := strings.TrimSpace(*id)
 			if idValue == "" {
 				fmt.Fprintln(os.Stderr, "Error: --id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--id")
 			}
+			fieldValues, err := normalizeSparseField(fs, *fields, appAttributeFields, "--fields")
+			if err != nil {
+				return shared.UsageError(err.Error())
+			}
+			appInfoFieldValues, err := normalizeSparseField(fs, *appInfoFields, appInfoSparseFields441, "--app-info-fields")
+			if err != nil {
+				return shared.UsageError(err.Error())
+			}
+			iapFieldValues, err := normalizeSparseField(fs, *iapFields, appInAppPurchaseSparseFields441, "--iap-fields")
+			if err != nil {
+				return shared.UsageError(err.Error())
+			}
+			groupFieldValues, err := normalizeSparseField(fs, *subscriptionGroupFields, appSubscriptionGroupSparseFields441, "--subscription-group-fields")
+			if err != nil {
+				return shared.UsageError(err.Error())
+			}
+
+			shared.WarnDeprecatedAppInfoFields(appInfoFieldValues, "")
 
 			client, err := shared.GetASCClient()
 			if err != nil {
-				return fmt.Errorf("apps get: %w", err)
+				return fmt.Errorf("apps view: %w", err)
 			}
 
 			requestCtx, cancel := shared.ContextWithTimeout(ctx)
 			defer cancel()
 
-			app, err := client.GetApp(requestCtx, idValue)
+			includeValues := []string{}
+			if len(appInfoFieldValues) > 0 {
+				includeValues = addInclude(includeValues, "appInfos")
+			}
+			if len(iapFieldValues) > 0 {
+				includeValues = addInclude(includeValues, "inAppPurchases")
+			}
+			if len(groupFieldValues) > 0 {
+				includeValues = addInclude(includeValues, "subscriptionGroups")
+			}
+			if len(fieldValues) > 0 {
+				fieldValues = append(fieldValues, includeValues...)
+			}
+			opts := []asc.AppOption{
+				asc.WithAppFields(fieldValues),
+				asc.WithAppAppInfoFields(appInfoFieldValues),
+				asc.WithAppInAppPurchaseFields(iapFieldValues),
+				asc.WithAppSubscriptionGroupFields(groupFieldValues),
+				asc.WithAppInclude(includeValues),
+			}
+			app, err := client.GetAppWithOptions(requestCtx, idValue, opts...)
 			if err != nil {
-				return fmt.Errorf("apps get: failed to fetch: %w", err)
+				return fmt.Errorf("apps view: failed to fetch: %w", err)
 			}
 
 			return shared.PrintOutput(app, *output.Output, *output.Pretty)
-		},
-	}
-}
-
-var runAppsCreateShimFn = cliweb.RunAppsCreate
-
-const (
-	appsCreateDeprecationWarning = "Warning: `asc apps create` is deprecated and will be removed after one release cycle."
-	appsCreateMigrationGuidance  = "Use `asc web apps create` instead. Legacy ASC_IRIS_SESSION_CACHE entries are imported into the web session cache automatically during the transition."
-)
-
-// AppsCreateCommand returns the apps create subcommand.
-// TODO(next-release-cycle): remove this shim after the deprecation window closes.
-func AppsCreateCommand() *ffcli.Command {
-	fs := flag.NewFlagSet("apps create", flag.ExitOnError)
-
-	name := fs.String("name", "", "App name")
-	bundleID := fs.String("bundle-id", "", "Bundle ID (e.g., com.example.app)")
-	sku := fs.String("sku", "", "Unique SKU for the app")
-	primaryLocale := fs.String("primary-locale", "", "Primary locale (e.g., en-US)")
-	platform := fs.String("platform", "", "Platform: IOS, MAC_OS, TV_OS, UNIVERSAL")
-	version := fs.String("version", "1.0", "Initial version string")
-	companyName := fs.String("company-name", "", "Company name (optional)")
-	appleID := fs.String("apple-id", "", "Apple ID (email) for authentication")
-	password := fs.String("password", "", "Apple ID password (will prompt if not provided)")
-	twoFactorCode := fs.String("two-factor-code", "", "2FA verification code (if prompted)")
-	twoFactorCodeCommand := fs.String("two-factor-code-command", "", "Shell command that prints the 2FA code to stdout if verification is required")
-	autoRename := fs.Bool("auto-rename", true, "Auto-retry with a unique app name when the chosen name is already in use (default: true)")
-	output := shared.BindOutputFlags(fs)
-
-	return &ffcli.Command{
-		Name:       "create",
-		ShortUsage: "asc apps create [flags]",
-		ShortHelp:  "[deprecated] Create a new app via the unofficial web-session shim.",
-		LongHelp: `DEPRECATED: Use ` + "`asc web apps create`" + `.
-
-This compatibility shim forwards to the canonical unofficial web-session app
-creation flow and will be removed after one release cycle.
-
-App creation requires Apple web-session authentication (not API key).
-If 2FA is enabled on your account, you may need to complete authentication in a browser first.
-The canonical web flow also supports --two-factor-code-command or
-ASC_WEB_2FA_CODE_COMMAND when a fresh login requires verification.
-Legacy ` + "`ASC_IRIS_SESSION_CACHE*`" + ` entries are imported into the web
-session cache automatically during the deprecation window.
-
-If flags are not provided, an interactive prompt will guide you through the required fields.
-This deprecated shim preserves the old Apple-ID-only contract and assumes the
-bundle ID already exists. Use ` + "`asc web apps create`" + ` if you want the
-new official-auth bundle-ID preflight and auto-create behavior.
-
-Examples:
-  asc web apps create
-  asc web apps create --name "My App" --bundle-id "com.example.myapp" --sku "MYAPP123"
-  asc apps create --name "My App" --bundle-id "com.example.myapp" --sku "MYAPP123"
-  asc apps create --apple-id "user@example.com" --password "APP_SPECIFIC_PASSWORD"`,
-		FlagSet:   fs,
-		UsageFunc: shared.DefaultUsageFunc,
-		Exec: func(ctx context.Context, args []string) error {
-			fmt.Fprintln(os.Stderr, appsCreateDeprecationWarning)
-			fmt.Fprintln(os.Stderr, appsCreateMigrationGuidance)
-			err := runAppsCreateShimFn(ctx, cliweb.AppsCreateRunOptions{
-				Name:                         *name,
-				BundleID:                     *bundleID,
-				SKU:                          *sku,
-				PrimaryLocale:                *primaryLocale,
-				Platform:                     *platform,
-				Version:                      *version,
-				CompanyName:                  *companyName,
-				AppleID:                      *appleID,
-				Password:                     *password,
-				TwoFactorCode:                *twoFactorCode,
-				TwoFactorCodeCommand:         *twoFactorCodeCommand,
-				AutoRename:                   *autoRename,
-				Output:                       *output.Output,
-				Pretty:                       *output.Pretty,
-				PromptForAppleIDWithPassword: true,
-				DisableBundleIDPreflight:     true,
-			})
-			if err == nil || errors.Is(err, flag.ErrHelp) {
-				return err
-			}
-			return fmt.Errorf("apps create: %w", err)
 		},
 	}
 }
@@ -259,29 +265,36 @@ Examples:
 func AppsUpdateCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("apps update", flag.ExitOnError)
 
-	id := fs.String("id", "", "App Store Connect app ID")
+	id := shared.BindResourceIDFlag(fs, "id", "apps", "App Store Connect app ID")
 	bundleID := fs.String("bundle-id", "", "Update bundle ID")
 	primaryLocale := fs.String("primary-locale", "", "Update primary locale (e.g., en-US)")
 	contentRights := fs.String("content-rights", "", "Content rights declaration: DOES_NOT_USE_THIRD_PARTY_CONTENT or USES_THIRD_PARTY_CONTENT")
+	subscriptionStatusURL := fs.String("subscription-status-url", "", "Production App Store Server Notifications HTTPS URL (sets version V2)")
+	sandboxSubscriptionStatusURL := fs.String("sandbox-subscription-status-url", "", "Sandbox App Store Server Notifications HTTPS URL (sets version V2)")
 	output := shared.BindOutputFlags(fs)
 
 	return &ffcli.Command{
 		Name:       "update",
-		ShortUsage: "asc apps update --id APP_ID [--bundle-id BUNDLE_ID] [--primary-locale LOCALE] [--content-rights DECLARATION]",
-		ShortHelp:  "Update an app's bundle ID, primary locale, or content rights declaration.",
-		LongHelp: `Update an app's bundle ID, primary locale, or content rights declaration.
+		ShortUsage: "asc apps update --id APP_ID [--bundle-id BUNDLE_ID] [--primary-locale LOCALE] [--content-rights DECLARATION] [--subscription-status-url URL] [--sandbox-subscription-status-url URL]",
+		ShortHelp:  "Update app metadata and App Store Server Notifications URLs.",
+		LongHelp: `Update app metadata and App Store Server Notifications URLs.
+
+Notification URLs must use HTTPS without credentials or fragments. Each supplied
+URL is configured for version V2. Omitted endpoints and other fields stay unchanged.
 
 Examples:
   asc apps update --id "APP_ID" --bundle-id "com.example.app"
   asc apps update --id "APP_ID" --primary-locale "en-US"
-  asc apps update --id "APP_ID" --content-rights "DOES_NOT_USE_THIRD_PARTY_CONTENT"`,
+  asc apps update --id "APP_ID" --content-rights "DOES_NOT_USE_THIRD_PARTY_CONTENT"
+  asc apps update --id "APP_ID" --subscription-status-url "https://example.com/notifications"
+  asc apps update --id "APP_ID" --sandbox-subscription-status-url "https://example.com/sandbox-notifications"`,
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
 			idValue := strings.TrimSpace(*id)
 			if idValue == "" {
 				fmt.Fprintln(os.Stderr, "Error: --id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--id")
 			}
 
 			attrs := asc.AppUpdateAttributes{}
@@ -302,9 +315,27 @@ Examples:
 					return flag.ErrHelp
 				}
 			}
-			if attrs.BundleID == nil && attrs.PrimaryLocale == nil && attrs.ContentRightsDeclaration == nil {
-				fmt.Fprintln(os.Stderr, "Error: --bundle-id, --primary-locale, or --content-rights is required")
-				return flag.ErrHelp
+			if _, provided := appFlagWasProvided(fs, "subscription-status-url"); provided {
+				value, err := validateNotificationURL(*subscriptionStatusURL)
+				if err != nil {
+					return shared.UsageErrorf("--subscription-status-url: %v", err)
+				}
+				version := asc.SubscriptionStatusURLVersionV2
+				attrs.SubscriptionStatusURL = &value
+				attrs.SubscriptionStatusURLVersion = &version
+			}
+			if _, provided := appFlagWasProvided(fs, "sandbox-subscription-status-url"); provided {
+				value, err := validateNotificationURL(*sandboxSubscriptionStatusURL)
+				if err != nil {
+					return shared.UsageErrorf("--sandbox-subscription-status-url: %v", err)
+				}
+				version := asc.SubscriptionStatusURLVersionV2
+				attrs.SubscriptionStatusURLForSandbox = &value
+				attrs.SubscriptionStatusURLVersionForSandbox = &version
+			}
+			if attrs.BundleID == nil && attrs.PrimaryLocale == nil && attrs.ContentRightsDeclaration == nil && attrs.SubscriptionStatusURL == nil && attrs.SubscriptionStatusURLForSandbox == nil {
+				fmt.Fprintln(os.Stderr, "Error: at least one update field is required (--bundle-id, --primary-locale, --content-rights, --subscription-status-url, --sandbox-subscription-status-url)")
+				return shared.MissingRequiredUsageError("")
 			}
 
 			client, err := shared.GetASCClient()
@@ -325,16 +356,69 @@ Examples:
 	}
 }
 
-func appsList(ctx context.Context, output string, pretty bool, bundleID string, name string, sku string, sort string, limit int, next string, paginate bool) error {
+func appsList(ctx context.Context, fs *flag.FlagSet, output string, pretty bool, bundleID string, name string, sku string, versionState string, reviewSubmissionState string, sort string, limit int, next string, paginate bool, appInfoFields string, iapFields string, subscriptionGroupFields string) error {
 	if limit != 0 && (limit < 1 || limit > 200) {
-		return fmt.Errorf("apps: --limit must be between 1 and 200")
+		return shared.UsageErrorf("apps: --limit must be between 1 and 200")
 	}
 	if err := shared.ValidateNextURL(next); err != nil {
-		return fmt.Errorf("apps: %w", err)
+		return shared.UsageErrorf("apps: %v", err)
 	}
-	if err := shared.ValidateSort(sort, "name", "-name", "bundleId", "-bundleId"); err != nil {
-		return fmt.Errorf("apps: %w", err)
+	if err := shared.ValidateSort(sort, "name", "-name", "bundleId", "-bundleId", "sku", "-sku"); err != nil {
+		return shared.UsageErrorf("apps: %v", err)
 	}
+	if strings.TrimSpace(next) != "" {
+		if flagName, ok := appFlagWasProvided(
+			fs,
+			"bundle-id", "name", "sku", "version-state", "review-submission-state", "sort", "limit",
+			"app-info-fields", "iap-fields", "subscription-group-fields",
+		); ok {
+			return shared.WithDiagnostic(
+				shared.UsageErrorf("--next cannot be combined with %s", flagName),
+				shared.DiagnosticConflictingInput,
+				flagName,
+			)
+		}
+	}
+	versionStateValues := shared.SplitCSVUpper(versionState)
+	if _, provided := appFlagWasProvided(fs, "version-state"); provided {
+		if strings.TrimSpace(versionState) == "" {
+			return shared.UsageError("--version-state must not be empty")
+		}
+		if csvContainsEmptyValue(versionState) {
+			return shared.UsageError("--version-state must not contain empty values")
+		}
+	}
+	versionStateValues, err := normalizeAppVersionStateFilters(versionStateValues)
+	if err != nil {
+		return shared.UsageError(err.Error())
+	}
+	reviewSubmissionStateValues := shared.SplitCSVUpper(reviewSubmissionState)
+	if _, provided := appFlagWasProvided(fs, "review-submission-state"); provided {
+		if strings.TrimSpace(reviewSubmissionState) == "" {
+			return shared.UsageError("--review-submission-state must not be empty")
+		}
+		if csvContainsEmptyValue(reviewSubmissionState) {
+			return shared.UsageError("--review-submission-state must not contain empty values")
+		}
+	}
+	reviewSubmissionStateValues, err = normalizeReviewSubmissionStateFilters(reviewSubmissionStateValues)
+	if err != nil {
+		return shared.UsageError(err.Error())
+	}
+	appInfoFieldValues, err := normalizeSparseField(fs, appInfoFields, appInfoSparseFields441, "--app-info-fields")
+	if err != nil {
+		return shared.UsageError(err.Error())
+	}
+	iapFieldValues, err := normalizeSparseField(fs, iapFields, appInAppPurchaseSparseFields441, "--iap-fields")
+	if err != nil {
+		return shared.UsageError(err.Error())
+	}
+	groupFieldValues, err := normalizeSparseField(fs, subscriptionGroupFields, appSubscriptionGroupSparseFields441, "--subscription-group-fields")
+	if err != nil {
+		return shared.UsageError(err.Error())
+	}
+
+	shared.WarnDeprecatedAppInfoFields(appInfoFieldValues, next)
 
 	client, err := shared.GetASCClient()
 	if err != nil {
@@ -348,16 +432,33 @@ func appsList(ctx context.Context, output string, pretty bool, bundleID string, 
 		asc.WithAppsBundleIDs(shared.SplitCSV(bundleID)),
 		asc.WithAppsNames(shared.SplitCSV(name)),
 		asc.WithAppsSKUs(shared.SplitCSV(sku)),
+		asc.WithAppsVersionStates(versionStateValues),
+		asc.WithAppsReviewSubmissionStates(reviewSubmissionStateValues),
 		asc.WithAppsLimit(limit),
 		asc.WithAppsNextURL(next),
+		asc.WithAppsAppInfoFields(appInfoFieldValues),
+		asc.WithAppsInAppPurchaseFields(iapFieldValues),
+		asc.WithAppsSubscriptionGroupFields(groupFieldValues),
 	}
+	includeValues := []string{}
+	if len(appInfoFieldValues) > 0 {
+		includeValues = addInclude(includeValues, "appInfos")
+	}
+	if len(iapFieldValues) > 0 {
+		includeValues = addInclude(includeValues, "inAppPurchases")
+	}
+	if len(groupFieldValues) > 0 {
+		includeValues = addInclude(includeValues, "subscriptionGroups")
+	}
+	opts = append(opts, asc.WithAppsInclude(includeValues))
 	if strings.TrimSpace(sort) != "" {
 		opts = append(opts, asc.WithAppsSort(sort))
 	}
 
 	if paginate {
 		paginateOpts := append(opts, asc.WithAppsLimit(200))
-		apps, err := shared.PaginateWithSpinner(requestCtx,
+		apps, err := shared.PaginateWithSpinner(
+			requestCtx,
 			func(ctx context.Context) (asc.PaginatedResponse, error) {
 				return client.GetApps(ctx, paginateOpts...)
 			},
@@ -378,4 +479,28 @@ func appsList(ctx context.Context, output string, pretty bool, bundleID string, 
 	}
 
 	return shared.PrintOutput(apps, output, pretty)
+}
+
+func csvContainsEmptyValue(value string) bool {
+	for _, element := range strings.Split(value, ",") {
+		if strings.TrimSpace(element) == "" {
+			return true
+		}
+	}
+	return false
+}
+
+func validateNotificationURL(value string) (string, error) {
+	value = strings.TrimSpace(value)
+	parsed, err := url.Parse(value)
+	if err != nil || parsed.Scheme != "https" || parsed.Hostname() == "" || parsed.User != nil || strings.Contains(value, "#") {
+		return "", fmt.Errorf("must be an absolute HTTPS URL without credentials or fragments")
+	}
+	return value, nil
+}
+
+// These attributes are supported by GET /v1/apps/{id} and decoded by AppAttributes.
+var appAttributeFields = []string{
+	"name", "bundleId", "sku", "primaryLocale", "contentRightsDeclaration",
+	"subscriptionStatusUrl", "subscriptionStatusUrlVersion", "subscriptionStatusUrlForSandbox", "subscriptionStatusUrlVersionForSandbox",
 }

@@ -11,6 +11,7 @@ import (
 
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/asc"
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/cli/shared"
+	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/validation"
 )
 
 // AppSetupCommand returns the app-setup command group.
@@ -26,10 +27,10 @@ func AppSetupCommand() *ffcli.Command {
 Examples:
   asc app-setup info set --app "APP_ID" --primary-locale "en-US" --bundle-id "com.example.app"
   asc app-setup categories set --app "APP_ID" --primary GAMES
-  asc app-setup availability set --app "APP_ID" --territory "USA,GBR" --available true --available-in-new-territories true
-  asc app-setup availability set --app "APP_ID" --all-territories --available true --available-in-new-territories true
+  asc app-setup availability edit --app "APP_ID" --territory "USA,GBR" --available true
+  asc app-setup availability edit --app "APP_ID" --all-territories --available true
   asc app-setup pricing set --app "APP_ID" --price-point "PRICE_POINT_ID" --base-territory "USA"
-  asc app-setup pricing set --app "APP_ID" --free --start-date "2024-03-01"
+  asc app-setup pricing set --app "APP_ID" --free --start-date "YYYY-MM-DD"
   asc app-setup localizations upload --version "VERSION_ID" --path "./localizations"`,
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
@@ -73,11 +74,11 @@ Examples:
 func AppSetupInfoSetCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("app-setup info set", flag.ExitOnError)
 
-	appID := fs.String("app", os.Getenv("ASC_APP_ID"), "App Store Connect app ID (required)")
+	appID := fs.String("app", "", "App Store Connect app ID (required)")
 	bundleID := fs.String("bundle-id", "", "Bundle ID to set")
 	primaryLocale := fs.String("primary-locale", "", "Primary locale (e.g., en-US)")
 	locale := fs.String("locale", "", "Locale for app info localization (defaults to --primary-locale)")
-	appInfoID := fs.String("app-info", "", "App Info ID (optional override)")
+	appInfoID := shared.BindResourceIDFlag(fs, "app-info", "appInfos", "App Info ID (optional override)")
 	name := fs.String("name", "", "Localized app name")
 	subtitle := fs.String("subtitle", "", "Localized app subtitle")
 	privacyPolicyURL := fs.String("privacy-policy-url", "", "Localized privacy policy URL")
@@ -100,10 +101,13 @@ Examples:
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
-			appIDValue := strings.TrimSpace(*appID)
+			appIDValue, err := shared.AppIDFlagValue(shared.ResolveAppID(*appID))
+			if err != nil {
+				return err
+			}
 			if appIDValue == "" {
-				fmt.Fprintln(os.Stderr, "Error: --app is required")
-				return flag.ErrHelp
+				fmt.Fprintln(os.Stderr, "Error: --app is required (or set ASC_APP_ID)")
+				return shared.MissingRequiredUsageError("--app")
 			}
 
 			bundleIDValue := strings.TrimSpace(*bundleID)
@@ -139,7 +143,7 @@ Examples:
 			}
 			if hasLocalization && localeValue == "" {
 				fmt.Fprintln(os.Stderr, "Error: --locale is required for app info localization updates")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--locale")
 			}
 			if localeValue != "" {
 				if err := shared.ValidateBuildLocalizationLocale(localeValue); err != nil {
@@ -160,6 +164,13 @@ Examples:
 				}
 			}
 
+			for _, issue := range validation.AppInfoLocalizationLengthIssues(validation.AppInfoLocalization{
+				Name:     nameValue,
+				Subtitle: subtitleValue,
+			}) {
+				return shared.UsageErrorf("--%s exceeds %d %s", issue.Field, issue.Limit, issue.Unit)
+			}
+
 			client, err := shared.GetASCClient()
 			if err != nil {
 				return fmt.Errorf("app-setup info set: %w", err)
@@ -167,6 +178,37 @@ Examples:
 
 			requestCtx, cancel := shared.ContextWithTimeout(ctx)
 			defer cancel()
+
+			var localizationPlan *shared.AppInfoLocalizationUpsertPlan
+			if hasLocalization {
+				localizationValues := make(map[string]string, 5)
+				if nameValue != "" {
+					localizationValues["name"] = nameValue
+				}
+				if subtitleValue != "" {
+					localizationValues["subtitle"] = subtitleValue
+				}
+				if privacyPolicyURLValue != "" {
+					localizationValues["privacyPolicyUrl"] = privacyPolicyURLValue
+				}
+				if privacyChoicesURLValue != "" {
+					localizationValues["privacyChoicesUrl"] = privacyChoicesURLValue
+				}
+				if privacyPolicyTextValue != "" {
+					localizationValues["privacyPolicyText"] = privacyPolicyTextValue
+				}
+				localizationPlan, err = shared.PlanAppInfoLocalizationUpsert(
+					requestCtx,
+					client,
+					appIDValue,
+					strings.TrimSpace(*appInfoID),
+					localeValue,
+					localizationValues,
+				)
+				if err != nil {
+					return fmt.Errorf("app-setup info set: %w", err)
+				}
+			}
 
 			var appResp *asc.AppResponse
 			if hasAppUpdate {
@@ -188,53 +230,9 @@ Examples:
 
 			var appInfoResp *asc.AppInfoLocalizationResponse
 			if hasLocalization {
-				resolvedAppInfoID, err := shared.ResolveAppInfoID(requestCtx, client, appIDValue, strings.TrimSpace(*appInfoID))
+				appInfoResp, _, err = shared.ApplyAppInfoLocalizationUpsert(requestCtx, client, localizationPlan)
 				if err != nil {
 					return fmt.Errorf("app-setup info set: %w", err)
-				}
-
-				localizations, err := client.GetAppInfoLocalizations(
-					requestCtx,
-					resolvedAppInfoID,
-					asc.WithAppInfoLocalizationsLimit(200),
-					asc.WithAppInfoLocalizationLocales([]string{localeValue}),
-				)
-				if err != nil {
-					return fmt.Errorf("app-setup info set: failed to fetch app info localizations: %w", err)
-				}
-
-				attrs := asc.AppInfoLocalizationAttributes{}
-				if nameValue != "" {
-					attrs.Name = nameValue
-				}
-				if subtitleValue != "" {
-					attrs.Subtitle = subtitleValue
-				}
-				if privacyPolicyURLValue != "" {
-					attrs.PrivacyPolicyURL = privacyPolicyURLValue
-				}
-				if privacyChoicesURLValue != "" {
-					attrs.PrivacyChoicesURL = privacyChoicesURLValue
-				}
-				if privacyPolicyTextValue != "" {
-					attrs.PrivacyPolicyText = privacyPolicyTextValue
-				}
-
-				if len(localizations.Data) == 0 {
-					attrs.Locale = localeValue
-					appInfoResp, err = client.CreateAppInfoLocalization(requestCtx, resolvedAppInfoID, attrs)
-					if err != nil {
-						return fmt.Errorf("app-setup info set: %w", err)
-					}
-				} else {
-					localizationID := strings.TrimSpace(localizations.Data[0].ID)
-					if localizationID == "" {
-						return fmt.Errorf("app-setup info set: localization id is empty")
-					}
-					appInfoResp, err = client.UpdateAppInfoLocalization(requestCtx, localizationID, attrs)
-					if err != nil {
-						return fmt.Errorf("app-setup info set: %w", err)
-					}
 				}
 			}
 
@@ -294,12 +292,12 @@ func AppSetupAvailabilityCommand() *ffcli.Command {
 	return &ffcli.Command{
 		Name:       "availability",
 		ShortUsage: "asc app-setup availability <subcommand> [flags]",
-		ShortHelp:  "Set app availability.",
-		LongHelp: `Set app availability for territories.
+		ShortHelp:  "Edit app availability.",
+		LongHelp: `Edit app availability for territories.
 
 Examples:
-  asc app-setup availability set --app "APP_ID" --territory "USA,GBR" --available true --available-in-new-territories true
-  asc app-setup availability set --app "APP_ID" --all-territories --available true --available-in-new-territories true`,
+  asc app-setup availability edit --app "APP_ID" --territory "USA,GBR" --available true
+  asc app-setup availability edit --app "APP_ID" --all-territories --available true`,
 		UsageFunc: shared.DefaultUsageFunc,
 		Subcommands: []*ffcli.Command{
 			AppSetupAvailabilitySetCommand(),
@@ -310,22 +308,23 @@ Examples:
 	}
 }
 
-// AppSetupAvailabilitySetCommand returns the availability set subcommand.
+// AppSetupAvailabilitySetCommand returns the availability edit subcommand.
 func AppSetupAvailabilitySetCommand() *ffcli.Command {
 	return shared.NewAvailabilitySetCommand(shared.AvailabilitySetCommandConfig{
-		FlagSetName: "app-setup availability set",
-		CommandName: "set",
-		ShortUsage:  "asc app-setup availability set [flags]",
-		ShortHelp:   "Set app availability for territories.",
-		LongHelp: `Set app availability for territories.
+		FlagSetName: "app-setup availability edit",
+		CommandName: "edit",
+		ShortUsage:  "asc app-setup availability edit [flags]",
+		ShortHelp:   "Edit app availability for territories.",
+		LongHelp: `Edit app availability for territories.
 
 Examples:
-  asc app-setup availability set --app "123456789" --territory "USA,GBR" --available true --available-in-new-territories true
-  asc app-setup availability set --app "123456789" --all-territories --available true --available-in-new-territories true
+  asc app-setup availability edit --app "123456789" --territory "USA,GBR" --available true
+  asc app-setup availability edit --app "123456789" --all-territories --available true
 
 Note:
-  This command only updates an existing app availability. If the app has no availability record yet, initialize availability in App Store Connect first.`,
-		ErrorPrefix:                      "app-setup availability set",
+  This command only updates an existing app availability. If the app has no availability record yet, initialize availability in App Store Connect first.
+  If --available-in-new-territories is supplied, it verifies the existing policy; Apple does not expose an update operation for that setting.`,
+		ErrorPrefix:                      "app-setup availability edit",
 		IncludeAvailableInNewTerritories: true,
 	})
 }
@@ -340,7 +339,7 @@ func AppSetupPricingCommand() *ffcli.Command {
 
 Examples:
   asc app-setup pricing set --app "APP_ID" --price-point "PRICE_POINT_ID"
-  asc app-setup pricing set --app "APP_ID" --free --start-date "2024-03-01"`,
+  asc app-setup pricing set --app "APP_ID" --free --start-date "YYYY-MM-DD"`,
 		UsageFunc: shared.DefaultUsageFunc,
 		Subcommands: []*ffcli.Command{
 			AppSetupPricingSetCommand(),
@@ -360,12 +359,16 @@ func AppSetupPricingSetCommand() *ffcli.Command {
 		ShortHelp:   "Set app pricing.",
 		LongHelp: `Set app pricing.
 
+--start-date defaults to today's date in US Pacific time when omitted, because
+App Store Connect uses that date as today; the chosen date is printed on
+stderr. Apple requires the start date to be today or later.
+
 Examples:
   asc app-setup pricing set --app "APP_ID" --price-point "PRICE_POINT_ID" --base-territory "USA"
-  asc app-setup pricing set --app "APP_ID" --price-point "PRICE_POINT_ID" --base-territory "USA" --start-date "2024-03-01"
-  asc app-setup pricing set --app "APP_ID" --free --start-date "2024-03-01"`,
+  asc app-setup pricing set --app "APP_ID" --price-point "PRICE_POINT_ID" --base-territory "USA" --start-date "YYYY-MM-DD"
+  asc app-setup pricing set --app "APP_ID" --free --start-date "YYYY-MM-DD"`,
 		ErrorPrefix:           "app-setup pricing set",
-		StartDateHelp:         "Start date (YYYY-MM-DD, default: today)",
+		StartDateHelp:         "Start date (YYYY-MM-DD, default: today in US Pacific time; Apple requires today or later)",
 		StartDateDefaultToday: true,
 		ResolveBaseTerritory:  true,
 	})
@@ -396,9 +399,9 @@ Examples:
 func AppSetupLocalizationsUploadCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("app-setup localizations upload", flag.ExitOnError)
 
-	versionID := fs.String("version", "", "App Store version ID")
+	versionID := shared.BindResourceIDFlag(fs, "version", "appStoreVersions", "App Store version ID")
 	appID := fs.String("app", "", "App Store Connect app ID (or ASC_APP_ID env)")
-	appInfoID := fs.String("app-info", "", "App Info ID (optional override)")
+	appInfoID := shared.BindResourceIDFlag(fs, "app-info", "appInfos", "App Info ID (optional override)")
 	locType := fs.String("type", shared.LocalizationTypeVersion, "Localization type: version (default) or app-info")
 	locale := fs.String("locale", "", "Filter by locale(s), comma-separated")
 	path := fs.String("path", "", "Input path (directory or .strings file)")
@@ -421,7 +424,7 @@ Examples:
 		Exec: func(ctx context.Context, args []string) error {
 			if strings.TrimSpace(*path) == "" {
 				fmt.Fprintln(os.Stderr, "Error: --path is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--path")
 			}
 
 			normalizedType, err := shared.NormalizeLocalizationType(*locType)
@@ -435,7 +438,18 @@ Examples:
 			case shared.LocalizationTypeVersion:
 				if strings.TrimSpace(*versionID) == "" {
 					fmt.Fprintln(os.Stderr, "Error: --version is required for version localizations")
-					return flag.ErrHelp
+					return shared.MissingRequiredUsageError("--version")
+				}
+
+				valuesByLocale, err := shared.ReadLocalizationStrings(*path, locales)
+				if err != nil {
+					if shared.IsLocalizationInputError(err) {
+						return shared.UsageError(err.Error())
+					}
+					return fmt.Errorf("app-setup localizations upload: %w", err)
+				}
+				if err := shared.ValidateVersionLocalizationValueSet(valuesByLocale); err != nil {
+					return shared.UsageError(err.Error())
 				}
 
 				client, err := shared.GetASCClient()
@@ -443,32 +457,50 @@ Examples:
 					return fmt.Errorf("app-setup localizations upload: %w", err)
 				}
 
-				requestCtx, cancel := shared.ContextWithTimeout(ctx)
-				defer cancel()
-
-				valuesByLocale, err := shared.ReadLocalizationStrings(*path, locales)
-				if err != nil {
+				results, err := shared.UploadVersionLocalizations(ctx, client, strings.TrimSpace(*versionID), valuesByLocale, *dryRun)
+				if err != nil && len(results) == 0 {
+					if shared.IsLocalizationInputError(err) {
+						return shared.UsageError(err.Error())
+					}
 					return fmt.Errorf("app-setup localizations upload: %w", err)
 				}
-
-				results, err := shared.UploadVersionLocalizations(requestCtx, client, strings.TrimSpace(*versionID), valuesByLocale, *dryRun)
-				if err != nil {
-					return fmt.Errorf("app-setup localizations upload: %w", err)
-				}
+				uploadErr := err
 
 				result := asc.LocalizationUploadResult{
 					Type:      normalizedType,
 					VersionID: strings.TrimSpace(*versionID),
 					DryRun:    *dryRun,
+					InputPath: strings.TrimSpace(*path),
 					Results:   results,
 				}
+				shared.FinalizeLocalizationUploadResult(&result, "app-setup localizations upload")
 
-				return shared.PrintOutput(&result, *output.Output, *output.Pretty)
+				if err := shared.PrintOutputWithRenderers(
+					&result, *output.Output, *output.Pretty,
+					func() error { return shared.RenderLocalizationUploadResult(&result, false) },
+					func() error { return shared.RenderLocalizationUploadResult(&result, true) },
+				); err != nil {
+					return err
+				}
+				if uploadErr != nil || result.FailureArtifactError != "" {
+					return appSetupLocalizationUploadReportedError(result.Failed, uploadErr, result.FailureArtifactError)
+				}
+				return nil
 			case shared.LocalizationTypeAppInfo:
 				resolvedAppID := shared.ResolveAppID(*appID)
 				if resolvedAppID == "" {
 					fmt.Fprintln(os.Stderr, "Error: --app is required for app-info localizations")
-					return flag.ErrHelp
+					return shared.MissingRequiredUsageError("--app")
+				}
+				valuesByLocale, err := shared.ReadLocalizationStrings(*path, locales)
+				if err != nil {
+					if shared.IsLocalizationInputError(err) {
+						return shared.UsageError(err.Error())
+					}
+					return fmt.Errorf("app-setup localizations upload: %w", err)
+				}
+				if err := shared.ValidateAppInfoLocalizationValueSet(valuesByLocale); err != nil {
+					return shared.UsageError(err.Error())
 				}
 
 				client, err := shared.GetASCClient()
@@ -476,36 +508,57 @@ Examples:
 					return fmt.Errorf("app-setup localizations upload: %w", err)
 				}
 
-				requestCtx, cancel := shared.ContextWithTimeout(ctx)
-				defer cancel()
-
-				appInfo, err := shared.ResolveAppInfoID(requestCtx, client, resolvedAppID, strings.TrimSpace(*appInfoID))
+				appInfo, err := shared.RetryReadWithFreshTimeout(ctx, func(resolveCtx context.Context) (string, error) {
+					return shared.ResolveAppInfoID(resolveCtx, client, resolvedAppID, strings.TrimSpace(*appInfoID))
+				})
 				if err != nil {
 					return fmt.Errorf("app-setup localizations upload: %w", err)
 				}
 
-				valuesByLocale, err := shared.ReadLocalizationStrings(*path, locales)
-				if err != nil {
+				results, err := shared.UploadAppInfoLocalizations(ctx, client, appInfo, valuesByLocale, *dryRun)
+				if err != nil && len(results) == 0 {
+					if shared.IsLocalizationInputError(err) {
+						return shared.UsageError(err.Error())
+					}
 					return fmt.Errorf("app-setup localizations upload: %w", err)
 				}
-
-				results, err := shared.UploadAppInfoLocalizations(requestCtx, client, appInfo, valuesByLocale, *dryRun)
-				if err != nil {
-					return fmt.Errorf("app-setup localizations upload: %w", err)
-				}
+				uploadErr := err
 
 				result := asc.LocalizationUploadResult{
 					Type:      normalizedType,
 					AppID:     resolvedAppID,
 					AppInfoID: appInfo,
 					DryRun:    *dryRun,
+					InputPath: strings.TrimSpace(*path),
 					Results:   results,
 				}
+				shared.FinalizeLocalizationUploadResult(&result, "app-setup localizations upload")
 
-				return shared.PrintOutput(&result, *output.Output, *output.Pretty)
+				if err := shared.PrintOutputWithRenderers(
+					&result, *output.Output, *output.Pretty,
+					func() error { return shared.RenderLocalizationUploadResult(&result, false) },
+					func() error { return shared.RenderLocalizationUploadResult(&result, true) },
+				); err != nil {
+					return err
+				}
+				if uploadErr != nil || result.FailureArtifactError != "" {
+					return appSetupLocalizationUploadReportedError(result.Failed, uploadErr, result.FailureArtifactError)
+				}
+				return nil
 			default:
 				return fmt.Errorf("app-setup localizations upload: unsupported type %q", normalizedType)
 			}
 		},
 	}
+}
+
+func appSetupLocalizationUploadReportedError(failed int, uploadErr error, artifactError string) error {
+	message := fmt.Sprintf("app-setup localizations upload: %d locale(s) failed", failed)
+	if uploadErr != nil {
+		message += ": " + uploadErr.Error()
+	}
+	if strings.TrimSpace(artifactError) != "" {
+		message += "; write failure artifact: " + artifactError
+	}
+	return shared.NewReportedError(fmt.Errorf("%s", message))
 }

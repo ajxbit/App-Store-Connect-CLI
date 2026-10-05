@@ -11,6 +11,7 @@ func TestCategoriesCommandShape(t *testing.T) {
 	cmd := CategoriesCommand()
 	if cmd == nil {
 		t.Fatal("expected categories command")
+		return
 	}
 	if cmd.Name != "categories" {
 		t.Fatalf("unexpected command name: %q", cmd.Name)
@@ -30,8 +31,8 @@ func TestCategoriesValidationErrors(t *testing.T) {
 			t.Fatalf("parse error: %v", err)
 		}
 		err := cmd.Exec(context.Background(), nil)
-		if err == nil || errors.Is(err, flag.ErrHelp) {
-			t.Fatalf("expected non-ErrHelp error for invalid limit, got %v", err)
+		if err == nil || !errors.Is(err, flag.ErrHelp) {
+			t.Fatalf("expected ErrHelp for invalid limit, got %v", err)
 		}
 	})
 

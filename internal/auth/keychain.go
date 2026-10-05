@@ -2,6 +2,7 @@ package auth
 
 import (
 	"crypto/ecdsa"
+	"crypto/elliptic"
 	"crypto/x509"
 	"encoding/json"
 	"encoding/pem"
@@ -11,6 +12,8 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -19,6 +22,7 @@ import (
 	"github.com/99designs/keyring"
 
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/config"
+	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/rootfs"
 )
 
 // ErrKeychainAccessDenied is returned when a keychain backend is available but
@@ -30,6 +34,64 @@ var ErrKeychainAccessDenied = errors.New("keychain access denied")
 // ErrDefaultCredentialsNotFound indicates that stored credentials exist, but no
 // default selection resolves for the current no-profile lookup.
 var ErrDefaultCredentialsNotFound = errors.New("default credentials not found")
+
+// PrivateKeyErrorKind classifies private-key failures without exposing key
+// material or filesystem paths to callers that only need recovery metadata.
+type PrivateKeyErrorKind string
+
+const (
+	PrivateKeyNotFound             PrivateKeyErrorKind = "not_found"
+	PrivateKeyPermissionDenied     PrivateKeyErrorKind = "permission_denied"
+	PrivateKeyPermissionsInsecure  PrivateKeyErrorKind = "permissions_insecure"
+	PrivateKeyInvalidFormat        PrivateKeyErrorKind = "invalid_format"
+	PrivateKeyUnsupportedAlgorithm PrivateKeyErrorKind = "unsupported_algorithm"
+	PrivateKeyAccessFailed         PrivateKeyErrorKind = "access_failed"
+)
+
+// PrivateKeyError preserves the existing user-facing error while carrying a
+// bounded reason that CLI diagnostics can classify without parsing text.
+type PrivateKeyError struct {
+	Kind PrivateKeyErrorKind
+	err  error
+}
+
+func (e *PrivateKeyError) Error() string {
+	if e == nil || e.err == nil {
+		return "private key error"
+	}
+	return e.err.Error()
+}
+
+func (e *PrivateKeyError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.err
+}
+
+// PrivateKeyErrorKindOf returns the structured kind carried by err.
+func PrivateKeyErrorKindOf(err error) (PrivateKeyErrorKind, bool) {
+	var keyErr *PrivateKeyError
+	if !errors.As(err, &keyErr) || keyErr == nil {
+		return "", false
+	}
+	return keyErr.Kind, true
+}
+
+func newPrivateKeyError(kind PrivateKeyErrorKind, err error) error {
+	return &PrivateKeyError{Kind: kind, err: err}
+}
+
+func privateKeyAccessErrorKind(err error) PrivateKeyErrorKind {
+	switch {
+	case errors.Is(err, os.ErrNotExist):
+		return PrivateKeyNotFound
+	case errors.Is(err, os.ErrPermission):
+		return PrivateKeyPermissionDenied
+	default:
+		return PrivateKeyAccessFailed
+	}
+}
 
 var (
 	invalidBypassKeychainWarningsMu sync.Mutex
@@ -51,6 +113,7 @@ type Credential struct {
 	IssuerID              string    `json:"issuer_id"`
 	PrivateKeyPath        string    `json:"private_key_path"`
 	PrivateKeyPEM         string    `json:"-"`
+	KeyType               string    `json:"key_type,omitempty"`
 	IsDefault             bool      `json:"is_default"`
 	Source                string    `json:"source,omitempty"`
 	SourcePath            string    `json:"source_path,omitempty"`
@@ -78,16 +141,43 @@ type Credentials struct {
 	Keys       []Credential `json:"keys"`
 }
 
+// MigrateKeychainToConfigOptions controls keychain-to-config migration.
+type MigrateKeychainToConfigOptions struct {
+	ConfigPath     string
+	PrivateKeyDir  string
+	RemoveKeychain bool
+}
+
+// MigratedCredential reports one profile copied into config.json.
+type MigratedCredential struct {
+	Name               string `json:"name"`
+	KeyID              string `json:"keyId"`
+	PrivateKeyPath     string `json:"privateKeyPath"`
+	ExportedPrivateKey bool   `json:"exportedPrivateKey,omitempty"`
+	keychainName       string
+}
+
+// MigrateKeychainToConfigResult summarizes a keychain-to-config migration.
+type MigrateKeychainToConfigResult struct {
+	ConfigPath          string               `json:"configPath"`
+	PrivateKeyDir       string               `json:"privateKeyDir,omitempty"`
+	Migrated            []MigratedCredential `json:"migrated"`
+	RemovedFromKeychain bool                 `json:"removedFromKeychain"`
+	Warnings            []string             `json:"warnings,omitempty"`
+}
+
 type credentialPayload struct {
 	KeyID          string `json:"key_id"`
 	IssuerID       string `json:"issuer_id"`
 	PrivateKeyPath string `json:"private_key_path"`
 	PrivateKeyPEM  string `json:"private_key_pem,omitempty"`
+	KeyType        string `json:"key_type,omitempty"`
 }
 
 type credentialMetadata struct {
 	KeyID    string `json:"key_id,omitempty"`
 	IssuerID string `json:"issuer_id,omitempty"`
+	KeyType  string `json:"key_type,omitempty"`
 }
 
 func keyringConfig(keychainName string) keyring.Config {
@@ -192,45 +282,54 @@ func ValidateKeyFile(path string) error {
 }
 
 func validateKeyFileForOS(path, goos string) error {
-	file, err := os.Open(path)
+	if info, err := os.Lstat(path); err == nil && info.IsDir() {
+		return newPrivateKeyError(PrivateKeyInvalidFormat, errors.New("private key path is a directory"))
+	}
+	file, err := rootfs.OpenFile(path)
 	if err != nil {
-		return fmt.Errorf("failed to open key file: %w", err)
+		return newPrivateKeyError(privateKeyAccessErrorKind(err), fmt.Errorf("failed to open key file: %w", err))
 	}
 	defer file.Close()
 
 	info, err := file.Stat()
 	if err != nil {
-		return fmt.Errorf("failed to stat key file: %w", err)
-	}
-	if info.IsDir() {
-		return fmt.Errorf("private key path is a directory")
+		return newPrivateKeyError(privateKeyAccessErrorKind(err), fmt.Errorf("failed to stat key file: %w", err))
 	}
 	if filePermissionsTooPermissiveForOS(info.Mode(), goos) {
-		return fmt.Errorf("private key file is too permissive; run: chmod 600 %q", path)
+		if command, safe := FilePermissionRemediationCommand(path); safe {
+			return newPrivateKeyError(PrivateKeyPermissionsInsecure, fmt.Errorf("private key file is too permissive; run: %s", command))
+		}
+		return newPrivateKeyError(PrivateKeyPermissionsInsecure, errors.New("private key file is too permissive; use auth login --fix-permissions or auth doctor --fix --confirm"))
 	}
 
 	data, err := io.ReadAll(file)
 	if err != nil {
-		return fmt.Errorf("failed to read key file: %w", err)
+		return newPrivateKeyError(privateKeyAccessErrorKind(err), fmt.Errorf("failed to read key file: %w", err))
 	}
 
-	// Parse the PEM block
 	block, _ := pem.Decode(data)
 	if block == nil {
-		return fmt.Errorf("invalid PEM data")
+		return newPrivateKeyError(PrivateKeyInvalidFormat, errors.New("invalid PEM data"))
 	}
 
-	// Try to parse as PKCS8 (App Store Connect keys are ECDSA)
+	var privateKey *ecdsa.PrivateKey
 	if key, err := x509.ParsePKCS8PrivateKey(block.Bytes); err == nil {
-		if _, ok := key.(*ecdsa.PrivateKey); ok {
-			return nil
+		var ok bool
+		privateKey, ok = key.(*ecdsa.PrivateKey)
+		if !ok {
+			return newPrivateKeyError(PrivateKeyUnsupportedAlgorithm, errors.New("private key is not ECDSA"))
 		}
-		return fmt.Errorf("private key is not ECDSA")
+	} else {
+		privateKey, err = x509.ParseECPrivateKey(block.Bytes)
+		if err != nil {
+			if _, rsaErr := x509.ParsePKCS1PrivateKey(block.Bytes); rsaErr == nil {
+				return newPrivateKeyError(PrivateKeyUnsupportedAlgorithm, errors.New("private key is not ECDSA"))
+			}
+			return newPrivateKeyError(PrivateKeyInvalidFormat, fmt.Errorf("invalid private key format: %w", err))
+		}
 	}
-
-	// Try SEC1 EC private key as fallback
-	if _, err := x509.ParseECPrivateKey(block.Bytes); err != nil {
-		return fmt.Errorf("invalid private key format: %w", err)
+	if privateKey.Curve != elliptic.P256() {
+		return newPrivateKeyError(PrivateKeyUnsupportedAlgorithm, errors.New("private key must use the P-256 curve"))
 	}
 
 	return nil
@@ -238,9 +337,17 @@ func validateKeyFileForOS(path, goos string) error {
 
 // LoadPrivateKey loads the private key from the file
 func LoadPrivateKey(path string) (*ecdsa.PrivateKey, error) {
-	data, err := os.ReadFile(path)
+	file, err := rootfs.OpenFile(path)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read key file: %w", err)
+		return nil, newPrivateKeyError(privateKeyAccessErrorKind(err), fmt.Errorf("failed to read key file: %w", err))
+	}
+	data, readErr := io.ReadAll(file)
+	closeErr := file.Close()
+	if readErr != nil {
+		return nil, newPrivateKeyError(privateKeyAccessErrorKind(readErr), fmt.Errorf("failed to read key file: %w", readErr))
+	}
+	if closeErr != nil {
+		return nil, newPrivateKeyError(privateKeyAccessErrorKind(closeErr), fmt.Errorf("failed to close key file: %w", closeErr))
 	}
 	return LoadPrivateKeyFromPEM(data)
 }
@@ -249,7 +356,7 @@ func LoadPrivateKey(path string) (*ecdsa.PrivateKey, error) {
 func LoadPrivateKeyFromPEM(data []byte) (*ecdsa.PrivateKey, error) {
 	block, _ := pem.Decode(data)
 	if block == nil {
-		return nil, fmt.Errorf("invalid PEM data")
+		return nil, newPrivateKeyError(PrivateKeyInvalidFormat, errors.New("invalid PEM data"))
 	}
 
 	// Try PKCS8 first.
@@ -257,7 +364,10 @@ func LoadPrivateKeyFromPEM(data []byte) (*ecdsa.PrivateKey, error) {
 	if err == nil {
 		ecdsaKey, ok := key.(*ecdsa.PrivateKey)
 		if !ok {
-			return nil, fmt.Errorf("private key is not ECDSA")
+			return nil, newPrivateKeyError(PrivateKeyUnsupportedAlgorithm, errors.New("private key is not ECDSA"))
+		}
+		if ecdsaKey.Curve != elliptic.P256() {
+			return nil, newPrivateKeyError(PrivateKeyUnsupportedAlgorithm, errors.New("private key must use the P-256 curve"))
 		}
 		return ecdsaKey, nil
 	}
@@ -265,7 +375,13 @@ func LoadPrivateKeyFromPEM(data []byte) (*ecdsa.PrivateKey, error) {
 	// Try SEC1 EC private key as fallback.
 	ecdsaKey, err := x509.ParseECPrivateKey(block.Bytes)
 	if err != nil {
-		return nil, fmt.Errorf("invalid private key: %w", err)
+		if _, rsaErr := x509.ParsePKCS1PrivateKey(block.Bytes); rsaErr == nil {
+			return nil, newPrivateKeyError(PrivateKeyUnsupportedAlgorithm, errors.New("private key is not ECDSA"))
+		}
+		return nil, newPrivateKeyError(PrivateKeyInvalidFormat, fmt.Errorf("invalid private key: %w", err))
+	}
+	if ecdsaKey.Curve != elliptic.P256() {
+		return nil, newPrivateKeyError(PrivateKeyUnsupportedAlgorithm, errors.New("private key must use the P-256 curve"))
 	}
 
 	return ecdsaKey, nil
@@ -273,18 +389,49 @@ func LoadPrivateKeyFromPEM(data []byte) (*ecdsa.PrivateKey, error) {
 
 // StoreCredentials stores credentials in the keychain when available.
 func StoreCredentials(name, keyID, issuerID, keyPath string) error {
+	return StoreCredentialsWithKeyType(name, keyID, issuerID, keyPath, config.CredentialKeyTypeTeam)
+}
+
+// StoreCredentialsWithKeyType stores credentials with an explicit App Store Connect key type.
+func StoreCredentialsWithKeyType(name, keyID, issuerID, keyPath, keyType string) error {
+	originalName := name
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return fmt.Errorf("credential name is required")
+	}
 	payload := credentialPayload{
 		KeyID:          keyID,
 		IssuerID:       issuerID,
 		PrivateKeyPath: keyPath,
+		KeyType:        normalizedStoredKeyType(keyType),
 	}
 	if privateKeyPEM, err := loadPrivateKeyPEMForStorage(keyPath); err == nil && strings.TrimSpace(privateKeyPEM) != "" {
 		payload.PrivateKeyPEM = privateKeyPEM
 	}
+	currentAvailable, legacyAvailable, err := rejectNormalizedCredentialCollision(originalName, name)
+	if err != nil {
+		return err
+	}
+	if !currentAvailable {
+		return storeInConfig(name, payload)
+	}
+	previousCanonical, previousCanonicalFound, err := currentKeychainItem(name)
+	if err != nil {
+		if isKeyringUnavailable(err) {
+			return storeInConfig(name, payload)
+		}
+		return err
+	}
 
 	if err := storeInKeychain(name, payload); err == nil {
+		if err := removePreNormalizedKeychainEntries(name, legacyAvailable); err != nil {
+			if rollbackErr := restoreCurrentKeychainItem(name, previousCanonical, previousCanonicalFound); rollbackErr != nil {
+				return fmt.Errorf("%w; restore canonical credential: %w", err, rollbackErr)
+			}
+			return err
+		}
 		// Successfully stored in keychain - remove matching config entry for security
-		if err := removeFromConfigIfPresent(name); err != nil && !errors.Is(err, config.ErrNotFound) {
+		if err := removeFromConfigIfPresent(name, false); err != nil && !errors.Is(err, config.ErrNotFound) {
 			// Log but don't fail - keychain is the authoritative storage
 			_ = err
 		}
@@ -296,46 +443,684 @@ func StoreCredentials(name, keyID, issuerID, keyPath string) error {
 	return storeInConfig(name, payload)
 }
 
+func currentKeychainItem(name string) (keyring.Item, bool, error) {
+	kr, err := keyringOpener()
+	if err != nil {
+		return keyring.Item{}, false, err
+	}
+	item, err := kr.Get(keyringKey(name))
+	if errors.Is(err, keyring.ErrKeyNotFound) {
+		return keyring.Item{}, false, nil
+	}
+	if err != nil {
+		return keyring.Item{}, false, err
+	}
+	return item, true, nil
+}
+
+func restoreCurrentKeychainItem(name string, previous keyring.Item, found bool) error {
+	kr, err := keyringOpener()
+	if err != nil {
+		return err
+	}
+	if found {
+		return kr.Set(previous)
+	}
+	if err := kr.Remove(keyringKey(name)); err != nil && !errors.Is(err, keyring.ErrKeyNotFound) {
+		return err
+	}
+	return nil
+}
+
+type keychainItemSnapshot struct {
+	store  keyring.Keyring
+	item   keyring.Item
+	source string
+}
+
+// removePreNormalizedKeychainEntries removes every non-canonical spelling from
+// the current and legacy keychains.
+// Collision preflight has already established that no distinct usable
+// credential will be discarded. If any removal fails, already-removed entries
+// are restored so callers can safely retry the normalization.
+func removePreNormalizedKeychainEntries(normalizedName string, includeLegacy bool) error {
+	current, err := preNormalizedKeychainItems(keyringOpener, normalizedName, "keychain")
+	if err != nil {
+		return err
+	}
+	items := current
+	if includeLegacy {
+		legacy, err := preNormalizedKeychainItems(legacyKeyringOpener, normalizedName, "legacy keychain")
+		if err != nil {
+			return err
+		}
+		items = append(items, legacy...)
+	}
+
+	_, err = removeKeychainItems(items)
+	return err
+}
+
+func removeKeychainItems(items []keychainItemSnapshot) ([]keychainItemSnapshot, error) {
+	removed := make([]keychainItemSnapshot, 0, len(items))
+	for _, snapshot := range items {
+		if err := snapshot.store.Remove(snapshot.item.Key); err != nil {
+			if errors.Is(err, keyring.ErrKeyNotFound) {
+				continue
+			}
+			removeErr := fmt.Errorf("remove %s credential %q: %w", snapshot.source, snapshot.item.Key, err)
+			if rollbackErr := restoreKeychainItems(removed); rollbackErr != nil {
+				return removed, fmt.Errorf("%w; restore removed credentials: %w", removeErr, rollbackErr)
+			}
+			return nil, removeErr
+		}
+		removed = append(removed, snapshot)
+	}
+	return removed, nil
+}
+
+func preNormalizedKeychainItems(
+	opener func() (keyring.Keyring, error),
+	normalizedName string,
+	source string,
+) ([]keychainItemSnapshot, error) {
+	return normalizedKeychainItems(opener, normalizedName, false, source)
+}
+
+func normalizedKeychainItems(
+	opener func() (keyring.Keyring, error),
+	normalizedName string,
+	includeCanonical bool,
+	source string,
+) ([]keychainItemSnapshot, error) {
+	kr, err := opener()
+	if err != nil {
+		return nil, fmt.Errorf("list %s credentials: %w", source, err)
+	}
+	keys, err := kr.Keys()
+	if err != nil {
+		return nil, fmt.Errorf("list %s credentials: %w", source, err)
+	}
+	sort.Strings(keys)
+
+	items := make([]keychainItemSnapshot, 0)
+	for _, key := range keys {
+		if !strings.HasPrefix(key, keyringItemPrefix) {
+			continue
+		}
+		name := strings.TrimPrefix(key, keyringItemPrefix)
+		if strings.TrimSpace(name) != normalizedName || (!includeCanonical && name == normalizedName) {
+			continue
+		}
+		item, err := kr.Get(key)
+		if errors.Is(err, keyring.ErrKeyNotFound) {
+			continue
+		}
+		if err != nil {
+			return nil, fmt.Errorf("read %s credential %q: %w", source, name, err)
+		}
+		items = append(items, keychainItemSnapshot{store: kr, item: item, source: source})
+	}
+	return items, nil
+}
+
+func restoreKeychainItems(items []keychainItemSnapshot) error {
+	errs := make([]error, 0)
+	for index := len(items) - 1; index >= 0; index-- {
+		snapshot := items[index]
+		if err := snapshot.store.Set(snapshot.item); err != nil {
+			errs = append(errs, fmt.Errorf("%s credential %q: %w", snapshot.source, snapshot.item.Key, err))
+		}
+	}
+	return errors.Join(errs...)
+}
+
+func rejectNormalizedCredentialCollision(originalName, normalizedName string) (bool, bool, error) {
+	payloads, currentAvailable, legacyAvailable, err := normalizedCredentialPayloads(normalizedName)
+	if err != nil {
+		return false, false, err
+	}
+	names := make([]string, 0, len(payloads))
+	for name := range payloads {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	if len(names) < 2 {
+		return currentAvailable, legacyAvailable, nil
+	}
+
+	first := payloads[names[0]]
+	for _, name := range names[1:] {
+		if credentialPayloadsMatch(first, payloads[name]) {
+			continue
+		}
+		return currentAvailable, legacyAvailable, fmt.Errorf(
+			"credential profile name %q conflicts with existing normalized profile %q; "+
+				"remove the existing profile with 'asc auth logout --name %q --confirm' and retry",
+			originalName,
+			normalizedName,
+			normalizedName,
+		)
+	}
+	return currentAvailable, legacyAvailable, nil
+}
+
+func normalizedCredentialPayloads(normalizedName string) (map[string]credentialPayload, bool, bool, error) {
+	payloads := make(map[string]credentialPayload)
+	seen := make(map[string]struct{})
+
+	current, err := keyringOpener()
+	if err != nil {
+		if isKeyringUnavailable(err) {
+			return payloads, false, false, nil
+		}
+		return nil, false, false, err
+	}
+	if err := collectNormalizedCredentialPayloads(current, normalizedName, payloads, seen); err != nil {
+		if isKeyringUnavailable(err) {
+			return payloads, false, false, nil
+		}
+		return nil, false, false, err
+	}
+
+	legacy, err := legacyKeyringOpener()
+	if err != nil {
+		if isKeyringUnavailable(err) {
+			return payloads, true, false, nil
+		}
+		return nil, false, false, err
+	}
+	if err := collectNormalizedCredentialPayloads(legacy, normalizedName, payloads, seen); err != nil {
+		if isKeyringUnavailable(err) {
+			return payloads, true, false, nil
+		}
+		return nil, false, false, err
+	}
+	return payloads, true, true, nil
+}
+
+func collectNormalizedCredentialPayloads(
+	kr keyring.Keyring,
+	normalizedName string,
+	payloads map[string]credentialPayload,
+	seen map[string]struct{},
+) error {
+	keys, err := kr.Keys()
+	if err != nil {
+		return err
+	}
+	for _, key := range keys {
+		if !strings.HasPrefix(key, keyringItemPrefix) {
+			continue
+		}
+		name := strings.TrimPrefix(key, keyringItemPrefix)
+		if strings.TrimSpace(name) != normalizedName {
+			continue
+		}
+		if _, exists := seen[name]; exists {
+			continue
+		}
+		payload, found, err := credentialPayloadForCollision(kr, name)
+		if err != nil {
+			return err
+		}
+		if found {
+			seen[name] = struct{}{}
+			payloads[name] = payload
+		}
+	}
+	return nil
+}
+
+func credentialPayloadForCollision(kr keyring.Keyring, name string) (credentialPayload, bool, error) {
+	item, err := kr.Get(keyringKey(name))
+	if errors.Is(err, keyring.ErrKeyNotFound) {
+		return credentialPayload{}, false, nil
+	}
+	if err != nil {
+		return credentialPayload{}, false, err
+	}
+	var payload credentialPayload
+	if err := json.Unmarshal(item.Data, &payload); err != nil {
+		return credentialPayload{}, false, nil
+	}
+	if !completeCredentialPayload(payload) {
+		return credentialPayload{}, false, nil
+	}
+	return payload, true, nil
+}
+
+func completeCredentialPayload(payload credentialPayload) bool {
+	if strings.TrimSpace(payload.KeyID) == "" || !config.IsValidCredentialKeyType(payload.KeyType) {
+		return false
+	}
+	if !config.IsIndividualCredentialKeyType(payload.KeyType) && strings.TrimSpace(payload.IssuerID) == "" {
+		return false
+	}
+	// Credential resolution prefers embedded key material over the key path,
+	// so a present-but-invalid PEM makes the entry unusable at auth time even
+	// when a key path is also stored.
+	if strings.TrimSpace(payload.PrivateKeyPEM) != "" {
+		_, err := LoadPrivateKeyFromPEM([]byte(payload.PrivateKeyPEM))
+		return err == nil
+	}
+	if strings.TrimSpace(payload.PrivateKeyPath) == "" {
+		return false
+	}
+	// Path-only entries must satisfy the same parsing and permission checks as
+	// production client creation before they can block normalization repair.
+	return ValidateKeyFile(payload.PrivateKeyPath) == nil
+}
+
+func credentialPayloadsMatch(first, second credentialPayload) bool {
+	firstKeyType := config.NormalizeCredentialKeyType(first.KeyType)
+	secondKeyType := config.NormalizeCredentialKeyType(second.KeyType)
+	if first.KeyID != second.KeyID || firstKeyType != secondKeyType {
+		return false
+	}
+	if firstKeyType != config.CredentialKeyTypeIndividual && first.IssuerID != second.IssuerID {
+		return false
+	}
+
+	firstPEM := credentialPrivateKeyForComparison(first)
+	secondPEM := credentialPrivateKeyForComparison(second)
+	if firstPEM != "" && secondPEM != "" {
+		firstKey, firstErr := LoadPrivateKeyFromPEM([]byte(firstPEM))
+		secondKey, secondErr := LoadPrivateKeyFromPEM([]byte(secondPEM))
+		if firstErr == nil && secondErr == nil {
+			return firstKey.Equal(secondKey)
+		}
+		return firstPEM == secondPEM
+	}
+	return first.PrivateKeyPath == second.PrivateKeyPath
+}
+
+func credentialPrivateKeyForComparison(payload credentialPayload) string {
+	if strings.TrimSpace(payload.PrivateKeyPEM) != "" {
+		return payload.PrivateKeyPEM
+	}
+	privateKeyPEM, err := loadPrivateKeyPEMForStorage(payload.PrivateKeyPath)
+	if err != nil || strings.TrimSpace(privateKeyPEM) == "" {
+		return ""
+	}
+	return privateKeyPEM
+}
+
 func loadPrivateKeyPEMForStorage(path string) (string, error) {
-	path = strings.TrimSpace(path)
 	if path == "" {
 		return "", nil
 	}
-	data, err := os.ReadFile(path)
+	file, err := rootfs.OpenFile(path)
 	if err != nil {
 		return "", err
+	}
+	data, readErr := io.ReadAll(file)
+	closeErr := file.Close()
+	if readErr != nil {
+		return "", readErr
+	}
+	if closeErr != nil {
+		return "", closeErr
 	}
 	return string(data), nil
 }
 
 // StoreCredentialsConfig stores credentials in the config file only.
 func StoreCredentialsConfig(name, keyID, issuerID, keyPath string) error {
-	payload := credentialPayload{
-		KeyID:          keyID,
-		IssuerID:       issuerID,
-		PrivateKeyPath: keyPath,
-	}
-	path, err := config.GlobalPath()
+	return StoreCredentialsConfigWithKeyType(name, keyID, issuerID, keyPath, config.CredentialKeyTypeTeam)
+}
+
+// StoreCredentialsConfigWithKeyType stores credentials in the config file only
+// with an explicit key type. It writes to ASC_CONFIG_PATH when set, matching
+// where reads look, and otherwise to the global config.
+func StoreCredentialsConfigWithKeyType(name, keyID, issuerID, keyPath, keyType string) error {
+	path, err := config.DefaultWritePath()
 	if err != nil {
 		return err
 	}
-	return storeInConfigAt(name, payload, path)
+	return StoreCredentialsConfigAtWithKeyType(name, keyID, issuerID, keyPath, path, keyType)
 }
 
 // StoreCredentialsConfigAt stores credentials in the specified config file.
 func StoreCredentialsConfigAt(name, keyID, issuerID, keyPath, configPath string) error {
+	return StoreCredentialsConfigAtWithKeyType(name, keyID, issuerID, keyPath, configPath, config.CredentialKeyTypeTeam)
+}
+
+// StoreCredentialsConfigAtWithKeyType stores credentials in the specified config file with an explicit key type.
+func StoreCredentialsConfigAtWithKeyType(name, keyID, issuerID, keyPath, configPath, keyType string) error {
 	payload := credentialPayload{
 		KeyID:          keyID,
 		IssuerID:       issuerID,
 		PrivateKeyPath: keyPath,
+		KeyType:        normalizedStoredKeyType(keyType),
 	}
 	return storeInConfigAt(name, payload, configPath)
 }
 
-// clearConfigCredentials clears credentials from the config file.
-// This is called after successfully migrating to keychain storage.
-func clearConfigCredentials() error {
-	paths, err := configCleanupPaths()
+func normalizedStoredKeyType(keyType string) string {
+	normalized := config.NormalizeCredentialKeyType(keyType)
+	if normalized == config.CredentialKeyTypeTeam {
+		return ""
+	}
+	return normalized
+}
+
+// MigrateKeychainToConfig copies keychain-backed credentials into config.json.
+//
+// If a keychain entry contains embedded PEM data and its original private key
+// path is missing, the PEM is exported to a secure .p8 file and config.json is
+// updated to reference that file.
+func MigrateKeychainToConfig(opts MigrateKeychainToConfigOptions) (MigrateKeychainToConfigResult, error) {
+	configPath, err := resolveMigrationConfigPath(opts.ConfigPath)
+	if err != nil {
+		return MigrateKeychainToConfigResult{}, err
+	}
+	privateKeyDir, err := resolveMigrationPrivateKeyDir(opts.PrivateKeyDir, configPath)
+	if err != nil {
+		return MigrateKeychainToConfigResult{}, err
+	}
+	result := MigrateKeychainToConfigResult{
+		ConfigPath:    configPath,
+		PrivateKeyDir: privateKeyDir,
+	}
+
+	credentials, err := listFromKeychain()
+	if err != nil {
+		if isKeyringUnavailable(err) {
+			return result, fmt.Errorf("keychain unavailable: %w", err)
+		}
+		return result, err
+	}
+	if len(credentials) == 0 {
+		return result, fmt.Errorf("no keychain credentials found")
+	}
+
+	cfg, err := config.LoadAt(configPath)
+	if err != nil && !errors.Is(err, config.ErrNotFound) {
+		return result, err
+	}
+	if cfg == nil {
+		cfg = &config.Config{}
+	}
+
+	migratedConfigCreds := make([]config.Credential, 0, len(credentials))
+	seenConfigNames := make(map[string]string, len(credentials))
+	for _, cred := range credentials {
+		name := strings.TrimSpace(cred.Name)
+		if name == "" {
+			continue
+		}
+		if previousKeychainName, exists := seenConfigNames[name]; exists && previousKeychainName != cred.Name {
+			return result, fmt.Errorf(
+				"multiple keychain credentials normalize to config profile %q: %q and %q",
+				name,
+				previousKeychainName,
+				cred.Name,
+			)
+		}
+		seenConfigNames[name] = cred.Name
+		privateKeyPath, exported, err := migrationPrivateKeyPath(cred, privateKeyDir, name)
+		if err != nil {
+			return result, err
+		}
+		configCred := config.Credential{
+			Name:           name,
+			KeyID:          strings.TrimSpace(cred.KeyID),
+			IssuerID:       strings.TrimSpace(cred.IssuerID),
+			PrivateKeyPath: privateKeyPath,
+			KeyType:        normalizedStoredKeyType(cred.KeyType),
+		}
+		upsertConfigCredential(cfg, configCred)
+		migratedConfigCreds = append(migratedConfigCreds, configCred)
+		result.Migrated = append(result.Migrated, MigratedCredential{
+			Name:               configCred.Name,
+			KeyID:              configCred.KeyID,
+			PrivateKeyPath:     configCred.PrivateKeyPath,
+			ExportedPrivateKey: exported,
+			keychainName:       cred.Name,
+		})
+	}
+	if len(result.Migrated) == 0 {
+		return result, fmt.Errorf("no named keychain credentials found")
+	}
+
+	applyMigratedDefault(cfg, credentials, migratedConfigCreds)
+	if err := config.SaveAt(configPath, cfg); err != nil {
+		return result, err
+	}
+
+	if opts.RemoveKeychain {
+		removedAll := true
+		for _, cred := range result.Migrated {
+			if err := removeMigratedKeychainCredential(cred.keychainName); err != nil {
+				removedAll = false
+				result.Warnings = append(result.Warnings, fmt.Sprintf("failed to remove keychain credential %q: %v", cred.Name, err))
+			}
+		}
+		result.RemovedFromKeychain = removedAll
+	}
+
+	return result, nil
+}
+
+func resolveMigrationConfigPath(raw string) (string, error) {
+	if raw == "" {
+		return config.Path()
+	}
+	abs, err := filepath.Abs(raw)
+	if err != nil {
+		return "", fmt.Errorf("invalid config path: %w", err)
+	}
+	return filepath.Clean(abs), nil
+}
+
+func resolveMigrationPrivateKeyDir(raw, configPath string) (string, error) {
+	if raw == "" {
+		raw = filepath.Join(filepath.Dir(configPath), "keys")
+	}
+	abs, err := filepath.Abs(raw)
+	if err != nil {
+		return "", fmt.Errorf("invalid private key directory: %w", err)
+	}
+	return filepath.Clean(abs), nil
+}
+
+func migrationPrivateKeyPath(cred Credential, privateKeyDir string, configName string) (string, bool, error) {
+	currentPath := cred.PrivateKeyPath
+	if currentPath != "" {
+		if info, err := os.Lstat(currentPath); err == nil && info.IsDir() {
+			return "", false, fmt.Errorf("profile %q private key path is a directory: %s", cred.Name, currentPath)
+		}
+		file, err := rootfs.OpenFile(currentPath)
+		if err == nil {
+			if closeErr := file.Close(); closeErr != nil {
+				return "", false, fmt.Errorf("profile %q private key file could not be closed: %w", cred.Name, closeErr)
+			}
+			return currentPath, false, nil
+		}
+		if !os.IsNotExist(err) {
+			return "", false, fmt.Errorf("profile %q private key file could not be read: %w", cred.Name, err)
+		}
+	}
+
+	privateKeyPEM := cred.PrivateKeyPEM
+	if strings.TrimSpace(privateKeyPEM) == "" {
+		return "", false, fmt.Errorf("profile %q private key file is missing and keychain entry does not contain embedded private key PEM", cred.Name)
+	}
+	if _, err := LoadPrivateKeyFromPEM([]byte(privateKeyPEM)); err != nil {
+		return "", false, fmt.Errorf("profile %q keychain private key PEM is invalid: %w", cred.Name, err)
+	}
+
+	fileName := migrationPrivateKeyFilename(configName, cred.KeyID)
+	if err := writePrivateKeyPEMFile(privateKeyDir, fileName, privateKeyPEM); err != nil {
+		return "", false, fmt.Errorf("profile %q failed to export private key: %w", cred.Name, err)
+	}
+	return filepath.Join(privateKeyDir, fileName), true, nil
+}
+
+func migrationPrivateKeyFilename(name, keyID string) string {
+	safe := sanitizePrivateKeyFilenamePart(name)
+	if safeKeyID := sanitizePrivateKeyFilenamePart(strings.TrimSpace(keyID)); strings.TrimSpace(keyID) != "" {
+		return "AuthKey_" + safe + "_" + safeKeyID + ".p8"
+	}
+	return "AuthKey_" + safe + ".p8"
+}
+
+// sanitizePrivateKeyFilenamePart reduces an untrusted profile name or key ID to
+// a single safe filename component so it cannot carry path separators or
+// traversal segments into the key output directory.
+func sanitizePrivateKeyFilenamePart(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "default"
+	}
+	var b strings.Builder
+	for _, r := range value {
+		switch {
+		case r >= 'a' && r <= 'z':
+			b.WriteRune(r)
+		case r >= 'A' && r <= 'Z':
+			b.WriteRune(r)
+		case r >= '0' && r <= '9':
+			b.WriteRune(r)
+		case r == '-', r == '_', r == '.':
+			b.WriteRune(r)
+		default:
+			b.WriteRune('_')
+		}
+	}
+	safe := strings.Trim(b.String(), "._-")
+	if safe == "" || safe == ".." {
+		return "default"
+	}
+	return safe
+}
+
+// writePrivateKeyPEMFile exports private key material to name beneath keyDir.
+// keyDir is the operator-selected key output root; name must stay beneath it and
+// must not resolve through a symlink.
+func writePrivateKeyPEMFile(keyDir, name, privateKeyPEM string) error {
+	if strings.TrimSpace(name) == "" {
+		return fmt.Errorf("empty private key path")
+	}
+	root, err := rootfs.New(keyDir)
+	if err != nil {
+		return err
+	}
+	resolved, err := root.Resolve(name)
+	if err != nil {
+		return err
+	}
+	if err := root.MkdirAll(filepath.Dir(name), 0o700); err != nil {
+		return err
+	}
+
+	existing, found, err := root.ReadFileOptional(name)
+	if err != nil {
+		return err
+	}
+	if found {
+		if strings.TrimSpace(string(existing)) != strings.TrimSpace(privateKeyPEM) {
+			return fmt.Errorf("refusing to overwrite existing private key file: %s", resolved)
+		}
+		// Tighten permissions through a no-follow descriptor so an entry swapped
+		// for a symlink after the read can never chmod a file outside keyDir.
+		file, err := root.OpenFile(name)
+		if err != nil {
+			return err
+		}
+		defer file.Close()
+		info, err := file.Stat()
+		if err != nil {
+			return err
+		}
+		if filePermissionsTooPermissive(info.Mode()) {
+			if err := file.Chmod(0o600); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+
+	return root.CreateNewFile(name, []byte(privateKeyPEM), 0o600)
+}
+
+func upsertConfigCredential(cfg *config.Config, cred config.Credential) {
+	for i := range cfg.Keys {
+		if strings.TrimSpace(cfg.Keys[i].Name) == cred.Name {
+			cfg.Keys[i] = cred
+			return
+		}
+	}
+	cfg.Keys = append(cfg.Keys, cred)
+}
+
+func applyMigratedDefault(cfg *config.Config, sourceCreds []Credential, migratedCreds []config.Credential) {
+	destinationDefaultName := strings.TrimSpace(cfg.DefaultKeyName)
+	if destinationDefaultName != "" {
+		if alignDefaultCredentialFields(cfg, destinationDefaultName) {
+			return
+		}
+	}
+
+	defaultName := destinationDefaultName
+	for _, cred := range sourceCreds {
+		if cred.IsDefault {
+			defaultName = strings.TrimSpace(cred.Name)
+			break
+		}
+	}
+	if defaultName == "" && len(migratedCreds) == 1 {
+		defaultName = migratedCreds[0].Name
+	}
+	if defaultName == "" {
+		return
+	}
+	cfg.DefaultKeyName = defaultName
+	if alignDefaultCredentialFields(cfg, defaultName) {
+		return
+	}
+	for _, cred := range migratedCreds {
+		if cred.Name == defaultName {
+			cfg.KeyID = cred.KeyID
+			cfg.IssuerID = cred.IssuerID
+			cfg.PrivateKeyPath = cred.PrivateKeyPath
+			cfg.KeyType = normalizedStoredKeyType(cred.KeyType)
+			return
+		}
+	}
+}
+
+func alignDefaultCredentialFields(cfg *config.Config, defaultName string) bool {
+	cred, found, complete := findConfigCredential(cfg, defaultName)
+	if !found || !complete {
+		return false
+	}
+	cfg.DefaultKeyName = strings.TrimSpace(cred.Name)
+	cfg.KeyID = cred.KeyID
+	cfg.IssuerID = cred.IssuerID
+	cfg.PrivateKeyPath = cred.PrivateKeyPath
+	cfg.KeyType = normalizedStoredKeyType(cred.KeyType)
+	return true
+}
+
+func removeMigratedKeychainCredential(name string) error {
+	if err := removeFromKeychain(name); err != nil &&
+		!errors.Is(err, keyring.ErrKeyNotFound) {
+		return err
+	}
+	if err := removeFromLegacyKeychain(name); err != nil &&
+		!errors.Is(err, keyring.ErrKeyNotFound) &&
+		!isKeyringUnavailable(err) {
+		return err
+	}
+	return nil
+}
+
+// clearConfigCredentials clears credentials from the config files that
+// configCleanupPaths selects.
+func clearConfigCredentials(includeGlobal bool) error {
+	paths, err := configCleanupPaths(includeGlobal)
 	if err != nil {
 		return err
 	}
@@ -355,6 +1140,7 @@ func clearConfigCredentialsAt(path string) error {
 	cfg.KeyID = ""
 	cfg.IssuerID = ""
 	cfg.PrivateKeyPath = ""
+	cfg.KeyType = ""
 	cfg.DefaultKeyName = ""
 	cfg.Keys = nil
 	cfg.KeychainMetadata = nil
@@ -475,54 +1261,74 @@ func normalizeCredentialDefaults(credentials []Credential) {
 	}
 }
 
-// RemoveCredentials removes a named credential.
+// RemoveOptions controls which config files credential removal edits.
+type RemoveOptions struct {
+	// IncludeGlobalConfig also removes matching credentials from the global
+	// config (~/.asc/config.json) when ASC_CONFIG_PATH selects another file.
+	// Without ASC_CONFIG_PATH the global config is always included.
+	IncludeGlobalConfig bool
+}
+
+// RemoveCredentials removes a named credential from the keychain and the
+// config files selected by the default RemoveOptions.
 func RemoveCredentials(name string) error {
+	return RemoveCredentialsWithOptions(name, RemoveOptions{})
+}
+
+// RemoveCredentialsWithOptions removes a named credential from the keychain
+// and the config files that opts selects.
+func RemoveCredentialsWithOptions(name string, opts RemoveOptions) error {
 	name = strings.TrimSpace(name)
 	if name == "" {
 		return fmt.Errorf("credential name is required")
 	}
-	err := removeFromKeychain(name)
-	if err == nil {
-		if configErr := removeFromConfigIfPresent(name); configErr != nil &&
-			!errors.Is(configErr, config.ErrNotFound) &&
-			!errors.Is(configErr, keyring.ErrKeyNotFound) {
-			return configErr
+	removed := make([]keychainItemSnapshot, 0)
+	if !shouldBypassKeychain() {
+		current, err := normalizedKeychainItems(keyringOpener, name, true, "keychain")
+		if err != nil {
+			return err
 		}
-		_ = removeFromLegacyKeychain(name)
+		legacy, err := normalizedKeychainItems(legacyKeyringOpener, name, true, "legacy keychain")
+		if err != nil {
+			return err
+		}
+		removed, err = removeKeychainItems(append(current, legacy...))
+		if err != nil {
+			return err
+		}
+	}
+
+	configErr := removeFromConfigIfPresent(name, opts.IncludeGlobalConfig)
+	if configErr != nil &&
+		!errors.Is(configErr, config.ErrNotFound) &&
+		!errors.Is(configErr, keyring.ErrKeyNotFound) {
+		if rollbackErr := restoreKeychainItems(removed); rollbackErr != nil {
+			return fmt.Errorf("%w; restore removed credentials: %w", configErr, rollbackErr)
+		}
+		return configErr
+	}
+	if len(removed) > 0 || configErr == nil {
 		return clearDefaultNameIf(name)
 	}
-	if isKeyringUnavailable(err) {
-		return removeFromConfigIfPresent(name)
-	}
-	if errors.Is(err, keyring.ErrKeyNotFound) {
-		legacyErr := removeFromLegacyKeychain(name)
-		if legacyErr == nil {
-			if configErr := removeFromConfigIfPresent(name); configErr != nil &&
-				!errors.Is(configErr, config.ErrNotFound) &&
-				!errors.Is(configErr, keyring.ErrKeyNotFound) {
-				return configErr
-			}
-			return clearDefaultNameIf(name)
-		}
-		if isKeyringUnavailable(legacyErr) {
-			return removeFromConfigIfPresent(name)
-		}
-		if errors.Is(legacyErr, keyring.ErrKeyNotFound) {
-			if err := removeFromConfigIfPresent(name); err != nil {
-				return err
-			}
-			return nil
-		}
-		return legacyErr
-	}
-	return err
+	return configErr
 }
 
-// RemoveAllCredentials removes all stored credentials
+// RemoveAllCredentials removes all stored credentials from the keychain and
+// the config files selected by the default RemoveOptions.
 func RemoveAllCredentials() error {
+	return RemoveAllCredentialsWithOptions(RemoveOptions{})
+}
+
+// RemoveAllCredentialsWithOptions removes all stored credentials from the
+// keychain and the config files that opts selects. ASC_BYPASS_KEYCHAIN leaves
+// the keychain untouched.
+func RemoveAllCredentialsWithOptions(opts RemoveOptions) error {
 	// Always attempt to clear config credentials first, regardless of keychain state
 	// This ensures config is cleaned even if keychain has issues (e.g., locked, read-only)
-	configErr := clearConfigCredentials()
+	configErr := clearConfigCredentials(opts.IncludeGlobalConfig)
+	if shouldBypassKeychain() {
+		return configErr
+	}
 
 	// Try to clear keychain as well, but don't fail if keychain has issues
 	keychainErr := removeAllFromKeychain()
@@ -538,6 +1344,44 @@ func RemoveAllCredentials() error {
 
 	// Both failed - return keychain error as primary
 	return keychainErr
+}
+
+// RetainedGlobalConfigCredentials reports whether the global config
+// (~/.asc/config.json) holds credentials that removal with the default
+// RemoveOptions leaves in place because ASC_CONFIG_PATH selects another file.
+// An empty name matches any stored credential. It returns the global config
+// path when such credentials exist.
+func RetainedGlobalConfigCredentials(name string) (string, bool, error) {
+	overridePath, overridden, err := config.OverridePath()
+	if err != nil || !overridden {
+		return "", false, err
+	}
+	globalPath, err := config.GlobalPath()
+	if err != nil {
+		return "", false, err
+	}
+	if sameConfigPath(overridePath, globalPath) {
+		return "", false, nil
+	}
+	cfg, err := config.LoadAt(globalPath)
+	if errors.Is(err, config.ErrNotFound) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	name = strings.TrimSpace(name)
+	retained := false
+	if name == "" {
+		// Match what --include-global would clear, including keychain metadata.
+		retained = hasAnyCredentials(cfg) || len(cfg.KeychainMetadata) > 0
+	} else {
+		retained = removeCredentialFromConfig(cloneConfigForCredentialRemoval(cfg), name)
+	}
+	if !retained {
+		return "", false, nil
+	}
+	return globalPath, true, nil
 }
 
 func sameConfigPath(left, right string) bool {
@@ -560,22 +1404,11 @@ func GetCredentialsWithSource(profile string) (*config.Config, string, error) {
 		return configCfg, "config", nil
 	}
 
-	credentials, err := listFromKeychain()
+	lookup, err := lookupKeychainCredential(profile)
 	if err == nil {
-		defaultKey := ""
-		resolvedProfile := profile
-		if profile == "" {
-			defaultKey, err = defaultName()
-			if err != nil {
-				return nil, "", err
-			}
-			defaultKey = strings.TrimSpace(defaultKey)
-			resolvedProfile = defaultKey
-		}
-		cfg, selectedCred, found := selectCredential(resolvedProfile, credentials)
-		if found {
-			maybeBackfillCredentialMetadata(selectedCred)
-			return cfg, "keychain", nil
+		if lookup.found {
+			maybeBackfillCredentialMetadata(lookup.credential)
+			return configFromCredential(lookup.credential), "keychain", nil
 		}
 		if profile != "" {
 			if cfg, configErr := getCredentialsFromConfig(profile); configErr == nil {
@@ -583,14 +1416,14 @@ func GetCredentialsWithSource(profile string) (*config.Config, string, error) {
 			}
 			return nil, "", fmt.Errorf("credentials not found for profile %q", profile)
 		}
-		if defaultKey != "" {
-			configCfg, configErr := getCredentialsFromConfig(defaultKey)
+		if lookup.defaultKey != "" {
+			configCfg, configErr := getCredentialsFromConfig(lookup.defaultKey)
 			if configErr != nil {
 				return nil, "", configErr
 			}
 			return configCfg, "config", nil
 		}
-		if len(credentials) > 0 {
+		if lookup.stored > 0 {
 			return nil, "", ErrDefaultCredentialsNotFound
 		}
 		configCfg, err := getCredentialsFromConfig(profile)
@@ -663,21 +1496,140 @@ func GetCredentials(profile string) (*config.Config, error) {
 	return cfg, err
 }
 
-func selectCredential(profile string, credentials []Credential) (*config.Config, Credential, bool) {
+// keychainLookup is the outcome of resolving one stored keychain credential.
+type keychainLookup struct {
+	credential Credential
+	found      bool
+	// defaultKey is the configured default credential name; it is only
+	// resolved when no profile was requested.
+	defaultKey string
+	// stored counts the credentials in the keychain, whether or not one was
+	// selected.
+	stored int
+}
+
+// lookupKeychainCredential resolves the credential selected by profile, by the
+// configured default name, or by being the only stored credential.
+//
+// It reads at most one keychain secret. On macOS every secret read is a
+// separate authorization prompt until the running binary is trusted for that
+// item, so enumerating every stored credential to select one multiplies the
+// prompts by the number of stored profiles.
+func lookupKeychainCredential(profile string) (keychainLookup, error) {
+	kr, err := keyringOpener()
+	if err != nil {
+		return keychainLookup{}, err
+	}
+	names, err := keychainCredentialNames(kr)
+	if err != nil {
+		return keychainLookup{}, err
+	}
+	if legacyKeychainHasCredentials() {
+		// The full listing migrates legacy entries into the current keychain.
+		return lookupKeychainCredentialFromListing(profile)
+	}
+
+	lookup := keychainLookup{stored: len(names)}
+	selected, defaultKey, err := selectedCredentialName(profile)
+	if err != nil {
+		return keychainLookup{}, err
+	}
+	lookup.defaultKey = defaultKey
+	if selected == "" {
+		if len(names) != 1 {
+			return lookup, nil
+		}
+		selected = names[0]
+	}
+	if !slices.Contains(names, selected) {
+		return lookup, nil
+	}
+	storedDefault, _ := defaultName()
+	cred, found, err := credentialFromKeyringKey(kr, keyringKey(selected), storedDefault, loadStoredKeychainMetadata())
+	if err != nil {
+		return keychainLookup{}, err
+	}
+	if !found {
+		// The item disappeared after Keys returned it. Do not let a stale
+		// listing suppress the normal config fallback for an empty keychain.
+		lookup.stored--
+		return lookup, nil
+	}
+	if strings.TrimSpace(storedDefault) == "" && len(names) == 1 {
+		cred.IsDefault = true
+	}
+	lookup.credential = cred
+	lookup.found = true
+	return lookup, nil
+}
+
+func lookupKeychainCredentialFromListing(profile string) (keychainLookup, error) {
+	credentials, err := listFromKeychain()
+	if err != nil {
+		return keychainLookup{}, err
+	}
+	lookup := keychainLookup{stored: len(credentials)}
+	selected, defaultKey, err := selectedCredentialName(profile)
+	if err != nil {
+		return keychainLookup{}, err
+	}
+	lookup.defaultKey = defaultKey
+	lookup.credential, lookup.found = selectCredential(selected, credentials)
+	return lookup, nil
+}
+
+// selectedCredentialName returns the credential name to resolve and, when no
+// profile was requested, the configured default name.
+func selectedCredentialName(profile string) (string, string, error) {
+	if profile != "" {
+		return profile, "", nil
+	}
+	defaultKey, err := defaultName()
+	if err != nil {
+		return "", "", err
+	}
+	defaultKey = strings.TrimSpace(defaultKey)
+	return defaultKey, defaultKey, nil
+}
+
+func keychainCredentialNames(kr keyring.Keyring) ([]string, error) {
+	keys, err := kr.Keys()
+	if err != nil {
+		return nil, err
+	}
+	names := make([]string, 0, len(keys))
+	for _, key := range keys {
+		if strings.HasPrefix(key, keyringItemPrefix) {
+			names = append(names, strings.TrimPrefix(key, keyringItemPrefix))
+		}
+	}
+	sort.Strings(names)
+	return names, nil
+}
+
+func legacyKeychainHasCredentials() bool {
+	kr, err := legacyKeyringOpener()
+	if err != nil {
+		return false
+	}
+	names, err := keychainCredentialNames(kr)
+	return err == nil && len(names) > 0
+}
+
+func selectCredential(profile string, credentials []Credential) (Credential, bool) {
 	name := strings.TrimSpace(profile)
 	if name != "" {
 		for _, cred := range credentials {
 			if cred.Name == name {
-				return configFromCredential(cred), cred, true
+				return cred, true
 			}
 		}
-		return nil, Credential{}, false
+		return Credential{}, false
 	}
 	if len(credentials) == 1 {
-		cred := credentials[0]
-		return configFromCredential(cred), cred, true
+		return credentials[0], true
 	}
-	return nil, Credential{}, false
+	return Credential{}, false
 }
 
 func maybeBackfillCredentialMetadata(cred Credential) {
@@ -696,6 +1648,7 @@ func configFromCredential(cred Credential) *config.Config {
 		IssuerID:       cred.IssuerID,
 		PrivateKeyPath: cred.PrivateKeyPath,
 		PrivateKeyPEM:  cred.PrivateKeyPEM,
+		KeyType:        normalizedStoredKeyType(cred.KeyType),
 		DefaultKeyName: cred.Name,
 	}
 }
@@ -748,6 +1701,7 @@ func credentialMetadataDescription(payload credentialPayload) string {
 	data, err := json.Marshal(credentialMetadata{
 		KeyID:    strings.TrimSpace(payload.KeyID),
 		IssuerID: strings.TrimSpace(payload.IssuerID),
+		KeyType:  normalizedStoredKeyType(payload.KeyType),
 	})
 	if err != nil {
 		return ""
@@ -769,7 +1723,9 @@ func parseCredentialMetadataDescription(description string) credentialMetadata {
 }
 
 func hasCredentialMetadata(metadata credentialMetadata) bool {
-	return strings.TrimSpace(metadata.KeyID) != "" || strings.TrimSpace(metadata.IssuerID) != ""
+	return strings.TrimSpace(metadata.KeyID) != "" ||
+		strings.TrimSpace(metadata.IssuerID) != "" ||
+		strings.TrimSpace(metadata.KeyType) != ""
 }
 
 func metadataModifiedAtString(value time.Time) string {
@@ -781,13 +1737,15 @@ func metadataModifiedAtString(value time.Time) string {
 
 func credentialMetadataMatchesPayload(metadata credentialMetadata, payload credentialPayload) bool {
 	return strings.TrimSpace(metadata.KeyID) == strings.TrimSpace(payload.KeyID) &&
-		strings.TrimSpace(metadata.IssuerID) == strings.TrimSpace(payload.IssuerID)
+		strings.TrimSpace(metadata.IssuerID) == strings.TrimSpace(payload.IssuerID) &&
+		config.NormalizeCredentialKeyType(metadata.KeyType) == config.NormalizeCredentialKeyType(payload.KeyType)
 }
 
 func storedKeychainMetadataSummary(entry config.KeychainMetadata) credentialMetadata {
 	return credentialMetadata{
 		KeyID:    strings.TrimSpace(entry.KeyID),
 		IssuerID: strings.TrimSpace(entry.IssuerID),
+		KeyType:  normalizedStoredKeyType(entry.KeyType),
 	}
 }
 
@@ -816,6 +1774,7 @@ func loadStoredKeychainMetadata() map[string]config.KeychainMetadata {
 		entry.Name = name
 		entry.KeyID = strings.TrimSpace(entry.KeyID)
 		entry.IssuerID = strings.TrimSpace(entry.IssuerID)
+		entry.KeyType = normalizedStoredKeyType(entry.KeyType)
 		entry.ModifiedAt = strings.TrimSpace(entry.ModifiedAt)
 		stored[name] = entry
 	}
@@ -842,9 +1801,10 @@ func persistKeychainMetadata(cred Credential) {
 		Name:       name,
 		KeyID:      strings.TrimSpace(cred.KeyID),
 		IssuerID:   strings.TrimSpace(cred.IssuerID),
+		KeyType:    normalizedStoredKeyType(cred.KeyType),
 		ModifiedAt: metadataModifiedAtString(cred.MetadataModifiedAt),
 	}
-	if (metadata.KeyID == "" && metadata.IssuerID == "") || metadata.ModifiedAt == "" {
+	if (metadata.KeyID == "" && metadata.IssuerID == "" && metadata.KeyType == "") || metadata.ModifiedAt == "" {
 		return
 	}
 	updated := false
@@ -1013,6 +1973,7 @@ func listCredentialSummariesFromKeyring(kr keyring.Keyring) ([]Credential, error
 			Name:      name,
 			KeyID:     summary.KeyID,
 			IssuerID:  summary.IssuerID,
+			KeyType:   normalizedStoredKeyType(summary.KeyType),
 			IsDefault: name == defaultName,
 			Source:    "keychain",
 		})
@@ -1034,59 +1995,78 @@ func listFromKeyring(kr keyring.Keyring) ([]Credential, error) {
 		if !strings.HasPrefix(key, keyringItemPrefix) {
 			continue
 		}
-		item, err := kr.Get(key)
+		cred, found, err := credentialFromKeyringKey(kr, key, defaultName, storedMetadata)
 		if err != nil {
-			if errors.Is(err, keyring.ErrKeyNotFound) {
-				continue
-			}
 			return nil, err
 		}
-		var payload credentialPayload
-		if err := json.Unmarshal(item.Data, &payload); err != nil {
-			return nil, fmt.Errorf("invalid keychain entry %q: %w", key, err)
+		if !found {
+			continue
 		}
-		name := strings.TrimPrefix(key, keyringItemPrefix)
-		descriptionMetadata := parseCredentialMetadataDescription(item.Description)
-		metadataNeedsBackfill := !hasCredentialMetadata(descriptionMetadata)
-		metadataModifiedAt := time.Time{}
-		if metadataInfo, metadataErr := kr.GetMetadata(key); metadataErr == nil {
-			metadataModifiedAt = metadataInfo.ModificationTime
-		}
-		if metadataNeedsBackfill {
-			if stored, ok := storedMetadata[name]; ok &&
-				storedKeychainMetadataMatches(stored, metadataModifiedAt) &&
-				credentialMetadataMatchesPayload(storedKeychainMetadataSummary(stored), payload) {
-				metadataNeedsBackfill = false
-			}
-		}
-		needsRewrite := false
-		if strings.TrimSpace(payload.PrivateKeyPEM) == "" {
-			if privateKeyPEM, err := loadPrivateKeyPEMForStorage(payload.PrivateKeyPath); err == nil && strings.TrimSpace(privateKeyPEM) != "" {
-				payload.PrivateKeyPEM = privateKeyPEM
-				needsRewrite = true
-				metadataNeedsBackfill = false
-			}
-		}
-		if needsRewrite {
-			updatedItem, marshalErr := keyringItemForCredential(name, payload)
-			if marshalErr == nil {
-				_ = kr.Set(updatedItem)
-			}
-		}
-		credentials = append(credentials, Credential{
-			Name:                  name,
-			KeyID:                 payload.KeyID,
-			IssuerID:              payload.IssuerID,
-			PrivateKeyPath:        payload.PrivateKeyPath,
-			PrivateKeyPEM:         payload.PrivateKeyPEM,
-			IsDefault:             name == defaultName,
-			Source:                "keychain",
-			MetadataNeedsBackfill: metadataNeedsBackfill,
-			MetadataModifiedAt:    metadataModifiedAt,
-		})
+		credentials = append(credentials, cred)
 	}
 
 	return credentials, nil
+}
+
+// credentialFromKeyringKey reads one stored credential, including its secret.
+// It reports found=false when the item disappeared between listing and read.
+func credentialFromKeyringKey(
+	kr keyring.Keyring,
+	key string,
+	defaultName string,
+	storedMetadata map[string]config.KeychainMetadata,
+) (Credential, bool, error) {
+	item, err := kr.Get(key)
+	if err != nil {
+		if errors.Is(err, keyring.ErrKeyNotFound) {
+			return Credential{}, false, nil
+		}
+		return Credential{}, false, err
+	}
+	var payload credentialPayload
+	if err := json.Unmarshal(item.Data, &payload); err != nil {
+		return Credential{}, false, fmt.Errorf("invalid keychain entry %q: %w", key, err)
+	}
+	name := strings.TrimPrefix(key, keyringItemPrefix)
+	descriptionMetadata := parseCredentialMetadataDescription(item.Description)
+	metadataNeedsBackfill := !hasCredentialMetadata(descriptionMetadata)
+	metadataModifiedAt := time.Time{}
+	if metadataInfo, metadataErr := kr.GetMetadata(key); metadataErr == nil {
+		metadataModifiedAt = metadataInfo.ModificationTime
+	}
+	if metadataNeedsBackfill {
+		if stored, ok := storedMetadata[name]; ok &&
+			storedKeychainMetadataMatches(stored, metadataModifiedAt) &&
+			credentialMetadataMatchesPayload(storedKeychainMetadataSummary(stored), payload) {
+			metadataNeedsBackfill = false
+		}
+	}
+	needsRewrite := false
+	if strings.TrimSpace(payload.PrivateKeyPEM) == "" {
+		if privateKeyPEM, err := loadPrivateKeyPEMForStorage(payload.PrivateKeyPath); err == nil && strings.TrimSpace(privateKeyPEM) != "" {
+			payload.PrivateKeyPEM = privateKeyPEM
+			needsRewrite = true
+			metadataNeedsBackfill = false
+		}
+	}
+	if needsRewrite {
+		updatedItem, marshalErr := keyringItemForCredential(name, payload)
+		if marshalErr == nil {
+			_ = kr.Set(updatedItem)
+		}
+	}
+	return Credential{
+		Name:                  name,
+		KeyID:                 payload.KeyID,
+		IssuerID:              payload.IssuerID,
+		PrivateKeyPath:        payload.PrivateKeyPath,
+		PrivateKeyPEM:         payload.PrivateKeyPEM,
+		KeyType:               normalizedStoredKeyType(payload.KeyType),
+		IsDefault:             name == defaultName,
+		Source:                "keychain",
+		MetadataNeedsBackfill: metadataNeedsBackfill,
+		MetadataModifiedAt:    metadataModifiedAt,
+	}, true, nil
 }
 
 func migrateLegacyCredentials(credentials []Credential) {
@@ -1096,6 +2076,7 @@ func migrateLegacyCredentials(credentials []Credential) {
 			IssuerID:       cred.IssuerID,
 			PrivateKeyPath: cred.PrivateKeyPath,
 			PrivateKeyPEM:  cred.PrivateKeyPEM,
+			KeyType:        normalizedStoredKeyType(cred.KeyType),
 		}
 		if err := storeInKeychain(cred.Name, payload); err != nil {
 			continue
@@ -1104,35 +2085,115 @@ func migrateLegacyCredentials(credentials []Credential) {
 	}
 }
 
-func removeFromConfigIfPresent(name string) error {
-	paths, err := configCleanupPaths()
+func removeFromConfigIfPresent(name string, includeGlobal bool) error {
+	paths, err := configCleanupPaths(includeGlobal)
 	if err != nil {
 		return err
 	}
 
-	removed := false
+	type configRemoval struct {
+		path     string
+		original *config.Config
+		updated  *config.Config
+	}
+	removals := make([]configRemoval, 0, len(paths))
 	missingCredential := false
 	for _, path := range paths {
-		err := removeFromConfigAt(name, path)
-		switch {
-		case err == nil:
-			removed = true
-		case errors.Is(err, config.ErrNotFound):
-			continue
-		case errors.Is(err, keyring.ErrKeyNotFound):
+		cfg, err := config.LoadAt(path)
+		if errors.Is(err, config.ErrNotFound) {
+			// A missing config file holds no matching credential.
 			missingCredential = true
-		default:
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		updated := cloneConfigForCredentialRemoval(cfg)
+		if !removeCredentialFromConfig(updated, name) {
+			missingCredential = true
+			continue
+		}
+		removals = append(removals, configRemoval{path: path, original: cfg, updated: updated})
+	}
+
+	for index, removal := range removals {
+		if err := config.SaveAt(removal.path, removal.updated); err != nil {
+			rollbackErrors := make([]error, 0, index+1)
+			for rollbackIndex := index; rollbackIndex >= 0; rollbackIndex-- {
+				prior := removals[rollbackIndex]
+				if rollbackErr := config.SaveAt(prior.path, prior.original); rollbackErr != nil {
+					rollbackErrors = append(rollbackErrors, fmt.Errorf("restore config %q: %w", prior.path, rollbackErr))
+				}
+			}
+			if rollbackErr := errors.Join(rollbackErrors...); rollbackErr != nil {
+				return fmt.Errorf("%w; restore earlier config credentials: %w", err, rollbackErr)
+			}
 			return err
 		}
 	}
 
-	if removed {
+	if len(removals) > 0 {
 		return nil
 	}
 	if missingCredential {
 		return keyring.ErrKeyNotFound
 	}
 	return nil
+}
+
+func cloneConfigForCredentialRemoval(cfg *config.Config) *config.Config {
+	cloned := *cfg
+	cloned.Keys = append([]config.Credential(nil), cfg.Keys...)
+	cloned.KeychainMetadata = append([]config.KeychainMetadata(nil), cfg.KeychainMetadata...)
+	return &cloned
+}
+
+func removeCredentialFromConfig(cfg *config.Config, name string) bool {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		cfg.KeyID = ""
+		cfg.IssuerID = ""
+		cfg.PrivateKeyPath = ""
+		cfg.KeyType = ""
+		cfg.DefaultKeyName = ""
+		cfg.Keys = nil
+		cfg.KeychainMetadata = nil
+		return true
+	}
+
+	removed := false
+	if len(cfg.Keys) > 0 {
+		filtered := cfg.Keys[:0]
+		for _, cred := range cfg.Keys {
+			if strings.TrimSpace(cred.Name) == name {
+				removed = true
+				continue
+			}
+			filtered = append(filtered, cred)
+		}
+		cfg.Keys = filtered
+	}
+	if len(cfg.KeychainMetadata) > 0 {
+		filteredMetadata := cfg.KeychainMetadata[:0]
+		for _, entry := range cfg.KeychainMetadata {
+			if strings.TrimSpace(entry.Name) == name {
+				removed = true
+				continue
+			}
+			filteredMetadata = append(filteredMetadata, entry)
+		}
+		cfg.KeychainMetadata = filteredMetadata
+	}
+
+	if strings.TrimSpace(cfg.DefaultKeyName) == name {
+		cfg.KeyID = ""
+		cfg.IssuerID = ""
+		cfg.PrivateKeyPath = ""
+		cfg.KeyType = ""
+		cfg.DefaultKeyName = ""
+		removed = true
+	}
+	return removed
 }
 
 func removeFromKeychain(name string) error {
@@ -1214,6 +2275,7 @@ func storeInConfigAt(name string, payload credentialPayload, configPath string) 
 			cfg.Keys[i].KeyID = payload.KeyID
 			cfg.Keys[i].IssuerID = payload.IssuerID
 			cfg.Keys[i].PrivateKeyPath = payload.PrivateKeyPath
+			cfg.Keys[i].KeyType = normalizedStoredKeyType(payload.KeyType)
 			updated = true
 			break
 		}
@@ -1224,12 +2286,14 @@ func storeInConfigAt(name string, payload credentialPayload, configPath string) 
 			KeyID:          payload.KeyID,
 			IssuerID:       payload.IssuerID,
 			PrivateKeyPath: payload.PrivateKeyPath,
+			KeyType:        normalizedStoredKeyType(payload.KeyType),
 		})
 	}
 
 	cfg.KeyID = payload.KeyID
 	cfg.IssuerID = payload.IssuerID
 	cfg.PrivateKeyPath = payload.PrivateKeyPath
+	cfg.KeyType = normalizedStoredKeyType(payload.KeyType)
 	cfg.DefaultKeyName = name
 	return config.SaveAt(configPath, cfg)
 }
@@ -1244,14 +2308,16 @@ func hasAnyCredentials(cfg *config.Config) bool {
 	}
 	if strings.TrimSpace(cfg.KeyID) != "" ||
 		strings.TrimSpace(cfg.IssuerID) != "" ||
-		strings.TrimSpace(cfg.PrivateKeyPath) != "" {
+		cfg.PrivateKeyPath != "" ||
+		strings.TrimSpace(cfg.KeyType) != "" {
 		return true
 	}
 	for _, cred := range cfg.Keys {
 		if strings.TrimSpace(cred.Name) != "" ||
 			strings.TrimSpace(cred.KeyID) != "" ||
 			strings.TrimSpace(cred.IssuerID) != "" ||
-			strings.TrimSpace(cred.PrivateKeyPath) != "" {
+			cred.PrivateKeyPath != "" ||
+			strings.TrimSpace(cred.KeyType) != "" {
 			return true
 		}
 	}
@@ -1259,16 +2325,18 @@ func hasAnyCredentials(cfg *config.Config) bool {
 }
 
 func isCompleteConfigCredential(cred config.Credential) bool {
+	hasIssuer := strings.TrimSpace(cred.IssuerID) != "" ||
+		config.IsIndividualCredentialKeyType(cred.KeyType)
 	return strings.TrimSpace(cred.KeyID) != "" &&
-		strings.TrimSpace(cred.IssuerID) != "" &&
-		strings.TrimSpace(cred.PrivateKeyPath) != ""
+		hasIssuer &&
+		cred.PrivateKeyPath != ""
 }
 
 func hasLegacyCredentials(cfg *config.Config) bool {
 	return cfg != nil &&
 		strings.TrimSpace(cfg.KeyID) != "" &&
-		strings.TrimSpace(cfg.IssuerID) != "" &&
-		strings.TrimSpace(cfg.PrivateKeyPath) != ""
+		(strings.TrimSpace(cfg.IssuerID) != "" || config.IsIndividualCredentialKeyType(cfg.KeyType)) &&
+		cfg.PrivateKeyPath != ""
 }
 
 func configCredentialList(cfg *config.Config) []config.Credential {
@@ -1301,6 +2369,7 @@ func configCredentialList(cfg *config.Config) []config.Credential {
 				KeyID:          cfg.KeyID,
 				IssuerID:       cfg.IssuerID,
 				PrivateKeyPath: cfg.PrivateKeyPath,
+				KeyType:        normalizedStoredKeyType(cfg.KeyType),
 			})
 		}
 	}
@@ -1329,12 +2398,14 @@ func findConfigCredential(cfg *config.Config, name string) (config.Credential, b
 	}
 	if name == legacyName && (strings.TrimSpace(cfg.KeyID) != "" ||
 		strings.TrimSpace(cfg.IssuerID) != "" ||
-		strings.TrimSpace(cfg.PrivateKeyPath) != "") {
+		cfg.PrivateKeyPath != "" ||
+		strings.TrimSpace(cfg.KeyType) != "") {
 		cred := config.Credential{
 			Name:           legacyName,
 			KeyID:          cfg.KeyID,
 			IssuerID:       cfg.IssuerID,
 			PrivateKeyPath: cfg.PrivateKeyPath,
+			KeyType:        normalizedStoredKeyType(cfg.KeyType),
 		}
 		return cred, true, isCompleteConfigCredential(cred)
 	}
@@ -1347,6 +2418,7 @@ func applyConfigCredential(cfg *config.Config, cred config.Credential) *config.C
 			KeyID:          cred.KeyID,
 			IssuerID:       cred.IssuerID,
 			PrivateKeyPath: cred.PrivateKeyPath,
+			KeyType:        normalizedStoredKeyType(cred.KeyType),
 			DefaultKeyName: strings.TrimSpace(cred.Name),
 		}
 	}
@@ -1354,6 +2426,7 @@ func applyConfigCredential(cfg *config.Config, cred config.Credential) *config.C
 	copied.KeyID = cred.KeyID
 	copied.IssuerID = cred.IssuerID
 	copied.PrivateKeyPath = cred.PrivateKeyPath
+	copied.KeyType = normalizedStoredKeyType(cred.KeyType)
 	if strings.TrimSpace(cred.Name) != "" {
 		copied.DefaultKeyName = strings.TrimSpace(cred.Name)
 	}
@@ -1458,6 +2531,7 @@ func listFromConfig() ([]Credential, error) {
 			KeyID:          cred.KeyID,
 			IssuerID:       cred.IssuerID,
 			PrivateKeyPath: cred.PrivateKeyPath,
+			KeyType:        normalizedStoredKeyType(cred.KeyType),
 			IsDefault:      cred.Name == defaultName,
 			Source:         "config",
 			SourcePath:     path,
@@ -1490,6 +2564,7 @@ func saveDefaultName(name string) error {
 				cfg.KeyID = cred.KeyID
 				cfg.IssuerID = cred.IssuerID
 				cfg.PrivateKeyPath = cred.PrivateKeyPath
+				cfg.KeyType = normalizedStoredKeyType(cred.KeyType)
 				return config.Save(cfg)
 			}
 		}
@@ -1523,63 +2598,17 @@ func clearDefaultNameIf(name string) error {
 	return nil
 }
 
-func removeFromConfigAt(name, path string) error {
-	cfg, err := config.LoadAt(path)
-	if err != nil {
-		return err
-	}
-	name = strings.TrimSpace(name)
-	if name == "" {
-		cfg.KeyID = ""
-		cfg.IssuerID = ""
-		cfg.PrivateKeyPath = ""
-		cfg.DefaultKeyName = ""
-		cfg.Keys = nil
-		cfg.KeychainMetadata = nil
-		return config.SaveAt(path, cfg)
-	}
-
-	removed := false
-	if len(cfg.Keys) > 0 {
-		filtered := cfg.Keys[:0]
-		for _, cred := range cfg.Keys {
-			if strings.TrimSpace(cred.Name) == name {
-				removed = true
-				continue
-			}
-			filtered = append(filtered, cred)
-		}
-		cfg.Keys = filtered
-	}
-	if len(cfg.KeychainMetadata) > 0 {
-		filteredMetadata := cfg.KeychainMetadata[:0]
-		for _, entry := range cfg.KeychainMetadata {
-			if strings.TrimSpace(entry.Name) == name {
-				removed = true
-				continue
-			}
-			filteredMetadata = append(filteredMetadata, entry)
-		}
-		cfg.KeychainMetadata = filteredMetadata
-	}
-
-	if strings.TrimSpace(cfg.DefaultKeyName) == name {
-		cfg.KeyID = ""
-		cfg.IssuerID = ""
-		cfg.PrivateKeyPath = ""
-		cfg.DefaultKeyName = ""
-		removed = true
-	}
-	if !removed {
-		return keyring.ErrKeyNotFound
-	}
-	return config.SaveAt(path, cfg)
-}
-
-func configCleanupPaths() ([]string, error) {
+// configCleanupPaths returns the config files credential cleanup edits: the
+// active config, plus the global config when ASC_CONFIG_PATH is unset or
+// includeGlobal is true. While ASC_CONFIG_PATH is set, reads never consult the
+// global config, so default cleanup leaves it alone.
+func configCleanupPaths(includeGlobal bool) ([]string, error) {
 	activePath, err := config.Path()
 	if err != nil {
 		return nil, err
+	}
+	if _, overridden, _ := config.OverridePath(); overridden && !includeGlobal {
+		return []string{activePath}, nil
 	}
 	globalPath, err := config.GlobalPath()
 	if err != nil {

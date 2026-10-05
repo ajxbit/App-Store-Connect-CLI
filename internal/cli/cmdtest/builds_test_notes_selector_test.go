@@ -2,8 +2,6 @@ package cmdtest
 
 import (
 	"context"
-	"errors"
-	"flag"
 	"io"
 	"net/http"
 	"path/filepath"
@@ -116,6 +114,9 @@ func TestBuildsTestNotesUpdateByBuildNumberAndLocale(t *testing.T) {
 			if query.Get("filter[version]") != "42" {
 				t.Fatalf("expected filter[version]=42, got %q", query.Get("filter[version]"))
 			}
+			if query.Get("filter[preReleaseVersion.platform]") != "IOS" {
+				t.Fatalf("expected IOS platform filter, got %q", query.Get("filter[preReleaseVersion.platform]"))
+			}
 			if query.Get("sort") != "-uploadedDate" {
 				t.Fatalf("expected sort=-uploadedDate, got %q", query.Get("sort"))
 			}
@@ -170,6 +171,7 @@ func TestBuildsTestNotesUpdateByBuildNumberAndLocale(t *testing.T) {
 			"builds", "test-notes", "update",
 			"--app", "123456789",
 			"--build-number", "42",
+			"--platform", "IOS",
 			"--locale", "en-US",
 			"--whats-new", "Updated notes",
 			"--output", "json",
@@ -181,15 +183,15 @@ func TestBuildsTestNotesUpdateByBuildNumberAndLocale(t *testing.T) {
 		}
 	})
 
-	if !strings.Contains(stderr, deprecatedImplicitIOSBuildNumberPlatformWarning) {
-		t.Fatalf("expected implicit IOS deprecation warning, got %q", stderr)
+	if stderr != "" {
+		t.Fatalf("expected empty stderr, got %q", stderr)
 	}
 	if !strings.Contains(stdout, `"id":"loc-42"`) {
 		t.Fatalf("expected updated localization output, got %q", stdout)
 	}
 }
 
-func TestBuildsTestNotesListLegacyBuildAliasWarnsAndMatchesCanonicalOutput(t *testing.T) {
+func TestBuildsTestNotesCreateUpdatesExistingLocale(t *testing.T) {
 	setupAuth(t)
 	t.Setenv("ASC_CONFIG_PATH", filepath.Join(t.TempDir(), "nonexistent.json"))
 
@@ -201,29 +203,53 @@ func TestBuildsTestNotesListLegacyBuildAliasWarnsAndMatchesCanonicalOutput(t *te
 	requestCount := 0
 	http.DefaultTransport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
 		requestCount++
-		switch requestCount % 2 {
+		switch requestCount {
 		case 1:
-			if req.Method != http.MethodGet {
-				t.Fatalf("expected GET, got %s", req.Method)
-			}
-			if req.URL.Path != "/v1/builds/build-1" {
-				t.Fatalf("expected path /v1/builds/build-1, got %s", req.URL.Path)
+			if req.Method != http.MethodGet || req.URL.Path != "/v1/builds/build-1" {
+				t.Fatalf("unexpected first request: %s %s", req.Method, req.URL.String())
 			}
 			return jsonResponse(http.StatusOK, `{
 				"data":{"type":"builds","id":"build-1","attributes":{"version":"42","processingState":"VALID"}}
 			}`)
-		case 0:
-			if req.Method != http.MethodGet {
-				t.Fatalf("expected GET, got %s", req.Method)
+		case 2:
+			if req.Method != http.MethodGet || req.URL.Path != "/v1/builds/build-1/app" {
+				t.Fatalf("unexpected second request: %s %s", req.Method, req.URL.String())
 			}
-			if req.URL.Path != "/v1/betaBuildLocalizations" {
-				t.Fatalf("expected path /v1/betaBuildLocalizations, got %s", req.URL.Path)
+			return jsonResponse(http.StatusOK, `{"data":{"type":"apps","id":"123456789"}}`)
+		case 3:
+			if req.Method != http.MethodGet || req.URL.Path != "/v1/betaAppLocalizations" {
+				t.Fatalf("unexpected third request: %s %s", req.Method, req.URL.String())
 			}
-			if req.URL.Query().Get("filter[build]") != "build-1" {
-				t.Fatalf("expected filter[build]=build-1, got %q", req.URL.Query().Get("filter[build]"))
+			if got := req.URL.Query().Get("filter[app]"); got != "123456789" {
+				t.Fatalf("expected filter[app]=123456789, got %q", got)
 			}
 			return jsonResponse(http.StatusOK, `{
-				"data":[{"type":"betaBuildLocalizations","id":"loc-1","attributes":{"locale":"en-US","whatsNew":"Notes"}}]
+				"data":[{"type":"betaAppLocalizations","id":"bal-en","attributes":{"locale":"en-US"}}]
+			}`)
+		case 4:
+			if req.Method != http.MethodGet || req.URL.Path != "/v1/builds/build-1/betaBuildLocalizations" {
+				t.Fatalf("unexpected fourth request: %s %s", req.Method, req.URL.String())
+			}
+			query := req.URL.Query()
+			if query.Get("limit") != "200" {
+				t.Fatalf("expected limit=200, got %q", query.Get("limit"))
+			}
+			return jsonResponse(http.StatusOK, `{
+				"data":[{"type":"betaBuildLocalizations","id":"loc-en","attributes":{"locale":"en-US","whatsNew":"Old notes"}}]
+			}`)
+		case 5:
+			if req.Method != http.MethodPatch || req.URL.Path != "/v1/betaBuildLocalizations/loc-en" {
+				t.Fatalf("unexpected fifth request: %s %s", req.Method, req.URL.String())
+			}
+			payload, err := io.ReadAll(req.Body)
+			if err != nil {
+				t.Fatalf("read body error: %v", err)
+			}
+			if !strings.Contains(string(payload), `"whatsNew":"Updated notes"`) {
+				t.Fatalf("expected whatsNew payload, got %s", string(payload))
+			}
+			return jsonResponse(http.StatusOK, `{
+				"data":{"type":"betaBuildLocalizations","id":"loc-en","attributes":{"locale":"en-US","whatsNew":"Updated notes"}}
 			}`)
 		default:
 			t.Fatalf("unexpected request count %d", requestCount)
@@ -231,85 +257,76 @@ func TestBuildsTestNotesListLegacyBuildAliasWarnsAndMatchesCanonicalOutput(t *te
 		}
 	})
 
-	run := func(args []string) (string, string) {
-		root := RootCommand("1.2.3")
-		root.FlagSet.SetOutput(io.Discard)
+	root := RootCommand("1.2.3")
+	root.FlagSet.SetOutput(io.Discard)
 
-		return captureOutput(t, func() {
-			if err := root.Parse(args); err != nil {
-				t.Fatalf("parse error: %v", err)
-			}
-			if err := root.Run(context.Background()); err != nil {
-				t.Fatalf("run error: %v", err)
-			}
-		})
+	stdout, stderr := captureOutput(t, func() {
+		if err := root.Parse([]string{
+			"builds", "test-notes", "create",
+			"--build-id", "build-1",
+			"--locale", "en-US",
+			"--whats-new", "Updated notes",
+			"--output", "json",
+		}); err != nil {
+			t.Fatalf("parse error: %v", err)
+		}
+		if err := root.Run(context.Background()); err != nil {
+			t.Fatalf("run error: %v", err)
+		}
+	})
+
+	if stderr != "" {
+		t.Fatalf("expected empty stderr, got %q", stderr)
 	}
-
-	canonicalStdout, canonicalStderr := run([]string{"builds", "test-notes", "list", "--build-id", "build-1", "--output", "json"})
-	aliasStdout, aliasStderr := run([]string{"builds", "test-notes", "list", "--build", "build-1", "--output", "json"})
-
-	if canonicalStderr != "" {
-		t.Fatalf("expected canonical command to avoid warnings, got %q", canonicalStderr)
+	if !strings.Contains(stdout, `"id":"loc-en"`) {
+		t.Fatalf("expected existing localization output, got %q", stdout)
 	}
-	requireStderrContainsWarning(t, aliasStderr, "Warning: `--build` is deprecated. Use `--build-id`.")
-	assertOnlyDeprecatedCommandWarnings(t, aliasStderr)
-	if canonicalStdout != aliasStdout {
-		t.Fatalf("expected canonical and alias output to match, canonical=%q alias=%q", canonicalStdout, aliasStdout)
+	if requestCount != 5 {
+		t.Fatalf("expected five requests, got %d", requestCount)
 	}
 }
 
-func TestBuildsTestNotesRejectsConflictingBuildValues(t *testing.T) {
+func TestBuildsTestNotesRemovedSelectorAliasesHaveGuidance(t *testing.T) {
 	tests := []struct {
 		name string
 		args []string
+		flag string
 	}{
 		{
-			name: "list conflicting build values",
-			args: []string{"builds", "test-notes", "list", "--build-id", "BUILD_CANON", "--build", "BUILD_LEGACY"},
+			name: "list build alias",
+			args: []string{"builds", "test-notes", "list", "--build", "BUILD_123"},
+			flag: "--build",
 		},
 		{
-			name: "view conflicting build values",
-			args: []string{"builds", "test-notes", "view", "--build-id", "BUILD_CANON", "--build", "BUILD_LEGACY"},
+			name: "view build alias",
+			args: []string{"builds", "test-notes", "view", "--build", "BUILD_123", "--locale", "en-US"},
+			flag: "--build",
 		},
 		{
-			name: "create conflicting build values",
-			args: []string{"builds", "test-notes", "create", "--build-id", "BUILD_CANON", "--build", "BUILD_LEGACY"},
+			name: "view localization id alias",
+			args: []string{"builds", "test-notes", "view", "--id", "loc-1"},
+			flag: "--id",
 		},
 		{
-			name: "update conflicting build values",
-			args: []string{"builds", "test-notes", "update", "--build-id", "BUILD_CANON", "--build", "BUILD_LEGACY"},
+			name: "create build alias",
+			args: []string{"builds", "test-notes", "create", "--build", "BUILD_123", "--locale", "en-US", "--whats-new", "Notes"},
+			flag: "--build",
 		},
 		{
-			name: "delete conflicting build values",
-			args: []string{"builds", "test-notes", "delete", "--build-id", "BUILD_CANON", "--build", "BUILD_LEGACY"},
+			name: "update localization id alias",
+			args: []string{"builds", "test-notes", "update", "--id", "loc-1", "--whats-new", "Notes"},
+			flag: "--id",
+		},
+		{
+			name: "delete localization id alias",
+			args: []string{"builds", "test-notes", "delete", "--id", "loc-1", "--confirm"},
+			flag: "--id",
 		},
 	}
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			root := RootCommand("1.2.3")
-			root.FlagSet.SetOutput(io.Discard)
-
-			var runErr error
-			stdout, stderr := captureOutput(t, func() {
-				if err := root.Parse(test.args); err != nil {
-					t.Fatalf("parse error: %v", err)
-				}
-				runErr = root.Run(context.Background())
-			})
-
-			if !errors.Is(runErr, flag.ErrHelp) {
-				t.Fatalf("expected ErrHelp, got %v", runErr)
-			}
-			if stdout != "" {
-				t.Fatalf("expected empty stdout, got %q", stdout)
-			}
-			if !strings.Contains(stderr, "Error: --build conflicts with --build-id; use only --build-id") {
-				t.Fatalf("expected conflicting build selector error, got %q", stderr)
-			}
-			if strings.Contains(stderr, buildsLegacyBuildWarning) {
-				t.Fatalf("expected conflict to fail before deprecation warning, got %q", stderr)
-			}
+			assertRemovedFlagGuidance(t, test.args, test.flag)
 		})
 	}
 }

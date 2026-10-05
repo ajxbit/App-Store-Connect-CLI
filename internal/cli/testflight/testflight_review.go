@@ -25,12 +25,12 @@ func TestFlightReviewCommand() *ffcli.Command {
 		LongHelp: `Manage TestFlight beta app review details and submissions.
 
 Examples:
-  asc testflight review get --app "APP_ID"
+  asc testflight review view --app "APP_ID"
   asc testflight review update --id "DETAIL_ID" --contact-email "dev@example.com"
   asc testflight review submit --build-id "BUILD_ID" --confirm
-  asc testflight review app get --id "DETAIL_ID"
+  asc testflight review app view --id "DETAIL_ID"
   asc testflight review submissions list --build-id "BUILD_ID"
-  asc testflight review submissions get --id "SUBMISSION_ID"`,
+  asc testflight review submissions view --id "SUBMISSION_ID"`,
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
 		Subcommands: []*ffcli.Command{
@@ -48,40 +48,45 @@ Examples:
 
 // TestFlightReviewGetCommand retrieves beta app review details for an app.
 func TestFlightReviewGetCommand() *ffcli.Command {
-	fs := flag.NewFlagSet("get", flag.ExitOnError)
+	fs := flag.NewFlagSet("view", flag.ExitOnError)
 
 	appID := fs.String("app", "", "App Store Connect app ID (or ASC_APP_ID env)")
+	includeSensitive := shared.BindIncludeSensitiveFlag(fs)
 	output := shared.BindOutputFlags(fs)
 	limit := fs.Int("limit", 0, "Maximum results per page (1-200)")
 	next := fs.String("next", "", "Fetch next page using a links.next URL")
 
 	return &ffcli.Command{
-		Name:       "get",
-		ShortUsage: "asc testflight review get [flags]",
-		ShortHelp:  "Fetch beta app review details for an app.",
-		LongHelp: `Fetch beta app review details for an app.
+		Name:       "view",
+		ShortUsage: "asc testflight review view [flags]",
+		ShortHelp:  "View beta app review details for an app.",
+		LongHelp: `View beta app review details for an app.
 
 Examples:
-  asc testflight review get --app "APP_ID"`,
+  asc testflight review view --app "APP_ID"`,
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
 			if *limit != 0 && (*limit < 1 || *limit > 200) {
-				return fmt.Errorf("testflight review get: --limit must be between 1 and 200")
+				return shared.WithDiagnostic(
+					shared.UsageErrorCtx(ctx, "testflight review view: --limit must be between 1 and 200"),
+					shared.DiagnosticInvalidInput,
+					"--limit",
+				)
 			}
 			if err := shared.ValidateNextURL(*next); err != nil {
-				return fmt.Errorf("testflight review get: %w", err)
+				return shared.UsageErrorfCtx(ctx, "testflight review view: %v", err)
 			}
 
 			resolvedAppID := shared.ResolveAppID(*appID)
 			if resolvedAppID == "" && strings.TrimSpace(*next) == "" {
 				fmt.Fprintf(os.Stderr, "Error: --app is required (or set ASC_APP_ID)\n\n")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--app")
 			}
 
 			client, err := shared.GetASCClient()
 			if err != nil {
-				return fmt.Errorf("testflight review get: %w", err)
+				return fmt.Errorf("testflight review view: %w", err)
 			}
 
 			requestCtx, cancel := shared.ContextWithTimeout(ctx)
@@ -94,9 +99,13 @@ Examples:
 
 			details, err := client.GetBetaAppReviewDetails(requestCtx, resolvedAppID, opts...)
 			if err != nil {
-				return fmt.Errorf("testflight review get: failed to fetch: %w", err)
+				return fmt.Errorf("testflight review view: failed to fetch: %w", err)
 			}
 
+			shared.WarnIncludeSensitive(os.Stderr, *includeSensitive)
+			if !*includeSensitive {
+				details = asc.RedactBetaAppReviewDetailsResponse(details)
+			}
 			return shared.PrintOutput(details, *output.Output, *output.Pretty)
 		},
 	}
@@ -106,7 +115,7 @@ Examples:
 func TestFlightReviewUpdateCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("update", flag.ExitOnError)
 
-	id := fs.String("id", "", "Beta app review detail ID")
+	id := shared.BindResourceIDFlag(fs, "id", "betaAppReviewDetails", "Beta app review detail ID")
 	contactFirstName := fs.String("contact-first-name", "", "Contact first name")
 	contactLastName := fs.String("contact-last-name", "", "Contact last name")
 	contactEmail := fs.String("contact-email", "", "Contact email")
@@ -115,6 +124,7 @@ func TestFlightReviewUpdateCommand() *ffcli.Command {
 	demoAccountPassword := fs.String("demo-account-password", "", "Demo account password")
 	demoAccountRequired := fs.Bool("demo-account-required", false, "Demo account required")
 	notes := fs.String("notes", "", "Review notes")
+	includeSensitive := shared.BindIncludeSensitiveFlag(fs)
 	output := shared.BindOutputFlags(fs)
 
 	return &ffcli.Command{
@@ -132,7 +142,7 @@ Examples:
 			detailID := strings.TrimSpace(*id)
 			if detailID == "" {
 				fmt.Fprintln(os.Stderr, "Error: --id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--id")
 			}
 
 			visited := map[string]bool{}
@@ -150,7 +160,7 @@ Examples:
 				visited["notes"]
 			if !hasUpdates {
 				fmt.Fprintln(os.Stderr, "Error: at least one update flag is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("")
 			}
 
 			attrs := asc.BetaAppReviewDetailUpdateAttributes{}
@@ -200,6 +210,10 @@ Examples:
 				return fmt.Errorf("testflight review update: failed to update: %w", err)
 			}
 
+			shared.WarnIncludeSensitive(os.Stderr, *includeSensitive)
+			if !*includeSensitive {
+				detail = asc.RedactBetaAppReviewDetailResponse(detail)
+			}
 			return shared.PrintOutput(detail, *output.Output, *output.Pretty)
 		},
 	}
@@ -209,7 +223,7 @@ Examples:
 func TestFlightReviewSubmitCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("submit", flag.ExitOnError)
 
-	buildID, legacyBuildID := bindBuildIDFlag(fs, "Build ID")
+	buildID := shared.BindResourceIDFlag(fs, "build-id", "builds", "Build ID")
 	confirm := fs.Bool("confirm", false, "Confirm submission")
 	output := shared.BindOutputFlags(fs)
 
@@ -224,16 +238,13 @@ Examples:
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
-			if err := applyLegacyBuildIDAlias(buildID, legacyBuildID); err != nil {
-				return err
-			}
 			if strings.TrimSpace(*buildID) == "" {
 				fmt.Fprintln(os.Stderr, "Error: --build-id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--build-id")
 			}
 			if !*confirm {
 				fmt.Fprintln(os.Stderr, "Error: --confirm is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--confirm")
 			}
 
 			client, err := shared.GetASCClient()
@@ -265,7 +276,7 @@ func TestFlightReviewAppCommand() *ffcli.Command {
 		LongHelp: `View the app for a beta app review detail.
 
 Examples:
-  asc testflight review app get --id "DETAIL_ID"`,
+  asc testflight review app view --id "DETAIL_ID"`,
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
 		Subcommands: []*ffcli.Command{
@@ -279,31 +290,31 @@ Examples:
 
 // TestFlightReviewAppGetCommand retrieves the app for a beta app review detail.
 func TestFlightReviewAppGetCommand() *ffcli.Command {
-	fs := flag.NewFlagSet("app get", flag.ExitOnError)
+	fs := flag.NewFlagSet("app view", flag.ExitOnError)
 
-	id := fs.String("id", "", "Beta app review detail ID")
+	id := shared.BindResourceIDFlag(fs, "id", "betaAppReviewDetails", "Beta app review detail ID")
 	output := shared.BindOutputFlags(fs)
 
 	return &ffcli.Command{
-		Name:       "get",
-		ShortUsage: "asc testflight review app get --id \"DETAIL_ID\"",
-		ShortHelp:  "Get the app for a beta app review detail.",
-		LongHelp: `Get the app for a beta app review detail.
+		Name:       "view",
+		ShortUsage: "asc testflight review app view --id \"DETAIL_ID\"",
+		ShortHelp:  "View the app for a beta app review detail.",
+		LongHelp: `View the app for a beta app review detail.
 
 Examples:
-  asc testflight review app get --id "DETAIL_ID"`,
+  asc testflight review app view --id "DETAIL_ID"`,
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
 			idValue := strings.TrimSpace(*id)
 			if idValue == "" {
 				fmt.Fprintln(os.Stderr, "Error: --id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--id")
 			}
 
 			client, err := shared.GetASCClient()
 			if err != nil {
-				return fmt.Errorf("testflight review app get: %w", err)
+				return fmt.Errorf("testflight review app view: %w", err)
 			}
 
 			requestCtx, cancel := shared.ContextWithTimeout(ctx)
@@ -311,7 +322,7 @@ Examples:
 
 			resp, err := client.GetBetaAppReviewDetailApp(requestCtx, idValue)
 			if err != nil {
-				return fmt.Errorf("testflight review app get: failed to fetch: %w", err)
+				return fmt.Errorf("testflight review app view: failed to fetch: %w", err)
 			}
 
 			return shared.PrintOutput(resp, *output.Output, *output.Pretty)
@@ -330,7 +341,7 @@ func TestFlightReviewSubmissionsCommand() *ffcli.Command {
 		LongHelp: `View beta app review submissions.
 
 Examples:
-  asc testflight review submissions get --id "SUBMISSION_ID"
+  asc testflight review submissions view --id "SUBMISSION_ID"
   asc testflight review submissions build --id "SUBMISSION_ID"
   asc testflight review submissions list --build-id "BUILD_ID"`,
 		FlagSet:   fs,
@@ -350,7 +361,7 @@ Examples:
 func TestFlightReviewSubmissionsListCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("submissions list", flag.ExitOnError)
 
-	buildID, legacyBuildID := bindBuildIDFlag(fs, "Build ID to filter")
+	buildID := shared.BindResourceIDFlag(fs, "build-id", "builds", "Build ID to filter")
 	limit := fs.Int("limit", 0, "Maximum results per page (1-200)")
 	next := fs.String("next", "", "Fetch next page using a links.next URL")
 	paginate := fs.Bool("paginate", false, "Automatically fetch all pages (aggregate results)")
@@ -368,19 +379,20 @@ Examples:
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
-			if err := applyLegacyBuildIDAlias(buildID, legacyBuildID); err != nil {
-				return err
-			}
 			buildValue := strings.TrimSpace(*buildID)
 			if buildValue == "" {
 				fmt.Fprintln(os.Stderr, "Error: --build-id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--build-id")
 			}
 			if *limit != 0 && (*limit < 1 || *limit > 200) {
-				return fmt.Errorf("testflight review submissions list: --limit must be between 1 and 200")
+				return shared.WithDiagnostic(
+					shared.UsageErrorCtx(ctx, "testflight review submissions list: --limit must be between 1 and 200"),
+					shared.DiagnosticInvalidInput,
+					"--limit",
+				)
 			}
 			if err := shared.ValidateNextURL(*next); err != nil {
-				return fmt.Errorf("testflight review submissions list: %w", err)
+				return shared.UsageErrorfCtx(ctx, "testflight review submissions list: %v", err)
 			}
 
 			client, err := shared.GetASCClient()
@@ -400,7 +412,8 @@ Examples:
 
 			if *paginate {
 				paginateOpts := append(opts, asc.WithBetaAppReviewSubmissionsLimit(200))
-				resp, err := shared.PaginateWithSpinner(requestCtx,
+				resp, err := shared.PaginateWithSpinner(
+					requestCtx,
 					func(ctx context.Context) (asc.PaginatedResponse, error) {
 						return client.GetBetaAppReviewSubmissions(ctx, paginateOpts...)
 					},
@@ -427,31 +440,31 @@ Examples:
 
 // TestFlightReviewSubmissionsGetCommand retrieves a beta app review submission by ID.
 func TestFlightReviewSubmissionsGetCommand() *ffcli.Command {
-	fs := flag.NewFlagSet("submissions get", flag.ExitOnError)
+	fs := flag.NewFlagSet("submissions view", flag.ExitOnError)
 
-	id := fs.String("id", "", "Beta app review submission ID")
+	id := shared.BindResourceIDFlag(fs, "id", "betaAppReviewSubmissions", "Beta app review submission ID")
 	output := shared.BindOutputFlags(fs)
 
 	return &ffcli.Command{
-		Name:       "get",
-		ShortUsage: "asc testflight review submissions get --id \"SUBMISSION_ID\"",
-		ShortHelp:  "Get a beta app review submission by ID.",
-		LongHelp: `Get a beta app review submission by ID.
+		Name:       "view",
+		ShortUsage: "asc testflight review submissions view --id \"SUBMISSION_ID\"",
+		ShortHelp:  "View a beta app review submission by ID.",
+		LongHelp: `View a beta app review submission by ID.
 
 Examples:
-  asc testflight review submissions get --id "SUBMISSION_ID"`,
+  asc testflight review submissions view --id "SUBMISSION_ID"`,
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
 			idValue := strings.TrimSpace(*id)
 			if idValue == "" {
 				fmt.Fprintln(os.Stderr, "Error: --id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--id")
 			}
 
 			client, err := shared.GetASCClient()
 			if err != nil {
-				return fmt.Errorf("testflight review submissions get: %w", err)
+				return fmt.Errorf("testflight review submissions view: %w", err)
 			}
 
 			requestCtx, cancel := shared.ContextWithTimeout(ctx)
@@ -459,7 +472,7 @@ Examples:
 
 			resp, err := client.GetBetaAppReviewSubmission(requestCtx, idValue)
 			if err != nil {
-				return fmt.Errorf("testflight review submissions get: failed to fetch: %w", err)
+				return fmt.Errorf("testflight review submissions view: failed to fetch: %w", err)
 			}
 
 			return shared.PrintOutput(resp, *output.Output, *output.Pretty)
@@ -471,7 +484,7 @@ Examples:
 func TestFlightReviewSubmissionsBuildCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("submissions build", flag.ExitOnError)
 
-	id := fs.String("id", "", "Beta app review submission ID")
+	id := shared.BindResourceIDFlag(fs, "id", "betaAppReviewSubmissions", "Beta app review submission ID")
 	output := shared.BindOutputFlags(fs)
 
 	return &ffcli.Command{
@@ -488,7 +501,7 @@ Examples:
 			idValue := strings.TrimSpace(*id)
 			if idValue == "" {
 				fmt.Fprintln(os.Stderr, "Error: --id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--id")
 			}
 
 			client, err := shared.GetASCClient()
@@ -520,7 +533,7 @@ func TestFlightBetaDetailsCommand() *ffcli.Command {
 		LongHelp: `Manage TestFlight build beta details.
 
 Examples:
-  asc testflight beta-details get --build-id "BUILD_ID"
+  asc testflight beta-details view --build-id "BUILD_ID"
   asc testflight beta-details update --id "DETAIL_ID" --auto-notify`,
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
@@ -537,43 +550,47 @@ Examples:
 
 // TestFlightBetaDetailsGetCommand retrieves build beta details for a build.
 func TestFlightBetaDetailsGetCommand() *ffcli.Command {
-	fs := flag.NewFlagSet("get", flag.ExitOnError)
+	fs := flag.NewFlagSet("view", flag.ExitOnError)
 
-	buildID, legacyBuildID := bindBuildIDFlag(fs, "Build ID")
+	buildID := shared.BindResourceIDFlag(fs, "build-id", "builds", "Build ID")
 	output := shared.BindOutputFlags(fs)
 	limit := fs.Int("limit", 0, "Maximum results per page (1-200)")
 	next := fs.String("next", "", "Fetch next page using a links.next URL")
 
 	return &ffcli.Command{
-		Name:       "get",
-		ShortUsage: "asc testflight beta-details get [flags]",
-		ShortHelp:  "Fetch build beta details for a build.",
-		LongHelp: `Fetch build beta details for a build.
+		Name:       "view",
+		ShortUsage: "asc testflight beta-details view [flags]",
+		ShortHelp:  "View build beta details for a build.",
+		LongHelp: `View build beta details for a build.
+
+To find the build ID, list the app's builds and use the returned id field:
+  asc builds list --app "APP_ID" --paginate --output json
 
 Examples:
-  asc testflight beta-details get --build-id "BUILD_ID"`,
+  asc testflight beta-details view --build-id "BUILD_ID"`,
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
-			if err := applyLegacyBuildIDAlias(buildID, legacyBuildID); err != nil {
-				return err
-			}
 			if *limit != 0 && (*limit < 1 || *limit > 200) {
-				return fmt.Errorf("testflight beta-details get: --limit must be between 1 and 200")
+				return shared.WithDiagnostic(
+					shared.UsageErrorCtx(ctx, "testflight beta-details view: --limit must be between 1 and 200"),
+					shared.DiagnosticInvalidInput,
+					"--limit",
+				)
 			}
 			if err := shared.ValidateNextURL(*next); err != nil {
-				return fmt.Errorf("testflight beta-details get: %w", err)
+				return shared.UsageErrorfCtx(ctx, "testflight beta-details view: %v", err)
 			}
 
 			trimmedBuildID := strings.TrimSpace(*buildID)
 			if trimmedBuildID == "" && strings.TrimSpace(*next) == "" {
 				fmt.Fprintln(os.Stderr, "Error: --build-id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--build-id")
 			}
 
 			client, err := shared.GetASCClient()
 			if err != nil {
-				return fmt.Errorf("testflight beta-details get: %w", err)
+				return fmt.Errorf("testflight beta-details view: %w", err)
 			}
 
 			requestCtx, cancel := shared.ContextWithTimeout(ctx)
@@ -587,7 +604,7 @@ Examples:
 
 			details, err := client.GetBuildBetaDetails(requestCtx, opts...)
 			if err != nil {
-				return fmt.Errorf("testflight beta-details get: failed to fetch: %w", err)
+				return fmt.Errorf("testflight beta-details view: failed to fetch: %w", err)
 			}
 
 			return shared.PrintOutput(details, *output.Output, *output.Pretty)
@@ -606,7 +623,7 @@ func TestFlightBetaDetailsBuildCommand() *ffcli.Command {
 		LongHelp: `View the build for a build beta detail.
 
 Examples:
-  asc testflight beta-details build get --id "DETAIL_ID"`,
+  asc testflight beta-details build view --id "DETAIL_ID"`,
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
 		Subcommands: []*ffcli.Command{
@@ -620,31 +637,31 @@ Examples:
 
 // TestFlightBetaDetailsBuildGetCommand retrieves the build for a build beta detail.
 func TestFlightBetaDetailsBuildGetCommand() *ffcli.Command {
-	fs := flag.NewFlagSet("build get", flag.ExitOnError)
+	fs := flag.NewFlagSet("build view", flag.ExitOnError)
 
-	id := fs.String("id", "", "Build beta detail ID")
+	id := shared.BindResourceIDFlag(fs, "id", "buildBetaDetails", "Build beta detail ID")
 	output := shared.BindOutputFlags(fs)
 
 	return &ffcli.Command{
-		Name:       "get",
-		ShortUsage: "asc testflight beta-details build get --id \"DETAIL_ID\"",
-		ShortHelp:  "Get the build for a build beta detail.",
-		LongHelp: `Get the build for a build beta detail.
+		Name:       "view",
+		ShortUsage: "asc testflight beta-details build view --id \"DETAIL_ID\"",
+		ShortHelp:  "View the build for a build beta detail.",
+		LongHelp: `View the build for a build beta detail.
 
 Examples:
-  asc testflight beta-details build get --id "DETAIL_ID"`,
+  asc testflight beta-details build view --id "DETAIL_ID"`,
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
 			idValue := strings.TrimSpace(*id)
 			if idValue == "" {
 				fmt.Fprintln(os.Stderr, "Error: --id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--id")
 			}
 
 			client, err := shared.GetASCClient()
 			if err != nil {
-				return fmt.Errorf("testflight beta-details build get: %w", err)
+				return fmt.Errorf("testflight beta-details build view: %w", err)
 			}
 
 			requestCtx, cancel := shared.ContextWithTimeout(ctx)
@@ -652,7 +669,7 @@ Examples:
 
 			resp, err := client.GetBuildBetaDetailBuild(requestCtx, idValue)
 			if err != nil {
-				return fmt.Errorf("testflight beta-details build get: failed to fetch: %w", err)
+				return fmt.Errorf("testflight beta-details build view: failed to fetch: %w", err)
 			}
 
 			return shared.PrintOutput(resp, *output.Output, *output.Pretty)
@@ -664,14 +681,8 @@ Examples:
 func TestFlightBetaDetailsUpdateCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("update", flag.ExitOnError)
 
-	const (
-		externalStateEnabled  = "READY_FOR_TESTING"
-		externalStateDisabled = "NOT_READY_FOR_TESTING"
-	)
-
-	id := fs.String("id", "", "Build beta detail ID")
+	id := shared.BindResourceIDFlag(fs, "id", "buildBetaDetails", "Build beta detail ID")
 	autoNotify := fs.Bool("auto-notify", false, "Enable auto-notify for external testers")
-	externalTesting := fs.Bool("external-testing", false, "Enable external testing (maps to externalBuildState)")
 	output := shared.BindOutputFlags(fs)
 
 	return &ffcli.Command{
@@ -682,25 +693,28 @@ func TestFlightBetaDetailsUpdateCommand() *ffcli.Command {
 
 Examples:
   asc testflight beta-details update --id "DETAIL_ID" --auto-notify
-  asc testflight beta-details update --id "DETAIL_ID" --external-testing true`,
+
+External distribution is managed through group assignment:
+  asc builds add-groups --build-id "BUILD_ID" --group "GROUP_ID" --submit --confirm
+  asc builds remove-groups --build-id "BUILD_ID" --group "GROUP_ID" --confirm`,
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
-			detailID := strings.TrimSpace(*id)
-			if detailID == "" {
-				fmt.Fprintln(os.Stderr, "Error: --id is required")
-				return flag.ErrHelp
-			}
-
 			visited := map[string]bool{}
 			fs.Visit(func(f *flag.Flag) {
 				visited[f.Name] = true
 			})
 
-			hasUpdates := visited["auto-notify"] || visited["external-testing"]
+			detailID := strings.TrimSpace(*id)
+			if detailID == "" {
+				fmt.Fprintln(os.Stderr, "Error: --id is required")
+				return shared.MissingRequiredUsageError("--id")
+			}
+
+			hasUpdates := visited["auto-notify"]
 			if !hasUpdates {
 				fmt.Fprintln(os.Stderr, "Error: at least one update flag is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("")
 			}
 
 			attrs := asc.BuildBetaDetailUpdateAttributes{}
@@ -708,14 +722,6 @@ Examples:
 				value := *autoNotify
 				attrs.AutoNotifyEnabled = &value
 			}
-			if visited["external-testing"] {
-				state := externalStateDisabled
-				if *externalTesting {
-					state = externalStateEnabled
-				}
-				attrs.ExternalBuildState = &state
-			}
-
 			client, err := shared.GetASCClient()
 			if err != nil {
 				return fmt.Errorf("testflight beta-details update: %w", err)
@@ -764,7 +770,7 @@ Examples:
 func TestFlightRecruitmentDeleteCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("delete", flag.ExitOnError)
 
-	id := fs.String("id", "", "Recruitment criteria ID")
+	id := shared.BindResourceIDFlag(fs, "id", "betaRecruitmentCriteria", "Recruitment criteria ID")
 	confirm := fs.Bool("confirm", false, "Confirm deletion")
 	output := shared.BindOutputFlags(fs)
 
@@ -782,11 +788,11 @@ Examples:
 			criteriaID := strings.TrimSpace(*id)
 			if criteriaID == "" {
 				fmt.Fprintln(os.Stderr, "Error: --id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--id")
 			}
 			if !*confirm {
 				fmt.Fprintln(os.Stderr, "Error: --confirm is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--confirm")
 			}
 
 			client, err := shared.GetASCClient()
@@ -832,15 +838,19 @@ Examples:
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
 			if *limit != 0 && (*limit < 1 || *limit > 200) {
-				return fmt.Errorf("testflight recruitment options: --limit must be between 1 and 200")
+				return shared.WithDiagnostic(
+					shared.UsageErrorCtx(ctx, "testflight recruitment options: --limit must be between 1 and 200"),
+					shared.DiagnosticInvalidInput,
+					"--limit",
+				)
 			}
 			if err := shared.ValidateNextURL(*next); err != nil {
-				return fmt.Errorf("testflight recruitment options: %w", err)
+				return shared.UsageErrorfCtx(ctx, "testflight recruitment options: %v", err)
 			}
 
 			fieldsValue, err := normalizeBetaRecruitmentCriterionOptionsFields(*fields)
 			if err != nil {
-				return fmt.Errorf("testflight recruitment options: %w", err)
+				return usageErrorFromValidation(ctx, "testflight recruitment options: %v", err)
 			}
 
 			client, err := shared.GetASCClient()
@@ -871,7 +881,7 @@ Examples:
 func TestFlightRecruitmentSetCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("set", flag.ExitOnError)
 
-	groupID := fs.String("group", "", "Beta group ID")
+	groupID := shared.BindResourceIDFlag(fs, "group", "betaGroups", "Beta group ID")
 	filters := fs.String("os-version-filter", "", "Device family OS filters (e.g., IPHONE=26,IPAD=26)")
 	output := shared.BindOutputFlags(fs)
 
@@ -889,16 +899,16 @@ Examples:
 			trimmedGroupID := strings.TrimSpace(*groupID)
 			if trimmedGroupID == "" {
 				fmt.Fprintln(os.Stderr, "Error: --group is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--group")
 			}
 
 			filterValues, err := parseDeviceFamilyOsVersionFilters(*filters)
 			if err != nil {
-				return fmt.Errorf("testflight recruitment set: %w", err)
+				return usageErrorFromValidation(ctx, "testflight recruitment set: %v", err)
 			}
 			if len(filterValues) == 0 {
 				fmt.Fprintln(os.Stderr, "Error: --os-version-filter is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--os-version-filter")
 			}
 
 			client, err := shared.GetASCClient()
@@ -912,8 +922,8 @@ Examples:
 			existing, err := client.GetBetaGroupBetaRecruitmentCriteria(requestCtx, trimmedGroupID)
 			if err == nil {
 				criteriaID := strings.TrimSpace(existing.Data.ID)
-				if criteriaID == "" {
-					return fmt.Errorf("testflight recruitment set: criteria id is empty")
+				if validationErr := validateBetaRecruitmentCriteriaID(criteriaID); validationErr != nil {
+					return validationErr
 				}
 				criteria, err := client.UpdateBetaRecruitmentCriteria(requestCtx, criteriaID, filterValues)
 				if err != nil {
@@ -945,10 +955,25 @@ func normalizeBetaRecruitmentCriterionOptionsFields(value string) ([]string, err
 	}
 	for _, field := range fields {
 		if _, ok := allowed[field]; !ok {
-			return nil, fmt.Errorf("--fields must be one of: deviceFamilyOsVersions")
+			return nil, shared.WithDiagnostic(
+				shared.NewValidationError(fmt.Errorf("--fields must be one of: deviceFamilyOsVersions")),
+				shared.DiagnosticInvalidInput,
+				"--fields",
+			)
 		}
 	}
 	return fields, nil
+}
+
+func validateBetaRecruitmentCriteriaID(value string) error {
+	if strings.TrimSpace(value) == "" {
+		return shared.WithDiagnostic(
+			shared.NewValidationError(fmt.Errorf("testflight recruitment set: criteria id is empty")),
+			shared.DiagnosticStateNotReady,
+			"--group",
+		)
+	}
+	return nil
 }
 
 func parseDeviceFamilyOsVersionFilters(value string) ([]asc.DeviceFamilyOsVersionFilter, error) {
@@ -961,12 +986,20 @@ func parseDeviceFamilyOsVersionFilters(value string) ([]asc.DeviceFamilyOsVersio
 	for _, entry := range entries {
 		parts := strings.SplitN(entry, "=", 2)
 		if len(parts) != 2 {
-			return nil, fmt.Errorf("--os-version-filter must use DEVICE_FAMILY=MIN_OS (e.g., IPHONE=26)")
+			return nil, shared.WithDiagnostic(
+				shared.NewValidationError(fmt.Errorf("--os-version-filter must use DEVICE_FAMILY=MIN_OS (e.g., IPHONE=26)")),
+				shared.DiagnosticInvalidInput,
+				"--os-version-filter",
+			)
 		}
 		familyValue := strings.TrimSpace(parts[0])
 		versionValue := strings.TrimSpace(parts[1])
 		if familyValue == "" || versionValue == "" {
-			return nil, fmt.Errorf("--os-version-filter must use DEVICE_FAMILY=MIN_OS (e.g., IPHONE=26)")
+			return nil, shared.WithDiagnostic(
+				shared.NewValidationError(fmt.Errorf("--os-version-filter must use DEVICE_FAMILY=MIN_OS (e.g., IPHONE=26)")),
+				shared.DiagnosticInvalidInput,
+				"--os-version-filter",
+			)
 		}
 
 		family, err := normalizeBetaRecruitmentDeviceFamily(familyValue)
@@ -981,7 +1014,11 @@ func parseDeviceFamilyOsVersionFilters(value string) ([]asc.DeviceFamilyOsVersio
 			minVersion = strings.TrimSpace(rangeParts[0])
 			maxVersion = strings.TrimSpace(rangeParts[1])
 			if minVersion == "" || maxVersion == "" {
-				return nil, fmt.Errorf("--os-version-filter must use DEVICE_FAMILY=MIN_OS[..MAX_OS]")
+				return nil, shared.WithDiagnostic(
+					shared.NewValidationError(fmt.Errorf("--os-version-filter must use DEVICE_FAMILY=MIN_OS[..MAX_OS]")),
+					shared.DiagnosticInvalidInput,
+					"--os-version-filter",
+				)
 			}
 		}
 
@@ -1000,7 +1037,11 @@ func normalizeBetaRecruitmentDeviceFamily(value string) (asc.DeviceFamily, error
 	if slices.Contains(betaRecruitmentDeviceFamilyList(), normalized) {
 		return asc.DeviceFamily(normalized), nil
 	}
-	return "", fmt.Errorf("--os-version-filter device family must be one of: %s", strings.Join(betaRecruitmentDeviceFamilyList(), ", "))
+	return "", shared.WithDiagnostic(
+		shared.NewValidationError(fmt.Errorf("--os-version-filter device family must be one of: %s", strings.Join(betaRecruitmentDeviceFamilyList(), ", "))),
+		shared.DiagnosticInvalidInput,
+		"--os-version-filter",
+	)
 }
 
 func betaRecruitmentDeviceFamilyList() []string {
@@ -1045,7 +1086,7 @@ Examples:
 func TestFlightMetricsPublicLinkCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("public-link", flag.ExitOnError)
 
-	groupID := fs.String("group", "", "Beta group ID")
+	groupID := shared.BindResourceIDFlag(fs, "group", "betaGroups", "Beta group ID")
 	output := shared.BindOutputFlags(fs)
 
 	return &ffcli.Command{
@@ -1062,7 +1103,7 @@ Examples:
 			trimmedGroupID := strings.TrimSpace(*groupID)
 			if trimmedGroupID == "" {
 				fmt.Fprintln(os.Stderr, "Error: --group is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--group")
 			}
 
 			client, err := shared.GetASCClient()
@@ -1087,7 +1128,7 @@ Examples:
 func TestFlightMetricsTestersCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("testers", flag.ExitOnError)
 
-	groupID := fs.String("group", "", "Beta group ID")
+	groupID := shared.BindResourceIDFlag(fs, "group", "betaGroups", "Beta group ID")
 	output := shared.BindOutputFlags(fs)
 
 	return &ffcli.Command{
@@ -1104,7 +1145,7 @@ Examples:
 			trimmedGroupID := strings.TrimSpace(*groupID)
 			if trimmedGroupID == "" {
 				fmt.Fprintln(os.Stderr, "Error: --group is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--group")
 			}
 
 			client, err := shared.GetASCClient()

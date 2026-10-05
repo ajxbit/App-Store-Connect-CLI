@@ -12,19 +12,31 @@ import (
 	"errors"
 	"flag"
 	"io"
+	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
+	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/asc"
 	authsvc "github.com/rudrankriyam/App-Store-Connect-CLI/internal/auth"
+	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/cli/shared"
+	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/cli/shared/errfmt"
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/config"
 )
+
+type authRoundTripFunc func(*http.Request) (*http.Response, error)
+
+func (fn authRoundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return fn(req)
+}
 
 func TestCommandWrapperReturnsAuthCommand(t *testing.T) {
 	cmd := AuthCommand()
 	if cmd == nil {
 		t.Fatal("AuthCommand() returned nil")
+		return
 	}
 	if cmd.Name != "auth" {
 		t.Fatalf("AuthCommand().Name = %q, want %q", cmd.Name, "auth")
@@ -47,6 +59,20 @@ func TestAuthHelpHighlightsStatusDiscoverability(t *testing.T) {
 	statusCmd := AuthStatusCommand()
 	if !strings.Contains(statusCmd.ShortHelp, "active profile") {
 		t.Fatalf("expected AuthStatusCommand().ShortHelp to mention active profile, got %q", statusCmd.ShortHelp)
+	}
+}
+
+func TestAuthHelpExplainsCredentialResolutionBranches(t *testing.T) {
+	longHelp := AuthCommand().LongHelp
+	for _, expected := range []string{
+		"--profile or ASC_PROFILE selects a stored profile and disables the env-only fast path.",
+		"With no profile and keychain bypass disabled, a complete environment set skips stored lookup.",
+		"ASC_BYPASS_KEYCHAIN skips keychain; env fallback follows only missing/default-selection config errors.",
+		"Config selection: ASC_CONFIG_PATH; otherwise nearest ancestor .asc/config.json; otherwise ~/.asc/config.json.",
+	} {
+		if !strings.Contains(longHelp, expected) {
+			t.Fatalf("expected AuthCommand().LongHelp to contain %q, got %q", expected, longHelp)
+		}
 	}
 }
 
@@ -109,7 +135,7 @@ func TestAuthDoctorCommandFlagValidation(t *testing.T) {
 				t.Fatalf("expected flag.ErrHelp, got %v", err)
 			}
 		})
-		if !strings.Contains(stderr, "unsupported format") {
+		if !strings.Contains(stderr, "--output must be one of") {
 			t.Fatalf("expected unsupported format error in stderr, got %q", stderr)
 		}
 	})
@@ -164,19 +190,23 @@ func TestDoctorHelpers(t *testing.T) {
 	report := authsvc.DoctorReport{
 		Sections: []authsvc.DoctorSection{
 			{
-				Title: "Storage",
+				Title: "Storage\nforged section",
 				Checks: []authsvc.DoctorCheck{
-					{Status: authsvc.DoctorOK, Message: "all good"},
+					{Status: authsvc.DoctorOK, Message: "all\x1b[31m good"},
 				},
 			},
 		},
-		Summary: authsvc.DoctorSummary{},
+		Recommendations: []string{"fix\u2028forged row"},
+		Summary:         authsvc.DoctorSummary{},
 	}
 	stdout, _ := captureAuthOutput(t, func() {
 		printDoctorReport(report)
 	})
-	if !strings.Contains(stdout, "Auth Doctor") || !strings.Contains(stdout, "[OK] all good") {
+	if !strings.Contains(stdout, "Auth Doctor") || !strings.Contains(stdout, "[OK] all[31m good") {
 		t.Fatalf("unexpected doctor output: %q", stdout)
+	}
+	if strings.Contains(stdout, "\nforged section") || strings.Contains(stdout, "\x1b") || strings.ContainsRune(stdout, '\u2028') {
+		t.Fatalf("doctor text output contains unsanitized terminal content: %q", stdout)
 	}
 }
 
@@ -249,6 +279,60 @@ func TestValidateStoredCredential_UsesPEMWhenPathMissing(t *testing.T) {
 	}
 }
 
+func TestValidateStoredCredential_ClassifiesUnauthorizedNetworkFailure(t *testing.T) {
+	keyPath := writeTempECDSAKeyFile(t)
+	keyData, err := os.ReadFile(keyPath)
+	if err != nil {
+		t.Fatalf("ReadFile() error: %v", err)
+	}
+
+	previousTransport := http.DefaultTransport
+	http.DefaultTransport = authRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusUnauthorized,
+			Status:     "401 Unauthorized",
+			Header:     make(http.Header),
+			Body: io.NopCloser(strings.NewReader(`{
+				"errors":[{"status":"401","code":"NOT_AUTHORIZED","title":"Unauthorized"}]
+			}`)),
+			Request: req,
+		}, nil
+	})
+	t.Cleanup(func() {
+		http.DefaultTransport = previousTransport
+	})
+
+	err = validateStoredCredential(context.Background(), authsvc.Credential{
+		Name:          "unauthorized",
+		KeyID:         "KEY",
+		IssuerID:      "ISS",
+		PrivateKeyPEM: string(keyData),
+	})
+	if err == nil || !errors.Is(err, asc.ErrUnauthorized) {
+		t.Fatalf("expected unauthorized validation error, got %v", err)
+	}
+	assertAuthDiagnostic(t, err, shared.DiagnosticAuthenticationRejected, "")
+}
+
+func TestCredentialSigningIssuerIDClearsIndividualIssuer(t *testing.T) {
+	team := authsvc.Credential{
+		KeyID:    "KEY",
+		IssuerID: "ISS",
+	}
+	if got := credentialSigningIssuerID(team); got != "ISS" {
+		t.Fatalf("team signing issuer = %q, want ISS", got)
+	}
+
+	individual := authsvc.Credential{
+		KeyID:    "KEY",
+		IssuerID: "STRAYISS",
+		KeyType:  config.CredentialKeyTypeIndividual,
+	}
+	if got := credentialSigningIssuerID(individual); got != "" {
+		t.Fatalf("individual signing issuer = %q, want empty", got)
+	}
+}
+
 func TestValidateLoginCredentials(t *testing.T) {
 	keyPath := writeTempECDSAKeyFile(t)
 
@@ -270,6 +354,7 @@ func TestValidateLoginCredentials(t *testing.T) {
 		if err == nil || !strings.Contains(err.Error(), "failed to generate JWT") {
 			t.Fatalf("expected jwt error, got %v", err)
 		}
+		assertAuthDiagnostic(t, err, shared.DiagnosticInternalError, "--private-key")
 	})
 
 	t.Run("network disabled succeeds", func(t *testing.T) {
@@ -308,6 +393,47 @@ func TestValidateLoginCredentials(t *testing.T) {
 		if err == nil || !strings.Contains(err.Error(), "network validation failed") {
 			t.Fatalf("expected network validation error, got %v", err)
 		}
+		assertAuthDiagnostic(t, err, shared.DiagnosticRequestFailed, "")
+	})
+
+	t.Run("network authentication rejected", func(t *testing.T) {
+		restoreJWT := SetLoginJWTGenerator(func(string, string, *ecdsa.PrivateKey) (string, error) {
+			return "token", nil
+		})
+		prevNetwork := loginNetworkValidate
+		loginNetworkValidate = func(context.Context, string, string, string) error {
+			return asc.ErrUnauthorized
+		}
+		t.Cleanup(func() {
+			restoreJWT()
+			loginNetworkValidate = prevNetwork
+		})
+
+		err := validateLoginCredentials(context.Background(), "KEY", "ISS", keyPath, true)
+		if err == nil || !strings.Contains(err.Error(), "network validation failed") {
+			t.Fatalf("expected network validation error, got %v", err)
+		}
+		assertAuthDiagnostic(t, err, shared.DiagnosticAuthenticationRejected, "")
+	})
+
+	t.Run("network authorization denied", func(t *testing.T) {
+		restoreJWT := SetLoginJWTGenerator(func(string, string, *ecdsa.PrivateKey) (string, error) {
+			return "token", nil
+		})
+		prevNetwork := loginNetworkValidate
+		loginNetworkValidate = func(context.Context, string, string, string) error {
+			return asc.ErrForbidden
+		}
+		t.Cleanup(func() {
+			restoreJWT()
+			loginNetworkValidate = prevNetwork
+		})
+
+		err := validateLoginCredentials(context.Background(), "KEY", "ISS", keyPath, true)
+		if err == nil || !strings.Contains(err.Error(), "network validation failed") {
+			t.Fatalf("expected network validation error, got %v", err)
+		}
+		assertAuthDiagnostic(t, err, shared.DiagnosticRequestFailed, "")
 	})
 }
 
@@ -353,13 +479,19 @@ func TestAuthLoginCommand(t *testing.T) {
 			if !errors.Is(err, flag.ErrHelp) {
 				t.Fatalf("expected flag.ErrHelp, got %v", err)
 			}
+			assertAuthDiagnostic(t, err, shared.DiagnosticInvalidInput, "--local")
 		})
 		if !strings.Contains(stderr, "--local requires --bypass-keychain") {
 			t.Fatalf("expected local/bypass error in stderr, got %q", stderr)
 		}
 	})
 
-	t.Run("missing name", func(t *testing.T) {
+	t.Run("missing name with stored profiles", func(t *testing.T) {
+		t.Setenv("ASC_BYPASS_KEYCHAIN", "0")
+		restore := SetListCredentialSummaries(func() ([]authsvc.Credential, error) {
+			return []authsvc.Credential{{Name: "existing"}}, nil
+		})
+		t.Cleanup(restore)
 		cmd := AuthLoginCommand()
 		if err := cmd.FlagSet.Parse([]string{"--key-id", "KEY", "--issuer-id", "ISS", "--private-key", "/tmp/AuthKey.p8"}); err != nil {
 			t.Fatalf("Parse() error: %v", err)
@@ -368,7 +500,93 @@ func TestAuthLoginCommand(t *testing.T) {
 		if !errors.Is(err, flag.ErrHelp) {
 			t.Fatalf("expected flag.ErrHelp, got %v", err)
 		}
+		assertAuthDiagnostic(t, err, shared.DiagnosticRequiredInputMissing, "--name")
 	})
+
+	t.Run("whitespace key id", func(t *testing.T) {
+		cmd := AuthLoginCommand()
+		if err := cmd.FlagSet.Parse([]string{
+			"--name", "demo",
+			"--key-id", "   ",
+			"--issuer-id", "ISS",
+			"--private-key", "/tmp/AuthKey.p8",
+		}); err != nil {
+			t.Fatalf("Parse() error: %v", err)
+		}
+		_, stderr := captureAuthOutput(t, func() {
+			err := cmd.Exec(context.Background(), []string{})
+			if !errors.Is(err, flag.ErrHelp) {
+				t.Fatalf("expected flag.ErrHelp, got %v", err)
+			}
+			assertAuthDiagnostic(t, err, shared.DiagnosticRequiredInputMissing, "--key-id")
+		})
+		if !strings.Contains(stderr, "--key-id is required") {
+			t.Fatalf("expected key ID error in stderr, got %q", stderr)
+		}
+		if strings.Contains(stderr, "Hint:") {
+			t.Fatalf("expected no key ID hint for a generic key file name, got %q", stderr)
+		}
+	})
+
+	t.Run("missing key id hints from key file name", func(t *testing.T) {
+		cmd := AuthLoginCommand()
+		if err := cmd.FlagSet.Parse([]string{
+			"--name", "demo",
+			"--issuer-id", "ISS",
+			"--private-key", "/tmp/keys/AuthKey_39MX87M9Y4.p8",
+		}); err != nil {
+			t.Fatalf("Parse() error: %v", err)
+		}
+		_, stderr := captureAuthOutput(t, func() {
+			err := cmd.Exec(context.Background(), []string{})
+			if !errors.Is(err, flag.ErrHelp) {
+				t.Fatalf("expected flag.ErrHelp, got %v", err)
+			}
+			assertAuthDiagnostic(t, err, shared.DiagnosticRequiredInputMissing, "--key-id")
+		})
+		if !strings.Contains(stderr, "Error: --key-id is required\nHint: the key file name suggests --key-id 39MX87M9Y4\n") {
+			t.Fatalf("expected key ID hint in stderr, got %q", stderr)
+		}
+	})
+
+	for _, test := range []struct {
+		name      string
+		args      []string
+		parameter string
+	}{
+		{
+			name:      "whitespace name",
+			args:      []string{"--name", "   ", "--key-id", "KEY", "--issuer-id", "ISS", "--private-key", "/tmp/AuthKey.p8"},
+			parameter: "--name",
+		},
+		{
+			name:      "whitespace issuer id",
+			args:      []string{"--name", "demo", "--key-id", "KEY", "--issuer-id", "   ", "--private-key", "/tmp/AuthKey.p8"},
+			parameter: "--issuer-id",
+		},
+		{
+			name:      "whitespace private key",
+			args:      []string{"--name", "demo", "--key-id", "KEY", "--issuer-id", "ISS", "--private-key", "   "},
+			parameter: "--private-key",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			cmd := AuthLoginCommand()
+			if err := cmd.FlagSet.Parse(test.args); err != nil {
+				t.Fatalf("Parse() error: %v", err)
+			}
+			_, stderr := captureAuthOutput(t, func() {
+				err := cmd.Exec(context.Background(), []string{})
+				if !errors.Is(err, flag.ErrHelp) {
+					t.Fatalf("expected flag.ErrHelp, got %v", err)
+				}
+				assertAuthDiagnostic(t, err, shared.DiagnosticRequiredInputMissing, test.parameter)
+			})
+			if !strings.Contains(stderr, test.parameter+" is required") {
+				t.Fatalf("expected %s error in stderr, got %q", test.parameter, stderr)
+			}
+		})
+	}
 
 	t.Run("skip validation mutually exclusive with network", func(t *testing.T) {
 		cmd := AuthLoginCommand()
@@ -387,6 +605,7 @@ func TestAuthLoginCommand(t *testing.T) {
 			if !errors.Is(err, flag.ErrHelp) {
 				t.Fatalf("expected flag.ErrHelp, got %v", err)
 			}
+			assertAuthDiagnostic(t, err, shared.DiagnosticConflictingInput, "--skip-validation")
 		})
 		if !strings.Contains(stderr, "mutually exclusive") {
 			t.Fatalf("expected mutual exclusion error in stderr, got %q", stderr)
@@ -409,6 +628,256 @@ func TestAuthLoginCommand(t *testing.T) {
 			err := cmd.Exec(context.Background(), []string{})
 			if err == nil || !strings.Contains(err.Error(), "invalid private key") {
 				t.Fatalf("expected invalid key error, got %v", err)
+			}
+			assertAuthDiagnostic(t, err, shared.DiagnosticFileNotFound, "--private-key")
+		})
+	})
+
+	t.Run("insecure private key permissions", func(t *testing.T) {
+		if runtime.GOOS == "windows" {
+			t.Skip("Windows does not expose POSIX key permissions")
+		}
+		withTempRepo(t, func(string) {
+			keyPath := writeTempECDSAKeyFile(t)
+			if err := os.Chmod(keyPath, 0o644); err != nil {
+				t.Fatalf("set key permissions: %v", err)
+			}
+			cmd := AuthLoginCommand()
+			if err := cmd.FlagSet.Parse([]string{
+				"--name", "demo",
+				"--key-id", "KEY",
+				"--issuer-id", "ISS",
+				"--private-key", keyPath,
+			}); err != nil {
+				t.Fatalf("Parse() error: %v", err)
+			}
+			err := cmd.Exec(context.Background(), []string{})
+			if err == nil || !strings.Contains(err.Error(), "private key file is too permissive") {
+				t.Fatalf("expected insecure permissions error, got %v", err)
+			}
+			assertAuthDiagnostic(t, err, shared.DiagnosticFilePermissionsInsecure, "--private-key")
+		})
+	})
+
+	t.Run("insecure private key permissions print exact remediation", func(t *testing.T) {
+		if runtime.GOOS == "windows" {
+			t.Skip("Windows does not expose POSIX key permissions")
+		}
+		withTempRepo(t, func(string) {
+			keyPath := writeTempECDSAKeyFile(t)
+			if err := os.Chmod(keyPath, 0o644); err != nil {
+				t.Fatalf("set key permissions: %v", err)
+			}
+			cmd := AuthLoginCommand()
+			if err := cmd.FlagSet.Parse([]string{
+				"--name", "demo",
+				"--key-id", "KEY",
+				"--issuer-id", "ISS",
+				"--private-key", keyPath,
+			}); err != nil {
+				t.Fatalf("Parse() error: %v", err)
+			}
+			var execErr error
+			_, stderr := captureAuthOutput(t, func() {
+				execErr = cmd.Exec(context.Background(), []string{})
+			})
+			if execErr == nil || !strings.Contains(execErr.Error(), "private key file is too permissive") {
+				t.Fatalf("expected insecure permissions error, got %v", execErr)
+			}
+			assertAuthDiagnostic(t, execErr, shared.DiagnosticFilePermissionsInsecure, "--private-key")
+			wantCommand, safe := authsvc.FilePermissionRemediationCommand(keyPath)
+			if !safe || !strings.HasPrefix(wantCommand, "chmod 600 ") || !strings.Contains(wantCommand, keyPath) {
+				t.Fatalf("remediation command = %q, safe=%t; want a chmod 600 command naming the key", wantCommand, safe)
+			}
+			if !strings.Contains(stderr, wantCommand) {
+				t.Fatalf("stderr = %q, want remediation %q", stderr, wantCommand)
+			}
+			if !strings.Contains(stderr, "--fix-permissions") {
+				t.Fatalf("stderr = %q, want --fix-permissions hint", stderr)
+			}
+			info, err := os.Stat(keyPath)
+			if err != nil {
+				t.Fatalf("Stat() error: %v", err)
+			}
+			if info.Mode().Perm() != 0o644 {
+				t.Fatalf("permissions = %#o, want 0644 unchanged without --fix-permissions", info.Mode().Perm())
+			}
+		})
+	})
+
+	t.Run("unsafe private key path omits executable remediation", func(t *testing.T) {
+		if runtime.GOOS == "windows" {
+			t.Skip("Windows does not expose POSIX permission bits")
+		}
+		withTempRepo(t, func(string) {
+			keyPath := writeTempECDSAKeyFile(t)
+			unsafePath := filepath.Join(filepath.Dir(keyPath), "unsafe\nkey.p8")
+			if err := os.Rename(keyPath, unsafePath); err != nil {
+				t.Fatalf("rename key: %v", err)
+			}
+			if err := os.Chmod(unsafePath, 0o644); err != nil {
+				t.Fatalf("set key permissions: %v", err)
+			}
+			cmd := AuthLoginCommand()
+			if err := cmd.FlagSet.Parse([]string{
+				"--name", "demo",
+				"--key-id", "KEY",
+				"--issuer-id", "ISS",
+				"--private-key", unsafePath,
+			}); err != nil {
+				t.Fatalf("Parse() error: %v", err)
+			}
+			var execErr error
+			_, stderr := captureAuthOutput(t, func() {
+				execErr = cmd.Exec(context.Background(), []string{})
+			})
+			if execErr == nil || !strings.Contains(execErr.Error(), "private key file is too permissive") {
+				t.Fatalf("expected insecure permissions error, got %v", execErr)
+			}
+			if strings.Contains(stderr, "chmod 600") || !strings.Contains(stderr, "--fix-permissions") {
+				t.Fatalf("stderr = %q, want only the safe --fix-permissions remediation", stderr)
+			}
+		})
+	})
+
+	t.Run("fix failure sanitizes unsafe private key path", func(t *testing.T) {
+		withTempRepo(t, func(string) {
+			unsafePath := filepath.Join(t.TempDir(), "missing\n\x1b[31mkey.p8")
+			cmd := AuthLoginCommand()
+			if err := cmd.FlagSet.Parse([]string{
+				"--name", "demo",
+				"--key-id", "KEY",
+				"--issuer-id", "ISS",
+				"--private-key", unsafePath,
+				"--fix-permissions",
+			}); err != nil {
+				t.Fatalf("Parse() error: %v", err)
+			}
+			execErr := cmd.Exec(context.Background(), []string{})
+			if execErr == nil {
+				t.Fatal("expected missing private key repair to fail")
+			}
+			formatted := errfmt.FormatStderr(execErr)
+			if strings.ContainsAny(formatted, "\r\x1b") || strings.Count(formatted, "\n") != 1 {
+				t.Fatalf("formatted error contains terminal control or forged lines: %q", formatted)
+			}
+		})
+	})
+
+	t.Run("fix-permissions repairs insecure key and completes login", func(t *testing.T) {
+		if runtime.GOOS == "windows" {
+			t.Skip("Windows does not expose POSIX key permissions")
+		}
+		withTempRepo(t, func(repo string) {
+			keyPath := writeTempECDSAKeyFile(t)
+			if err := os.Chmod(keyPath, 0o644); err != nil {
+				t.Fatalf("set key permissions: %v", err)
+			}
+			cmd := AuthLoginCommand()
+			if err := cmd.FlagSet.Parse([]string{
+				"--name", "demo",
+				"--key-id", "KEY",
+				"--issuer-id", "ISS",
+				"--private-key", keyPath,
+				"--bypass-keychain",
+				"--local",
+				"--fix-permissions",
+			}); err != nil {
+				t.Fatalf("Parse() error: %v", err)
+			}
+			var execErr error
+			stdout, stderr := captureAuthOutput(t, func() {
+				execErr = cmd.Exec(context.Background(), []string{})
+			})
+			if execErr != nil {
+				t.Fatalf("Exec() error: %v (stderr=%q)", execErr, stderr)
+			}
+			info, err := os.Stat(keyPath)
+			if err != nil {
+				t.Fatalf("Stat() error: %v", err)
+			}
+			if info.Mode().Perm() != 0o600 {
+				t.Fatalf("permissions = %#o, want 0600 after repair", info.Mode().Perm())
+			}
+			if !strings.Contains(stderr, "0600") || !strings.Contains(stderr, keyPath) {
+				t.Fatalf("stderr = %q, want repair notice naming the key file", stderr)
+			}
+			if !strings.Contains(stdout, "Successfully registered API key 'demo'") {
+				t.Fatalf("stdout = %q, want successful login", stdout)
+			}
+			if _, err := os.Stat(filepath.Join(repo, ".asc", "config.json")); err != nil {
+				t.Fatalf("expected local config written: %v", err)
+			}
+		})
+	})
+
+	t.Run("fix-permissions leaves an owner-only key silent", func(t *testing.T) {
+		if runtime.GOOS == "windows" {
+			t.Skip("Windows does not expose POSIX key permissions")
+		}
+		withTempRepo(t, func(string) {
+			keyPath := writeTempECDSAKeyFile(t)
+			cmd := AuthLoginCommand()
+			if err := cmd.FlagSet.Parse([]string{
+				"--name", "demo",
+				"--key-id", "KEY",
+				"--issuer-id", "ISS",
+				"--private-key", keyPath,
+				"--bypass-keychain",
+				"--local",
+				"--fix-permissions",
+			}); err != nil {
+				t.Fatalf("Parse() error: %v", err)
+			}
+			var execErr error
+			_, stderr := captureAuthOutput(t, func() {
+				execErr = cmd.Exec(context.Background(), []string{})
+			})
+			if execErr != nil {
+				t.Fatalf("Exec() error: %v (stderr=%q)", execErr, stderr)
+			}
+			if strings.Contains(stderr, "0600") {
+				t.Fatalf("stderr = %q, want no repair notice for an already secure key", stderr)
+			}
+		})
+	})
+
+	t.Run("fix-permissions rejects an unsupported key identity", func(t *testing.T) {
+		if runtime.GOOS == "windows" {
+			t.Skip("Windows does not expose POSIX key permissions")
+		}
+		withTempRepo(t, func(string) {
+			keyPath := writeTempECDSAKeyFile(t)
+			if err := os.Chmod(keyPath, 0o644); err != nil {
+				t.Fatalf("set key permissions: %v", err)
+			}
+			link := filepath.Join(filepath.Dir(keyPath), "link.p8")
+			if err := os.Symlink(keyPath, link); err != nil {
+				t.Fatalf("Symlink() error: %v", err)
+			}
+			cmd := AuthLoginCommand()
+			if err := cmd.FlagSet.Parse([]string{
+				"--name", "demo",
+				"--key-id", "KEY",
+				"--issuer-id", "ISS",
+				"--private-key", link,
+				"--fix-permissions",
+			}); err != nil {
+				t.Fatalf("Parse() error: %v", err)
+			}
+			err := cmd.Exec(context.Background(), []string{})
+			if err == nil || !strings.Contains(err.Error(), "failed to fix private key permissions") {
+				t.Fatalf("expected repair failure, got %v", err)
+			}
+			if errors.Is(err, flag.ErrHelp) {
+				t.Fatalf("repair failure must not be a usage error: %v", err)
+			}
+			info, statErr := os.Stat(keyPath)
+			if statErr != nil {
+				t.Fatalf("Stat() error: %v", statErr)
+			}
+			if info.Mode().Perm() != 0o644 {
+				t.Fatalf("permissions = %#o, want 0644 untouched", info.Mode().Perm())
 			}
 		})
 	})
@@ -442,6 +911,55 @@ func TestAuthLoginCommand(t *testing.T) {
 			}
 		})
 	})
+
+	t.Run("success message echoes normalized name", func(t *testing.T) {
+		withTempRepo(t, func(repo string) {
+			keyPath := writeTempECDSAKeyFile(t)
+			cmd := AuthLoginCommand()
+			if err := cmd.FlagSet.Parse([]string{
+				"--name", "  spaced  ",
+				"--key-id", "KEY",
+				"--issuer-id", "ISS",
+				"--private-key", keyPath,
+				"--bypass-keychain",
+				"--local",
+				"--skip-validation",
+			}); err != nil {
+				t.Fatalf("Parse() error: %v", err)
+			}
+			stdout, _ := captureAuthOutput(t, func() {
+				if err := cmd.Exec(context.Background(), []string{}); err != nil {
+					t.Fatalf("Exec() error: %v", err)
+				}
+			})
+			if !strings.Contains(stdout, "Successfully registered API key 'spaced'") {
+				t.Fatalf("expected normalized profile name in success message, got %q", stdout)
+			}
+			if strings.Contains(stdout, "'  spaced  '") {
+				t.Fatalf("success message echoed pre-normalized name: %q", stdout)
+			}
+
+			cfgPath := filepath.Join(repo, ".asc", "config.json")
+			cfg, err := config.LoadAt(cfgPath)
+			if err != nil {
+				t.Fatalf("LoadAt() error: %v", err)
+			}
+			if cfg.DefaultKeyName != "spaced" {
+				t.Fatalf("DefaultKeyName = %q, want spaced", cfg.DefaultKeyName)
+			}
+		})
+	})
+}
+
+func assertAuthDiagnostic(t *testing.T, err error, code shared.DiagnosticCode, parameter string) {
+	t.Helper()
+	diagnostic, ok := shared.DiagnosticFromError(err)
+	if !ok {
+		t.Fatalf("DiagnosticFromError(%v) did not find metadata", err)
+	}
+	if diagnostic.Code != code || diagnostic.Parameter != parameter {
+		t.Fatalf("diagnostic = %+v, want code %q parameter %q", diagnostic, code, parameter)
+	}
 }
 
 func TestAuthSwitchCommand(t *testing.T) {
@@ -564,7 +1082,126 @@ func TestAuthSwitchCommand(t *testing.T) {
 	})
 }
 
+type authLogoutTestCalls struct {
+	names   []string
+	all     int
+	options []authsvc.RemoveOptions
+}
+
+func stubLogoutRemovers(t *testing.T) *authLogoutTestCalls {
+	t.Helper()
+	// The retained-global-config warning reads the global config, so keep it
+	// away from the developer's home directory.
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("ASC_CONFIG_PATH", filepath.Join(t.TempDir(), "config.json"))
+	calls := &authLogoutTestCalls{}
+	restore := SetLogoutCredentialRemovers(
+		func(name string, opts authsvc.RemoveOptions) error {
+			calls.names = append(calls.names, name)
+			calls.options = append(calls.options, opts)
+			return nil
+		},
+		func(opts authsvc.RemoveOptions) error {
+			calls.all++
+			calls.options = append(calls.options, opts)
+			return nil
+		},
+	)
+	t.Cleanup(restore)
+	return calls
+}
+
 func TestAuthLogoutCommand(t *testing.T) {
+	t.Run("help requires confirmation", func(t *testing.T) {
+		cmd := AuthLogoutCommand()
+		confirmFlag := cmd.FlagSet.Lookup("confirm")
+		if confirmFlag == nil {
+			t.Fatal("expected --confirm flag")
+		}
+		if confirmFlag.Usage != "Confirm credential removal (required)" {
+			t.Fatalf("--confirm usage = %q", confirmFlag.Usage)
+		}
+		if cmd.ShortUsage != "asc auth logout [--name NAME | --all] --confirm" {
+			t.Fatalf("ShortUsage = %q", cmd.ShortUsage)
+		}
+		for _, expected := range []string{
+			`asc auth logout --all --confirm`,
+			`asc auth logout --name "MyKey" --confirm`,
+			"--confirm is required",
+		} {
+			if !strings.Contains(cmd.LongHelp, expected) {
+				t.Fatalf("expected logout help to contain %q, got %q", expected, cmd.LongHelp)
+			}
+		}
+		for _, unexpected := range []string{"5.0.0", "deprecated", "compatibility"} {
+			if strings.Contains(cmd.LongHelp, unexpected) {
+				t.Fatalf("logout help still mentions %q: %q", unexpected, cmd.LongHelp)
+			}
+		}
+	})
+
+	t.Run("help documents config scope", func(t *testing.T) {
+		cmd := AuthLogoutCommand()
+		includeGlobal := cmd.FlagSet.Lookup("include-global")
+		if includeGlobal == nil {
+			t.Fatal("expected --include-global flag")
+		}
+		if includeGlobal.DefValue != "false" {
+			t.Fatalf("--include-global default = %q, want false", includeGlobal.DefValue)
+		}
+		if !strings.Contains(includeGlobal.Usage, "~/.asc/config.json") || !strings.Contains(includeGlobal.Usage, "ASC_CONFIG_PATH") {
+			t.Fatalf("--include-global usage = %q", includeGlobal.Usage)
+		}
+		for _, expected := range []string{
+			"ASC_CONFIG_PATH",
+			"--include-global",
+			`asc auth logout --all --include-global --confirm`,
+		} {
+			if !strings.Contains(cmd.LongHelp, expected) {
+				t.Fatalf("expected logout help to contain %q, got %q", expected, cmd.LongHelp)
+			}
+		}
+	})
+
+	t.Run("include-global reaches the removers", func(t *testing.T) {
+		for _, args := range [][]string{
+			{"--name", "demo", "--include-global", "--confirm"},
+			{"--all", "--include-global", "--confirm"},
+		} {
+			t.Run(strings.Join(args, " "), func(t *testing.T) {
+				calls := stubLogoutRemovers(t)
+
+				cmd := AuthLogoutCommand()
+				if err := cmd.FlagSet.Parse(args); err != nil {
+					t.Fatalf("Parse() error: %v", err)
+				}
+				if err := cmd.Exec(context.Background(), []string{}); err != nil {
+					t.Fatalf("Exec() error: %v", err)
+				}
+				if len(calls.options) != 1 || !calls.options[0].IncludeGlobalConfig {
+					t.Fatalf("expected IncludeGlobalConfig to be passed, got %+v", calls.options)
+				}
+			})
+		}
+	})
+
+	t.Run("removal defaults to the active config scope", func(t *testing.T) {
+		calls := stubLogoutRemovers(t)
+
+		cmd := AuthLogoutCommand()
+		if err := cmd.FlagSet.Parse([]string{"--all", "--confirm"}); err != nil {
+			t.Fatalf("Parse() error: %v", err)
+		}
+		if err := cmd.Exec(context.Background(), []string{}); err != nil {
+			t.Fatalf("Exec() error: %v", err)
+		}
+		if len(calls.options) != 1 || calls.options[0].IncludeGlobalConfig {
+			t.Fatalf("expected default removal options, got %+v", calls.options)
+		}
+	})
+
 	t.Run("blank name rejected", func(t *testing.T) {
 		cmd := AuthLogoutCommand()
 		if err := cmd.FlagSet.Parse([]string{"--name", "   "}); err != nil {
@@ -598,61 +1235,289 @@ func TestAuthLogoutCommand(t *testing.T) {
 	})
 
 	t.Run("remove named credential", func(t *testing.T) {
-		cfgPath := filepath.Join(t.TempDir(), "config.json")
-		t.Setenv("ASC_BYPASS_KEYCHAIN", "1")
-		t.Setenv("ASC_CONFIG_PATH", cfgPath)
-		if err := authsvc.StoreCredentialsConfigAt("demo", "KEY", "ISS", "/tmp/AuthKey.p8", cfgPath); err != nil {
-			t.Fatalf("StoreCredentialsConfigAt() error: %v", err)
-		}
+		calls := stubLogoutRemovers(t)
 
 		cmd := AuthLogoutCommand()
-		if err := cmd.FlagSet.Parse([]string{"--name", "demo"}); err != nil {
+		if err := cmd.FlagSet.Parse([]string{"--name", "demo", "--confirm"}); err != nil {
 			t.Fatalf("Parse() error: %v", err)
 		}
 		if err := cmd.Exec(context.Background(), []string{}); err != nil {
 			t.Fatalf("Exec() error: %v", err)
 		}
 
-		cfg, err := config.LoadAt(cfgPath)
-		if err != nil {
-			t.Fatalf("LoadAt() error: %v", err)
-		}
-		if cfg.DefaultKeyName != "" {
-			t.Fatalf("expected cleared default key, got %q", cfg.DefaultKeyName)
+		if len(calls.names) != 1 || calls.names[0] != "demo" || calls.all != 0 {
+			t.Fatalf("unexpected removal calls: %+v", calls)
 		}
 	})
 
 	t.Run("remove all credentials", func(t *testing.T) {
-		cfgPath := filepath.Join(t.TempDir(), "config.json")
-		t.Setenv("ASC_BYPASS_KEYCHAIN", "1")
-		t.Setenv("ASC_CONFIG_PATH", cfgPath)
-		if err := authsvc.StoreCredentialsConfigAt("one", "KEY1", "ISS1", "/tmp/AuthKey1.p8", cfgPath); err != nil {
-			t.Fatalf("StoreCredentialsConfigAt() error: %v", err)
-		}
-		if err := authsvc.StoreCredentialsConfigAt("two", "KEY2", "ISS2", "/tmp/AuthKey2.p8", cfgPath); err != nil {
-			t.Fatalf("StoreCredentialsConfigAt() error: %v", err)
-		}
+		calls := stubLogoutRemovers(t)
 
 		cmd := AuthLogoutCommand()
-		if err := cmd.FlagSet.Parse([]string{"--all"}); err != nil {
+		if err := cmd.FlagSet.Parse([]string{"--all", "--confirm"}); err != nil {
 			t.Fatalf("Parse() error: %v", err)
 		}
-		execErr := cmd.Exec(context.Background(), []string{})
+		if err := cmd.Exec(context.Background(), []string{}); err != nil {
+			t.Fatalf("Exec() error: %v", err)
+		}
+		if len(calls.names) != 0 || calls.all != 1 {
+			t.Fatalf("unexpected removal calls: %+v", calls)
+		}
+	})
 
-		// Only skip on specific keychain interaction errors (errSecInteractionNotAllowed = -25301)
-		// This is expected in CI environments where keychain is locked
-		if execErr != nil && (strings.Contains(execErr.Error(), "errSecInteractionNotAllowed") ||
-			strings.Contains(execErr.Error(), "(-25301)")) {
-			t.Skipf("skipping: keychain interaction not allowed - %v", execErr)
+	t.Run("missing confirm is a usage error before removal", func(t *testing.T) {
+		for _, args := range [][]string{
+			{"--name", "legacy"},
+			{"--all"},
+			{},
+		} {
+			t.Run(strings.Join(args, " "), func(t *testing.T) {
+				calls := stubLogoutRemovers(t)
+
+				cmd := AuthLogoutCommand()
+				if err := cmd.FlagSet.Parse(args); err != nil {
+					t.Fatalf("Parse() error: %v", err)
+				}
+				stdout, stderr := captureAuthOutput(t, func() {
+					err := cmd.Exec(context.Background(), []string{})
+					if !errors.Is(err, flag.ErrHelp) {
+						t.Fatalf("Exec() error = %v, want flag.ErrHelp", err)
+					}
+				})
+				if stdout != "" {
+					t.Fatalf("stdout = %q, want empty", stdout)
+				}
+				if !strings.Contains(stderr, "--confirm is required to remove stored credentials") {
+					t.Fatalf("stderr = %q, want --confirm usage error", stderr)
+				}
+				if strings.Contains(stderr, "Warning") || strings.Contains(stderr, "5.0.0") {
+					t.Fatalf("stderr still carries deprecation wording: %q", stderr)
+				}
+				if len(calls.names) != 0 || calls.all != 0 {
+					t.Fatalf("credentials were removed without --confirm: %+v", calls)
+				}
+			})
+		}
+	})
+
+	t.Run("explicit confirm false is rejected before removal", func(t *testing.T) {
+		calls := stubLogoutRemovers(t)
+
+		cmd := AuthLogoutCommand()
+		if err := cmd.FlagSet.Parse([]string{"--all", "--confirm=false"}); err != nil {
+			t.Fatalf("Parse() error: %v", err)
+		}
+		_, stderr := captureAuthOutput(t, func() {
+			err := cmd.Exec(context.Background(), []string{})
+			if !errors.Is(err, flag.ErrHelp) {
+				t.Fatalf("Exec() error = %v, want flag.ErrHelp", err)
+			}
+		})
+		if !strings.Contains(stderr, "--confirm must be true when specified") {
+			t.Fatalf("stderr = %q, want explicit-false usage error", stderr)
+		}
+		if len(calls.names) != 0 || calls.all != 0 {
+			t.Fatalf("credentials were removed with --confirm=false: %+v", calls)
+		}
+	})
+
+	t.Run("unexpected arguments are rejected before removal", func(t *testing.T) {
+		calls := stubLogoutRemovers(t)
+
+		cmd := AuthLogoutCommand()
+		if err := cmd.FlagSet.Parse([]string{"--all", "--confirm"}); err != nil {
+			t.Fatalf("Parse() error: %v", err)
+		}
+		_, stderr := captureAuthOutput(t, func() {
+			err := cmd.Exec(context.Background(), []string{"unexpected"})
+			if !errors.Is(err, flag.ErrHelp) {
+				t.Fatalf("Exec() error = %v, want flag.ErrHelp", err)
+			}
+		})
+		if !strings.Contains(stderr, "unexpected argument(s): unexpected") {
+			t.Fatalf("expected unexpected-argument error, got %q", stderr)
 		}
 
-		// Verify: either no error (success) or config was cleared
-		cfg, err := config.LoadAt(cfgPath)
-		if err != nil {
-			t.Fatalf("LoadAt() error: %v", err)
+		if len(calls.names) != 0 || calls.all != 0 {
+			t.Fatalf("expected no removal, got %+v", calls)
 		}
-		if len(cfg.Keys) != 0 || cfg.DefaultKeyName != "" || cfg.KeyID != "" {
-			t.Fatalf("expected cleared credentials, got %+v", cfg)
+	})
+}
+
+func TestAuthExportToConfigCommand(t *testing.T) {
+	t.Run("requires confirm", func(t *testing.T) {
+		cmd := AuthExportToConfigCommand()
+		if err := cmd.FlagSet.Parse([]string{}); err != nil {
+			t.Fatalf("Parse() error: %v", err)
+		}
+		_, stderr := captureAuthOutput(t, func() {
+			err := cmd.Exec(context.Background(), []string{})
+			if !errors.Is(err, flag.ErrHelp) {
+				t.Fatalf("expected flag.ErrHelp, got %v", err)
+			}
+		})
+		if !strings.Contains(stderr, "--confirm is required") {
+			t.Fatalf("expected confirm error in stderr, got %q", stderr)
+		}
+	})
+
+	t.Run("invalid output format", func(t *testing.T) {
+		cmd := AuthExportToConfigCommand()
+		if err := cmd.FlagSet.Parse([]string{"--confirm", "--output", "yaml"}); err != nil {
+			t.Fatalf("Parse() error: %v", err)
+		}
+		_, stderr := captureAuthOutput(t, func() {
+			err := cmd.Exec(context.Background(), []string{})
+			if !errors.Is(err, flag.ErrHelp) {
+				t.Fatalf("expected flag.ErrHelp, got %v", err)
+			}
+		})
+		if !strings.Contains(stderr, `(got "yaml")`) {
+			t.Fatalf("expected unsupported format error, got %q", stderr)
+		}
+	})
+
+	t.Run("local and config are mutually exclusive", func(t *testing.T) {
+		cmd := AuthExportToConfigCommand()
+		if err := cmd.FlagSet.Parse([]string{"--confirm", "--local", "--config", filepath.Join(t.TempDir(), "config.json")}); err != nil {
+			t.Fatalf("Parse() error: %v", err)
+		}
+		_, stderr := captureAuthOutput(t, func() {
+			err := cmd.Exec(context.Background(), []string{})
+			if !errors.Is(err, flag.ErrHelp) {
+				t.Fatalf("expected flag.ErrHelp, got %v", err)
+			}
+		})
+		if !strings.Contains(stderr, "--local and --config are mutually exclusive") {
+			t.Fatalf("expected local/config error, got %q", stderr)
+		}
+	})
+
+	t.Run("local resolves repo config path", func(t *testing.T) {
+		withTempRepo(t, func(repo string) {
+			var captured authsvc.MigrateKeychainToConfigOptions
+			restore := SetMigrateKeychainToConfig(func(opts authsvc.MigrateKeychainToConfigOptions) (authsvc.MigrateKeychainToConfigResult, error) {
+				captured = opts
+				return authsvc.MigrateKeychainToConfigResult{
+					ConfigPath: opts.ConfigPath,
+					Migrated: []authsvc.MigratedCredential{
+						{Name: "demo", KeyID: "KEY123", PrivateKeyPath: "/tmp/AuthKey.p8"},
+					},
+				}, nil
+			})
+			t.Cleanup(restore)
+
+			cmd := AuthExportToConfigCommand()
+			if err := cmd.FlagSet.Parse([]string{"--confirm", "--local"}); err != nil {
+				t.Fatalf("Parse() error: %v", err)
+			}
+			if err := cmd.Exec(context.Background(), []string{}); err != nil {
+				t.Fatalf("Exec() error: %v", err)
+			}
+			expectedRepo := repo
+			if resolvedRepo, err := filepath.EvalSymlinks(repo); err == nil {
+				expectedRepo = resolvedRepo
+			}
+			expected := filepath.Join(expectedRepo, ".asc", "config.json")
+			if captured.ConfigPath != expected {
+				t.Fatalf("captured ConfigPath = %q, want %q", captured.ConfigPath, expected)
+			}
+		})
+	})
+
+	t.Run("default resolves active config path", func(t *testing.T) {
+		configPath := filepath.Join(t.TempDir(), "active-config.json")
+		t.Setenv("ASC_CONFIG_PATH", configPath)
+		var captured authsvc.MigrateKeychainToConfigOptions
+		restore := SetMigrateKeychainToConfig(func(opts authsvc.MigrateKeychainToConfigOptions) (authsvc.MigrateKeychainToConfigResult, error) {
+			captured = opts
+			return authsvc.MigrateKeychainToConfigResult{
+				ConfigPath: opts.ConfigPath,
+				Migrated: []authsvc.MigratedCredential{
+					{Name: "demo", KeyID: "KEY123", PrivateKeyPath: "/tmp/AuthKey.p8"},
+				},
+			}, nil
+		})
+		t.Cleanup(restore)
+
+		cmd := AuthExportToConfigCommand()
+		if err := cmd.FlagSet.Parse([]string{"--confirm"}); err != nil {
+			t.Fatalf("Parse() error: %v", err)
+		}
+		if err := cmd.Exec(context.Background(), []string{}); err != nil {
+			t.Fatalf("Exec() error: %v", err)
+		}
+		if captured.ConfigPath != configPath {
+			t.Fatalf("captured ConfigPath = %q, want active config path %q", captured.ConfigPath, configPath)
+		}
+	})
+
+	t.Run("json success", func(t *testing.T) {
+		configPath := filepath.Join(t.TempDir(), "config.json")
+		privateKeyDir := filepath.Join(t.TempDir(), "keys")
+		var captured authsvc.MigrateKeychainToConfigOptions
+		restore := SetMigrateKeychainToConfig(func(opts authsvc.MigrateKeychainToConfigOptions) (authsvc.MigrateKeychainToConfigResult, error) {
+			captured = opts
+			return authsvc.MigrateKeychainToConfigResult{
+				ConfigPath:          opts.ConfigPath,
+				PrivateKeyDir:       opts.PrivateKeyDir,
+				RemovedFromKeychain: opts.RemoveKeychain,
+				Migrated: []authsvc.MigratedCredential{
+					{
+						Name:           "demo",
+						KeyID:          "KEY123",
+						PrivateKeyPath: filepath.Join(privateKeyDir, "AuthKey_demo.p8"),
+					},
+				},
+			}, nil
+		})
+		t.Cleanup(restore)
+
+		cmd := AuthExportToConfigCommand()
+		if err := cmd.FlagSet.Parse([]string{
+			"--confirm",
+			"--output", "json",
+			"--config", configPath,
+			"--private-key-dir", privateKeyDir,
+			"--remove-keychain",
+		}); err != nil {
+			t.Fatalf("Parse() error: %v", err)
+		}
+		stdout, stderr := captureAuthOutput(t, func() {
+			if err := cmd.Exec(context.Background(), []string{}); err != nil {
+				t.Fatalf("Exec() error: %v", err)
+			}
+		})
+		if stderr != "" {
+			t.Fatalf("expected empty stderr, got %q", stderr)
+		}
+		if captured.ConfigPath != configPath {
+			t.Fatalf("captured ConfigPath = %q, want %q", captured.ConfigPath, configPath)
+		}
+		if captured.PrivateKeyDir != privateKeyDir {
+			t.Fatalf("captured PrivateKeyDir = %q, want %q", captured.PrivateKeyDir, privateKeyDir)
+		}
+		if !captured.RemoveKeychain {
+			t.Fatal("expected RemoveKeychain option to be true")
+		}
+
+		var payload struct {
+			ConfigPath          string `json:"configPath"`
+			PrivateKeyDir       string `json:"privateKeyDir"`
+			RemovedFromKeychain bool   `json:"removedFromKeychain"`
+			Migrated            []struct {
+				Name  string `json:"name"`
+				KeyID string `json:"keyId"`
+			} `json:"migrated"`
+		}
+		if err := json.Unmarshal([]byte(stdout), &payload); err != nil {
+			t.Fatalf("failed to unmarshal migration json: %v; stdout=%q", err, stdout)
+		}
+		if payload.ConfigPath != configPath || payload.PrivateKeyDir != privateKeyDir || !payload.RemovedFromKeychain {
+			t.Fatalf("unexpected migration payload: %+v", payload)
+		}
+		if len(payload.Migrated) != 1 || payload.Migrated[0].Name != "demo" || payload.Migrated[0].KeyID != "KEY123" {
+			t.Fatalf("unexpected migrated credentials payload: %+v", payload.Migrated)
 		}
 	})
 }
@@ -789,7 +1654,7 @@ func TestAuthStatusCommand(t *testing.T) {
 		if stdout != "" {
 			t.Fatalf("expected empty stdout, got %q", stdout)
 		}
-		if !strings.Contains(stderr, "unsupported format: yaml") {
+		if !strings.Contains(stderr, `(got "yaml")`) {
 			t.Fatalf("expected unsupported format error, got %q", stderr)
 		}
 	})
@@ -814,6 +1679,78 @@ func TestAuthStatusCommand(t *testing.T) {
 		err := cmd.Exec(context.Background(), []string{})
 		if err == nil || !strings.Contains(err.Error(), "validation failed for 1 credential") {
 			t.Fatalf("expected validation failure summary, got %v", err)
+		}
+	})
+
+	t.Run("validate preserves private-key diagnostic", func(t *testing.T) {
+		cfgPath := filepath.Join(t.TempDir(), "config.json")
+		t.Setenv("ASC_BYPASS_KEYCHAIN", "1")
+		t.Setenv("ASC_CONFIG_PATH", cfgPath)
+		missingKeyPath := filepath.Join(t.TempDir(), "missing.p8")
+
+		restore := SetListStoredCredentials(func() ([]authsvc.Credential, error) {
+			return []authsvc.Credential{{
+				Name:           "demo",
+				KeyID:          "KEY",
+				IssuerID:       "ISS",
+				PrivateKeyPath: missingKeyPath,
+			}}, nil
+		})
+		t.Cleanup(restore)
+
+		cmd := AuthStatusCommand()
+		if err := cmd.FlagSet.Parse([]string{"--output", "table", "--validate"}); err != nil {
+			t.Fatalf("Parse() error: %v", err)
+		}
+		var runErr error
+		captureAuthOutput(t, func() {
+			runErr = cmd.Exec(context.Background(), []string{})
+		})
+		if runErr == nil || !strings.Contains(runErr.Error(), "validation failed for 1 credential") {
+			t.Fatalf("expected validation failure summary, got %v", runErr)
+		}
+		diagnostic, ok := shared.DiagnosticFromError(runErr)
+		if !ok {
+			t.Fatalf("DiagnosticFromError(%v) did not find metadata", runErr)
+		}
+		if diagnostic.Code != shared.DiagnosticFileNotFound || diagnostic.Parameter != "--private-key" {
+			t.Fatalf("diagnostic = %+v, want file_not_found for --private-key", diagnostic)
+		}
+	})
+
+	t.Run("validate omits diagnostic for mixed aggregate failures", func(t *testing.T) {
+		cfgPath := filepath.Join(t.TempDir(), "config.json")
+		t.Setenv("ASC_BYPASS_KEYCHAIN", "1")
+		t.Setenv("ASC_CONFIG_PATH", cfgPath)
+
+		restoreList := SetListStoredCredentials(func() ([]authsvc.Credential, error) {
+			return []authsvc.Credential{
+				{Name: "missing", KeyID: "KEY1", IssuerID: "ISS"},
+				{Name: "rejected", KeyID: "KEY2", IssuerID: "ISS"},
+			}, nil
+		})
+		t.Cleanup(restoreList)
+		restoreValidate := SetStatusValidateCredential(func(_ context.Context, cred authsvc.Credential) error {
+			if cred.Name == "missing" {
+				return shared.WithDiagnostic(errors.New("missing key"), shared.DiagnosticFileNotFound, "--private-key")
+			}
+			return shared.WithDiagnostic(errors.New("rejected"), shared.DiagnosticAuthenticationRejected, "")
+		})
+		t.Cleanup(restoreValidate)
+
+		cmd := AuthStatusCommand()
+		if err := cmd.FlagSet.Parse([]string{"--output", "table", "--validate"}); err != nil {
+			t.Fatalf("Parse() error: %v", err)
+		}
+		var runErr error
+		captureAuthOutput(t, func() {
+			runErr = cmd.Exec(context.Background(), []string{})
+		})
+		if runErr == nil || !strings.Contains(runErr.Error(), "validation failed for 2 credential(s)") {
+			t.Fatalf("expected validation failure summary, got %v", runErr)
+		}
+		if diagnostic, ok := shared.DiagnosticFromError(runErr); ok {
+			t.Fatalf("diagnostic = %+v, want no diagnostic for mixed aggregate failures", diagnostic)
 		}
 	})
 
@@ -843,6 +1780,14 @@ func TestAuthStatusCommand(t *testing.T) {
 			t.Fatalf("expected permission warning message, got %q", stdout)
 		}
 	})
+}
+
+func TestAuthStatusEnvironmentNoteReportsCompleteEnvironmentPrecedence(t *testing.T) {
+	note := authStatusEnvironmentNote("", false, true, true, true)
+	want := "Complete environment credential fields take precedence when no profile is selected; stored credential lookup is skipped."
+	if note != want {
+		t.Fatalf("authStatusEnvironmentNote() = %q, want %q", note, want)
+	}
 }
 
 func TestCredentialStorageLabel(t *testing.T) {
@@ -982,6 +1927,13 @@ func TestAuthTokenCommand(t *testing.T) {
 		err := cmd.Exec(context.Background(), []string{})
 		if err == nil || !strings.Contains(err.Error(), "private key file is too permissive") {
 			t.Fatalf("expected insecure key file error, got %v", err)
+		}
+		diagnostic, ok := shared.DiagnosticFromError(err)
+		if !ok {
+			t.Fatalf("DiagnosticFromError(%v) did not find metadata", err)
+		}
+		if diagnostic.Code != shared.DiagnosticFilePermissionsInsecure || diagnostic.Parameter != "--private-key" {
+			t.Fatalf("diagnostic = %+v, want file_permissions_insecure for --private-key", diagnostic)
 		}
 	})
 

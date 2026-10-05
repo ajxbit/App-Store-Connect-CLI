@@ -42,6 +42,16 @@ type publicSearchPayload struct {
 	Results []itunes.SearchResult `json:"results"`
 }
 
+type publicRankPayload struct {
+	AppID       int64  `json:"appId"`
+	Term        string `json:"term"`
+	Country     string `json:"country"`
+	Platform    string `json:"platform"`
+	Found       bool   `json:"found"`
+	Rank        *int   `json:"rank,omitempty"`
+	ResultCount int    `json:"resultCount"`
+}
+
 func runCommand(t *testing.T, args []string) (string, string, error) {
 	t.Helper()
 
@@ -77,18 +87,61 @@ func TestAppsHelpShowsPublicSubcommand(t *testing.T) {
 	}
 }
 
+func TestAppsListHelpShowsFeatureExamples(t *testing.T) {
+	root := RootCommand("1.2.3")
+	appsCmd := findSubcommand(root, "apps")
+	listCmd := findSubcommand(root, "apps", "list")
+	if appsCmd == nil || listCmd == nil {
+		t.Fatal("expected apps and apps list commands")
+	}
+
+	for name, command := range map[string]*ffcli.Command{
+		"apps":      appsCmd,
+		"apps list": listCmd,
+	} {
+		usage := command.UsageFunc(command)
+		for _, want := range []string{
+			"Filter by App Store version state(s)",
+			"Filter by review submission state(s)",
+		} {
+			if !strings.Contains(usage, want) {
+				t.Errorf("%s help missing lifecycle marker %q, got %q", name, want, usage)
+			}
+		}
+		for _, want := range []string{
+			"--sort sku",
+			"--version-state IN_REVIEW,WAITING_FOR_REVIEW",
+			"--review-submission-state IN_REVIEW",
+		} {
+			if !strings.Contains(usage, want) {
+				t.Errorf("%s help missing feature example %q, got %q", name, want, usage)
+			}
+		}
+	}
+}
+
 func TestAppsPublicHelpShowsSubcommands(t *testing.T) {
 	root := RootCommand("1.2.3")
 	publicCmd := findSubcommand(root, "apps", "public")
 	if publicCmd == nil {
 		t.Fatal("expected apps public command")
+		return
 	}
 
 	usage := publicCmd.UsageFunc(publicCmd)
-	for _, want := range []string{"view", "search", "prices", "descriptions", "storefronts", "No authentication is required."} {
+	for _, want := range []string{"view", "search", "rank", "prices", "descriptions", "storefronts", "No authentication is required."} {
 		if !strings.Contains(usage, want) {
 			t.Fatalf("expected apps public help to contain %q, got %q", want, usage)
 		}
+	}
+}
+
+func TestAppsPublicRankHelpDocumentsSurface(t *testing.T) {
+	root := RootCommand("1.2.3")
+	rankCmd := findSubcommand(root, "apps", "public", "rank")
+	if rankCmd == nil {
+		t.Fatal("expected apps public rank command")
+		return
 	}
 }
 
@@ -102,11 +155,6 @@ func TestAppsPublicValidationErrors(t *testing.T) {
 			name:    "view missing app",
 			args:    []string{"apps", "public", "view"},
 			wantErr: "--app is required",
-		},
-		{
-			name:    "view conflicting app aliases",
-			args:    []string{"apps", "public", "view", "--app", "123", "--id", "456"},
-			wantErr: "--app and --id are mutually exclusive",
 		},
 		{
 			name:    "view invalid app id",
@@ -134,6 +182,51 @@ func TestAppsPublicValidationErrors(t *testing.T) {
 			wantErr: "unsupported country code",
 		},
 		{
+			name:    "rank missing app",
+			args:    []string{"apps", "public", "rank", "--term", "focus", "--platform", "IOS"},
+			wantErr: "--app is required",
+		},
+		{
+			name:    "rank invalid app",
+			args:    []string{"apps", "public", "rank", "--app", "abc", "--term", "focus", "--platform", "IOS"},
+			wantErr: "--app must be a numeric App Store app ID",
+		},
+		{
+			name:    "rank missing term",
+			args:    []string{"apps", "public", "rank", "--app", "123", "--platform", "IOS"},
+			wantErr: "--term is required",
+		},
+		{
+			name:    "rank missing platform",
+			args:    []string{"apps", "public", "rank", "--app", "123", "--term", "focus"},
+			wantErr: "--platform is required",
+		},
+		{
+			name:    "rank rejects macOS",
+			args:    []string{"apps", "public", "rank", "--app", "123", "--term", "focus", "--platform", "MAC_OS"},
+			wantErr: "--platform must be one of: IOS, TV_OS",
+		},
+		{
+			name:    "rank rejects visionOS",
+			args:    []string{"apps", "public", "rank", "--app", "123", "--term", "focus", "--platform", "VISION_OS"},
+			wantErr: "--platform must be one of: IOS, TV_OS",
+		},
+		{
+			name:    "rank rejects unknown platform",
+			args:    []string{"apps", "public", "rank", "--app", "123", "--term", "focus", "--platform", "ANDROID"},
+			wantErr: "--platform must be one of: IOS, TV_OS",
+		},
+		{
+			name:    "rank invalid country",
+			args:    []string{"apps", "public", "rank", "--app", "123", "--term", "focus", "--platform", "IOS", "--country", "usa"},
+			wantErr: "unsupported country code",
+		},
+		{
+			name:    "rank rejects positional argument",
+			args:    []string{"apps", "public", "rank", "--app", "123", "--term", "focus", "--platform", "IOS", "extra"},
+			wantErr: "public rank does not accept positional arguments",
+		},
+		{
 			name:    "prices invalid country",
 			args:    []string{"apps", "public", "prices", "--app", "123", "--country", "usa"},
 			wantErr: "unsupported country code",
@@ -156,6 +249,211 @@ func TestAppsPublicValidationErrors(t *testing.T) {
 			}
 			if !strings.Contains(stderr, test.wantErr) {
 				t.Fatalf("expected stderr to contain %q, got %q", test.wantErr, stderr)
+			}
+		})
+	}
+}
+
+func TestAppsPublicRankRejectsTVStorefrontWithoutNumericIDBeforeRequest(t *testing.T) {
+	t.Setenv("ASC_BYPASS_KEYCHAIN", "1")
+
+	originalTransport := http.DefaultTransport
+	t.Cleanup(func() {
+		http.DefaultTransport = originalTransport
+	})
+	http.DefaultTransport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		t.Fatalf("unexpected request for unsupported TV storefront: %s", req.URL.String())
+		return nil, errors.New("unexpected request")
+	})
+
+	stdout, stderr, runErr := runCommand(t, []string{
+		"apps", "public", "rank",
+		"--app", "1234567890",
+		"--term", "focus timer",
+		"--country", "kz",
+		"--platform", "TV_OS",
+	})
+	if !errors.Is(runErr, flag.ErrHelp) {
+		t.Fatalf("expected ErrHelp, got %v", runErr)
+	}
+	if stdout != "" {
+		t.Fatalf("expected empty stdout, got %q", stdout)
+	}
+	if !strings.Contains(stderr, "TV_OS ranking is unavailable for storefront KZ") {
+		t.Fatalf("unexpected stderr: %q", stderr)
+	}
+}
+
+func TestAppsPublicRankTVOSJSON(t *testing.T) {
+	t.Setenv("ASC_BYPASS_KEYCHAIN", "1")
+
+	originalTransport := http.DefaultTransport
+	t.Cleanup(func() {
+		http.DefaultTransport = originalTransport
+	})
+	http.DefaultTransport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		if req.Method != http.MethodGet {
+			t.Fatalf("method = %s, want GET", req.Method)
+		}
+		if req.URL.Host != "search.itunes.apple.com" {
+			t.Fatalf("host = %q, want search.itunes.apple.com", req.URL.Host)
+		}
+		if req.URL.Path != "/WebObjects/MZStore.woa/wa/search" {
+			t.Fatalf("path = %q, want MZStore search", req.URL.Path)
+		}
+		if got := req.URL.Query().Get("term"); got != "search" {
+			t.Fatalf("term = %q, want search", got)
+		}
+		if got := req.Header.Get("X-Apple-Store-Front"); got != itunes.Storefronts["us"]+",33" {
+			t.Fatalf("storefront header = %q, want %q", got, itunes.Storefronts["us"]+",33")
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body: io.NopCloser(strings.NewReader(`{
+				"pageData":{"bubbles":[{"results":[
+					{"id":"111","entity":"tvSoftware"},
+					{"id":"1234567890","entity":"tvSoftware"}
+				]}]}
+			}`)),
+			Header: http.Header{"Content-Type": []string{"application/json"}},
+		}, nil
+	})
+
+	stdout, stderr, runErr := runCommand(t, []string{
+		"apps", "public", "rank",
+		"--term", "search",
+		"--country", "us",
+		"--app", "1234567890",
+		"--output", "json",
+		"--platform", "tv_os",
+	})
+	if runErr != nil {
+		t.Fatalf("run error: %v", runErr)
+	}
+	if stderr != "" {
+		t.Fatalf("expected empty stderr, got %q", stderr)
+	}
+
+	var payload publicRankPayload
+	if err := json.Unmarshal([]byte(stdout), &payload); err != nil {
+		t.Fatalf("unmarshal rank: %v", err)
+	}
+	if payload.AppID != 1234567890 || payload.Term != "search" || payload.Country != "US" || payload.Platform != "TV_OS" {
+		t.Fatalf("unexpected rank identity: %+v", payload)
+	}
+	if !payload.Found || payload.Rank == nil || *payload.Rank != 2 || payload.ResultCount != 2 {
+		t.Fatalf("unexpected rank result: %+v", payload)
+	}
+}
+
+func TestAppsPublicRankIOSNormalizesPlatform(t *testing.T) {
+	t.Setenv("ASC_BYPASS_KEYCHAIN", "1")
+
+	originalTransport := http.DefaultTransport
+	t.Cleanup(func() {
+		http.DefaultTransport = originalTransport
+	})
+	http.DefaultTransport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		if req.URL.Host != "itunes.apple.com" || req.URL.Path != "/search" {
+			t.Fatalf("request URL = %s, want iTunes /search", req.URL.String())
+		}
+		if got := req.URL.Query().Get("limit"); got != "200" {
+			t.Fatalf("limit = %q, want 200", got)
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body: io.NopCloser(strings.NewReader(`{
+				"resultCount":1,
+				"results":[{"trackId":123,"trackName":"Alpha"}]
+			}`)),
+			Header: http.Header{"Content-Type": []string{"application/json"}},
+		}, nil
+	})
+
+	stdout, stderr, runErr := runCommand(t, []string{
+		"apps", "public", "rank",
+		"--app", "123",
+		"--term", "alpha",
+		"--platform", "ios",
+		"--output", "json",
+	})
+	if runErr != nil {
+		t.Fatalf("run error: %v", runErr)
+	}
+	if stderr != "" {
+		t.Fatalf("expected empty stderr, got %q", stderr)
+	}
+
+	var payload publicRankPayload
+	if err := json.Unmarshal([]byte(stdout), &payload); err != nil {
+		t.Fatalf("unmarshal rank: %v", err)
+	}
+	if payload.Platform != "IOS" || !payload.Found || payload.Rank == nil || *payload.Rank != 1 {
+		t.Fatalf("unexpected iOS rank payload: %+v", payload)
+	}
+}
+
+func TestAppsPublicRankNotFoundOutputs(t *testing.T) {
+	t.Setenv("ASC_BYPASS_KEYCHAIN", "1")
+
+	originalTransport := http.DefaultTransport
+	t.Cleanup(func() {
+		http.DefaultTransport = originalTransport
+	})
+	http.DefaultTransport = roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body: io.NopCloser(strings.NewReader(`{
+				"pageData":{"bubbles":[{"results":[
+					{"id":"111","entity":"tvSoftware"}
+				]}]}
+			}`)),
+			Header: http.Header{"Content-Type": []string{"application/json"}},
+		}, nil
+	})
+
+	baseArgs := []string{
+		"apps", "public", "rank",
+		"--app", "1234567890",
+		"--term", "missing",
+		"--platform", "TV_OS",
+	}
+
+	stdout, stderr, runErr := runCommand(t, append(append([]string{}, baseArgs...), "--output", "json"))
+	if runErr != nil {
+		t.Fatalf("JSON run error: %v", runErr)
+	}
+	if stderr != "" {
+		t.Fatalf("expected empty JSON stderr, got %q", stderr)
+	}
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(stdout), &raw); err != nil {
+		t.Fatalf("unmarshal raw rank: %v", err)
+	}
+	if _, ok := raw["rank"]; ok {
+		t.Fatalf("not-found JSON unexpectedly contains rank: %s", stdout)
+	}
+	var payload publicRankPayload
+	if err := json.Unmarshal([]byte(stdout), &payload); err != nil {
+		t.Fatalf("unmarshal rank: %v", err)
+	}
+	if payload.Found || payload.Rank != nil || payload.ResultCount != 1 {
+		t.Fatalf("unexpected not-found payload: %+v", payload)
+	}
+
+	for _, output := range []string{"table", "markdown"} {
+		t.Run(output, func(t *testing.T) {
+			stdout, stderr, runErr := runCommand(t, append(append([]string{}, baseArgs...), "--output", output))
+			if runErr != nil {
+				t.Fatalf("run error: %v", runErr)
+			}
+			if stderr != "" {
+				t.Fatalf("expected empty stderr, got %q", stderr)
+			}
+			for _, want := range []string{"App ID", "Term", "Country", "Platform", "Found", "Rank", "Result Count", "1234567890", "TV_OS", "false", "-"} {
+				if !strings.Contains(stdout, want) {
+					t.Fatalf("expected %s output to contain %q, got %q", output, want, stdout)
+				}
 			}
 		})
 	}
@@ -238,8 +536,8 @@ func TestAppsPublicRejectsSignedAppIDsBeforeRequest(t *testing.T) {
 			args: []string{"apps", "public", "prices", "--app", "+123"},
 		},
 		{
-			name: "descriptions negative alias",
-			args: []string{"apps", "public", "descriptions", "--id", "-123"},
+			name: "descriptions negative app",
+			args: []string{"apps", "public", "descriptions", "--app", "-123"},
 		},
 	}
 
@@ -259,103 +557,34 @@ func TestAppsPublicRejectsSignedAppIDsBeforeRequest(t *testing.T) {
 	}
 }
 
-func TestAppsPublicAliasIsSilentAndMatchesCanonical(t *testing.T) {
+func TestAppsPublicLegacyIDFlagIsUnknown(t *testing.T) {
 	t.Setenv("ASC_BYPASS_KEYCHAIN", "1")
-	t.Setenv("ASC_KEY_ID", "poison")
-	t.Setenv("ASC_ISSUER_ID", "poison")
-	t.Setenv("ASC_PRIVATE_KEY_PATH", "/nonexistent")
-	t.Setenv("ASC_PRIVATE_KEY", "poison")
-	t.Setenv("ASC_PRIVATE_KEY_B64", "poison")
 
 	originalTransport := http.DefaultTransport
 	t.Cleanup(func() {
 		http.DefaultTransport = originalTransport
 	})
-
-	lookupBody := `{
-		"resultCount": 1,
-		"results": [{
-			"trackId": 123,
-			"trackName": "Alpha",
-			"bundleId": "com.example.alpha",
-			"trackViewUrl": "https://apps.apple.com/us/app/alpha/id123",
-			"artworkUrl512": "https://example.com/icon.png",
-			"sellerName": "Alpha Inc",
-			"primaryGenreName": "Games",
-			"genres": ["Games", "Action"],
-			"version": "1.0.0",
-			"description": "Alpha description",
-			"price": 0,
-			"formattedPrice": "Free",
-			"currency": "USD",
-			"averageUserRating": 4.5,
-			"userRatingCount": 12,
-			"averageUserRatingForCurrentVersion": 4.4,
-			"userRatingCountForCurrentVersion": 11
-		}]
-	}`
-
 	http.DefaultTransport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
-		if req.Method != http.MethodGet {
-			t.Fatalf("expected GET, got %s", req.Method)
-		}
-		if req.URL.Path != "/lookup" {
-			t.Fatalf("expected /lookup, got %s", req.URL.Path)
-		}
-		if got := req.URL.Query().Get("id"); got != "123" {
-			t.Fatalf("expected id=123, got %q", got)
-		}
-		if got := req.URL.Query().Get("country"); got != "us" {
-			t.Fatalf("expected country=us, got %q", got)
-		}
-		if got := req.URL.Query().Get("entity"); got != "software" {
-			t.Fatalf("expected entity=software, got %q", got)
-		}
-		return &http.Response{
-			StatusCode: http.StatusOK,
-			Body:       io.NopCloser(strings.NewReader(lookupBody)),
-			Header:     http.Header{"Content-Type": []string{"application/json"}},
-		}, nil
+		t.Fatalf("removed --id alias must fail before any request: %s", req.URL.String())
+		return nil, errors.New("unexpected request")
 	})
 
-	canonicalStdout, canonicalStderr, canonicalErr := runCommand(t, []string{"apps", "public", "view", "--app", "123", "--output", "json"})
-	aliasStdout, aliasStderr, aliasErr := runCommand(t, []string{"apps", "public", "view", "--id", "123", "--output", "json"})
-	matchingStdout, matchingStderr, matchingErr := runCommand(t, []string{"apps", "public", "view", "--app", "123", "--id", "123", "--output", "json"})
+	root := RootCommand("1.2.3")
+	for _, name := range []string{"view", "prices", "descriptions"} {
+		t.Run(name, func(t *testing.T) {
+			command := findSubcommand(root, "apps", "public", name)
+			if command == nil {
+				t.Fatalf("apps public %s not found", name)
+			}
+			if command.FlagSet.Lookup("app") == nil {
+				t.Fatalf("apps public %s: canonical --app flag not found", name)
+			}
+			if command.FlagSet.Lookup("id") != nil {
+				t.Fatalf("apps public %s: removed --id alias is still registered", name)
+			}
 
-	if canonicalErr != nil {
-		t.Fatalf("canonical run error: %v", canonicalErr)
-	}
-	if aliasErr != nil {
-		t.Fatalf("alias run error: %v", aliasErr)
-	}
-	if matchingErr != nil {
-		t.Fatalf("matching alias run error: %v", matchingErr)
-	}
-	if canonicalStderr != "" {
-		t.Fatalf("expected canonical stderr to be empty, got %q", canonicalStderr)
-	}
-	if aliasStderr != "" {
-		t.Fatalf("expected alias stderr to be empty, got %q", aliasStderr)
-	}
-	if matchingStderr != "" {
-		t.Fatalf("expected matching alias stderr to be empty, got %q", matchingStderr)
-	}
-	if canonicalStdout != aliasStdout {
-		t.Fatalf("expected canonical and alias outputs to match, canonical=%q alias=%q", canonicalStdout, aliasStdout)
-	}
-	if canonicalStdout != matchingStdout {
-		t.Fatalf("expected canonical and matching alias outputs to match, canonical=%q matching=%q", canonicalStdout, matchingStdout)
-	}
-
-	var payload itunes.App
-	if err := json.Unmarshal([]byte(canonicalStdout), &payload); err != nil {
-		t.Fatalf("unmarshal view payload: %v", err)
-	}
-	if payload.Country != "US" {
-		t.Fatalf("Country = %q, want US", payload.Country)
-	}
-	if payload.CountryName != "United States" {
-		t.Fatalf("CountryName = %q, want United States", payload.CountryName)
+			assertUsageExit(t, []string{"apps", "public", name, "--id", "123", "--output", "json"}, "Error: `--id` was removed in 5.0.0; use `--app`")
+		})
 	}
 }
 

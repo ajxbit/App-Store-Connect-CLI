@@ -2,14 +2,19 @@ package release
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
+	"io"
+	"os"
 	"path/filepath"
 	"strings"
 
 	"github.com/peterbourgon/ff/v3/ffcli"
 
+	routingcoveragecli "github.com/rudrankriyam/App-Store-Connect-CLI/internal/cli/routingcoverage"
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/cli/shared"
+	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/validation"
 )
 
 // ReleaseStageCommand prepares an App Store version without submitting it for review.
@@ -18,11 +23,13 @@ func ReleaseStageCommand() *ffcli.Command {
 
 	appID := fs.String("app", "", "App Store Connect app ID (or ASC_APP_ID)")
 	version := fs.String("version", "", "App Store version string (required)")
-	buildID := fs.String("build", "", "Build ID to attach (required)")
+	buildID := shared.BindResourceIDFlag(fs, "build-id", "builds", "Build ID to attach (required)")
 	metadataDir := fs.String("metadata-dir", "", "Metadata directory to apply")
+	allowDeletes := fs.Bool("allow-deletes", false, "Allow destructive delete operations when applying --metadata-dir (disables default locale fallback for missing locales)")
+	routingCoverageFile := fs.String("routing-coverage-file", "", "Routing app coverage GeoJSON file to reconcile before readiness")
 	copyMetadataFrom := fs.String("copy-metadata-from", "", "Copy localization metadata from this source version string")
-	copyFields := fs.String("copy-fields", "", "Comma-separated metadata fields to copy: description, keywords, marketingUrl, promotionalText, supportUrl, whatsNew")
-	excludeFields := fs.String("exclude-fields", "", "Comma-separated metadata fields to exclude from copy")
+	copyFields := shared.BindOnceCSVFlag(fs, "copy-fields", "Comma-separated metadata fields to copy: description, keywords, marketingUrl, promotionalText, supportUrl, whatsNew")
+	excludeFields := shared.BindOnceCSVFlag(fs, "exclude-fields", "Comma-separated metadata fields to exclude from copy")
 	platform := fs.String("platform", "IOS", "Platform: IOS, MAC_OS, TV_OS, VISION_OS")
 	timeout := fs.Duration("timeout", releaseRunTimeout, "Maximum time to run the staging pipeline")
 	dryRun := fs.Bool("dry-run", false, "Preview deterministic plan without mutations")
@@ -33,21 +40,34 @@ func ReleaseStageCommand() *ffcli.Command {
 
 	return &ffcli.Command{
 		Name:       "stage",
-		ShortUsage: "asc release stage --app \"APP_ID\" --version \"2.4.0\" --build \"BUILD_ID\" (--metadata-dir \"./metadata/version/2.4.0\" | --copy-metadata-from \"2.3.2\") [flags]",
+		ShortUsage: "asc release stage --app \"APP_ID\" --version \"2.4.0\" --build-id \"BUILD_ID\" (--metadata-dir \"./metadata/version/2.4.0\" | --copy-metadata-from \"2.3.2\") [--routing-coverage-file \"./coverage.geojson\"] [flags]",
 		ShortHelp:  "Run version + metadata + attach + validate.",
 		LongHelp: `Run a deterministic pre-submit App Store staging pipeline:
-1. Ensure/create version
-2. Apply metadata/localizations or copy metadata from another version
-3. Attach selected build
-4. Run readiness checks
+1. Verify --build-id exists, belongs to --app, and matches --platform
+2. Ensure/create version
+3. Apply metadata/localizations or copy metadata from another version
+4. Reconcile routing app coverage when --routing-coverage-file is set
+5. Attach selected build
+6. Run readiness checks
 
 Stops before creating a review submission.
 Supports dry-run planning, step-level structured output, and checkpointed resume.
 
+--copy-metadata-from copies version localization text only (description,
+keywords, promotional text, what's new, marketing and support URLs) into
+locales that already exist on the target version. Neither metadata source sets
+the age rating, screenshots, review details, category, or pricing, so readiness
+still blocks until those are complete and the attached build is ready. When it
+does, the earlier steps stay applied, the blockers are printed to stderr, and
+the command exits 1; fix them and rerun the same command to resume from the
+checkpoint. List the remaining blockers with:
+  asc validate --app "APP_ID" --version "2.4.0"
+
 Examples:
-  asc release stage --app "APP_ID" --version "2.4.0" --build "BUILD_ID" --copy-metadata-from "2.3.2" --dry-run
-  asc release stage --app "APP_ID" --version "2.4.0" --build "BUILD_ID" --copy-metadata-from "2.3.2" --confirm
-  asc release stage --app "APP_ID" --version "2.4.0" --build "BUILD_ID" --metadata-dir "./metadata/version/2.4.0" --confirm`,
+  asc release stage --app "APP_ID" --version "2.4.0" --build-id "BUILD_ID" --copy-metadata-from "2.3.2" --dry-run
+  asc release stage --app "APP_ID" --version "2.4.0" --build-id "BUILD_ID" --copy-metadata-from "2.3.2" --confirm
+  asc release stage --app "APP_ID" --version "2.4.0" --build-id "BUILD_ID" --metadata-dir "./metadata/version/2.4.0" --confirm
+  asc release stage --app "APP_ID" --version "2.4.0" --build-id "BUILD_ID" --copy-metadata-from "2.3.2" --routing-coverage-file "./coverage.geojson" --confirm`,
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
@@ -69,7 +89,7 @@ Examples:
 			}
 			trimmedBuildID := strings.TrimSpace(*buildID)
 			if trimmedBuildID == "" {
-				return shared.UsageError("--build is required")
+				return shared.UsageError("--build-id is required")
 			}
 
 			normalizedPlatform, err := shared.NormalizeAppStoreVersionPlatform(*platform)
@@ -80,11 +100,11 @@ Examples:
 				return shared.UsageError("--timeout must be greater than 0")
 			}
 
-			copyFieldsValue, err := shared.NormalizeVersionMetadataCopyFields(*copyFields, "--copy-fields")
+			copyFieldsValue, err := shared.NormalizeVersionMetadataCopyFields(copyFields.String(), "--copy-fields")
 			if err != nil {
 				return shared.UsageError(err.Error())
 			}
-			excludeFieldsValue, err := shared.NormalizeVersionMetadataCopyFields(*excludeFields, "--exclude-fields")
+			excludeFieldsValue, err := shared.NormalizeVersionMetadataCopyFields(excludeFields.String(), "--exclude-fields")
 			if err != nil {
 				return shared.UsageError(err.Error())
 			}
@@ -97,6 +117,9 @@ Examples:
 			if (trimmedMetadataDir == "" && trimmedCopyMetadataFrom == "") || (trimmedMetadataDir != "" && trimmedCopyMetadataFrom != "") {
 				return shared.UsageError("exactly one of --metadata-dir or --copy-metadata-from is required")
 			}
+			if *allowDeletes && trimmedMetadataDir == "" {
+				return shared.UsageError("--allow-deletes requires --metadata-dir")
+			}
 
 			selectedCopyFields := []string(nil)
 			if trimmedCopyMetadataFrom != "" {
@@ -104,6 +127,17 @@ Examples:
 				if err != nil {
 					return shared.UsageError(err.Error())
 				}
+			}
+
+			trimmedRoutingCoverageFile := strings.TrimSpace(*routingCoverageFile)
+			var preparedRoutingCoverageFile *routingcoveragecli.PreparedRoutingCoverageFile
+			if trimmedRoutingCoverageFile != "" {
+				prepared, prepareErr := routingcoveragecli.PrepareRoutingCoverageFile(trimmedRoutingCoverageFile)
+				if prepareErr != nil {
+					return shared.UsageError(fmt.Sprintf("--routing-coverage-file is not usable: %v", prepareErr))
+				}
+				trimmedRoutingCoverageFile = prepared.Path
+				preparedRoutingCoverageFile = &prepared
 			}
 
 			checkpointPath := strings.TrimSpace(*checkpointFile)
@@ -116,26 +150,57 @@ Examples:
 			}
 
 			result, runErr := executeStage(ctx, runOptions{
-				AppID:              resolvedAppID,
-				Version:            trimmedVersion,
-				BuildID:            trimmedBuildID,
-				MetadataDir:        trimmedMetadataDir,
-				CopyMetadataFrom:   trimmedCopyMetadataFrom,
-				SelectedCopyFields: selectedCopyFields,
-				Platform:           normalizedPlatform,
-				Timeout:            *timeout,
-				DryRun:             *dryRun,
-				Confirm:            *confirm,
-				StrictValidate:     *strictValidate,
-				CheckpointFile:     absCheckpointPath,
+				AppID:                       resolvedAppID,
+				Version:                     trimmedVersion,
+				BuildID:                     trimmedBuildID,
+				MetadataDir:                 trimmedMetadataDir,
+				CopyMetadataFrom:            trimmedCopyMetadataFrom,
+				SelectedCopyFields:          selectedCopyFields,
+				RoutingCoverageFile:         trimmedRoutingCoverageFile,
+				PreparedRoutingCoverageFile: preparedRoutingCoverageFile,
+				Platform:                    normalizedPlatform,
+				Timeout:                     *timeout,
+				DryRun:                      *dryRun,
+				Confirm:                     *confirm,
+				AllowDeletes:                *allowDeletes,
+				StrictValidate:              *strictValidate,
+				CheckpointFile:              absCheckpointPath,
 			})
 			if printErr := shared.PrintOutput(result, *output.Output, *output.Pretty); printErr != nil {
 				return printErr
 			}
 			if runErr != nil {
+				if blocked, ok := errors.AsType[readinessBlockedError](runErr); ok {
+					printReadinessBlockers(os.Stderr, blocked.report, resolvedAppID, trimmedVersion, normalizedPlatform)
+				}
 				return shared.NewReportedError(runErr)
 			}
 			return nil
 		},
 	}
+}
+
+const maxListedReadinessBlockers = 5
+
+func printReadinessBlockers(w io.Writer, report validation.Report, appID, version, platform string) {
+	fmt.Fprintf(w, "Error: release stage: %s: %d blocking issue(s)\n", stepValidateReadiness, report.Summary.Blocking)
+	listed := 0
+	for _, step := range report.Remediation.Steps {
+		if !step.Blocking {
+			continue
+		}
+		if listed == maxListedReadinessBlockers {
+			break
+		}
+		fmt.Fprintf(w, "  - %s: %s\n", shared.SanitizeTerminal(step.Message), shared.SanitizeTerminal(step.Remediation))
+		listed++
+	}
+	if remaining := report.Summary.Blocking - listed; remaining > 0 && listed > 0 {
+		fmt.Fprintf(w, "  ... and %d more\n", remaining)
+	}
+	command := fmt.Sprintf("asc validate --app %q --version %q --platform %q", appID, version, platform)
+	if report.Strict {
+		command += " --strict"
+	}
+	fmt.Fprintf(w, "Run: %s\n", shared.SanitizeTerminal(command))
 }

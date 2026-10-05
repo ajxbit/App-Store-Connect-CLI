@@ -40,7 +40,7 @@ Examples:
 func AppClipDefaultExperienceReviewDetailRelationshipCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("app-store-review-detail", flag.ExitOnError)
 
-	experienceID := fs.String("experience-id", "", "Default experience ID")
+	experienceID := shared.BindResourceIDFlag(fs, "experience-id", "appClipDefaultExperiences", "Default experience ID")
 	output := shared.BindOutputFlags(fs)
 
 	return &ffcli.Command{
@@ -57,7 +57,7 @@ Examples:
 			experienceValue := strings.TrimSpace(*experienceID)
 			if experienceValue == "" {
 				fmt.Fprintln(os.Stderr, "Error: --experience-id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--experience-id")
 			}
 
 			client, err := shared.GetASCClient()
@@ -82,7 +82,7 @@ Examples:
 func AppClipDefaultExperienceReleaseWithAppStoreVersionRelationshipCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("release-with-app-store-version", flag.ExitOnError)
 
-	experienceID := fs.String("experience-id", "", "Default experience ID")
+	experienceID := shared.BindResourceIDFlag(fs, "experience-id", "appClipDefaultExperiences", "Default experience ID")
 	output := shared.BindOutputFlags(fs)
 
 	return &ffcli.Command{
@@ -99,7 +99,7 @@ Examples:
 			experienceValue := strings.TrimSpace(*experienceID)
 			if experienceValue == "" {
 				fmt.Fprintln(os.Stderr, "Error: --experience-id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--experience-id")
 			}
 
 			client, err := shared.GetASCClient()
@@ -116,38 +116,6 @@ Examples:
 			}
 
 			return shared.PrintOutput(resp, *output.Output, *output.Pretty)
-		},
-	}
-}
-
-func DeprecatedAppClipDefaultExperienceRelationshipsAliasCommand() *ffcli.Command {
-	fs := flag.NewFlagSet("relationships", flag.ExitOnError)
-
-	return &ffcli.Command{
-		Name:       "relationships",
-		ShortUsage: "asc app-clips default-experiences links <subcommand> [flags]",
-		ShortHelp:  "DEPRECATED: use `asc app-clips default-experiences links ...`.",
-		LongHelp:   "Deprecated compatibility alias for `asc app-clips default-experiences links ...`.",
-		FlagSet:    fs,
-		UsageFunc:  shared.DeprecatedUsageFunc,
-		Subcommands: []*ffcli.Command{
-			shared.DeprecatedAliasLeafCommand(
-				AppClipDefaultExperienceReviewDetailRelationshipCommand(),
-				"app-store-review-detail",
-				"asc app-clips default-experiences links app-store-review-detail --experience-id \"EXP_ID\"",
-				"asc app-clips default-experiences links app-store-review-detail",
-				"Warning: `asc app-clips default-experiences relationships app-store-review-detail` is deprecated. Use `asc app-clips default-experiences links app-store-review-detail`.",
-			),
-			shared.DeprecatedAliasLeafCommand(
-				AppClipDefaultExperienceReleaseWithAppStoreVersionRelationshipCommand(),
-				"release-with-app-store-version",
-				"asc app-clips default-experiences links release-with-app-store-version --experience-id \"EXP_ID\"",
-				"asc app-clips default-experiences links release-with-app-store-version",
-				"Warning: `asc app-clips default-experiences relationships release-with-app-store-version` is deprecated. Use `asc app-clips default-experiences links release-with-app-store-version`.",
-			),
-		},
-		Exec: func(ctx context.Context, args []string) error {
-			return flag.ErrHelp
 		},
 	}
 }

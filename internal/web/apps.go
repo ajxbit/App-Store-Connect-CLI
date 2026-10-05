@@ -60,6 +60,53 @@ type appCreateRequest struct {
 	Included []any `json:"included"`
 }
 
+type appDeleteRequest struct {
+	Data struct {
+		Type       string `json:"type"`
+		ID         string `json:"id"`
+		Attributes struct {
+			Removed bool `json:"removed"`
+		} `json:"attributes"`
+	} `json:"data"`
+}
+
+// RestoreApp marks an app as available again.
+func (c *Client) RestoreApp(ctx context.Context, appID string) (*AppResponse, error) {
+	appID = strings.TrimSpace(appID)
+	if appID == "" {
+		return nil, fmt.Errorf("app id is required")
+	}
+	req := map[string]any{"data": map[string]any{"type": "apps", "id": appID, "attributes": map[string]any{"removed": false}}}
+	body, err := c.doRequest(ctx, "PATCH", fmt.Sprintf("/apps/%s", url.PathEscape(appID)), req)
+	if err != nil {
+		return nil, err
+	}
+	var result AppResponse
+	if err := json.Unmarshal(body, &result); err != nil {
+		return nil, fmt.Errorf("failed to parse app response: %w", err)
+	}
+	return &result, nil
+}
+
+// SetUserAppPermission grants or revokes access for all siloable users.
+func (c *Client) SetUserAppPermission(ctx context.Context, appID, access string) error {
+	appID = strings.TrimSpace(appID)
+	if appID == "" {
+		return fmt.Errorf("app id is required")
+	}
+	operation := "REVOKE"
+	mode := strings.ToLower(strings.TrimSpace(access))
+	if mode != "limited" && mode != "full" {
+		return fmt.Errorf("access must be limited or full")
+	}
+	if mode == "full" {
+		operation = "GRANT"
+	}
+	req := map[string]any{"data": map[string]any{"type": "userAppPermissions", "attributes": map[string]any{"appAdamId": appID, "operationType": operation, "userOperationType": "ALL_SILOABLE_USERS"}}}
+	_, err := c.doRequest(ctx, "POST", "/userAppPermissions", req)
+	return err
+}
+
 func normalizeCreateAttrs(attrs AppCreateAttributes) (AppCreateAttributes, error) {
 	attrs.Name = strings.TrimSpace(attrs.Name)
 	attrs.SKU = strings.TrimSpace(attrs.SKU)
@@ -205,6 +252,150 @@ func (c *Client) CreateApp(ctx context.Context, attrs AppCreateAttributes) (*App
 		return nil, fmt.Errorf("failed to parse app response: %w", err)
 	}
 	return &result, nil
+}
+
+// GetApp retrieves an app by ID using the internal web API.
+func (c *Client) GetApp(ctx context.Context, appID string) (*AppResponse, error) {
+	appID = strings.TrimSpace(appID)
+	if appID == "" {
+		return nil, fmt.Errorf("app id is required")
+	}
+
+	respBody, err := c.doRequest(ctx, "GET", fmt.Sprintf("/apps/%s", url.PathEscape(appID)), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	var result AppResponse
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return nil, fmt.Errorf("failed to parse app response: %w", err)
+	}
+	return &result, nil
+}
+
+// DeleteApp marks an app as removed with the internal App Store Connect web API.
+func (c *Client) DeleteApp(ctx context.Context, appID string) (*AppResponse, error) {
+	appID = strings.TrimSpace(appID)
+	if appID == "" {
+		return nil, fmt.Errorf("app id is required")
+	}
+
+	req := &appDeleteRequest{}
+	req.Data.Type = "apps"
+	req.Data.ID = appID
+	req.Data.Attributes.Removed = true
+
+	respBody, err := c.doRequest(ctx, "PATCH", fmt.Sprintf("/apps/%s", url.PathEscape(appID)), req)
+	if err != nil {
+		return nil, err
+	}
+
+	var result AppResponse
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return nil, fmt.Errorf("failed to parse app response: %w", err)
+	}
+	return &result, nil
+}
+
+// AppRemovalState is the read model used to preflight and verify web app removal.
+// Field names match the captured removed-apps listing on GET /apps.
+type AppRemovalState struct {
+	ID                        string
+	Name                      string
+	BundleID                  string
+	Removed                   bool
+	RemovedKnown              bool
+	AppStoreLegacyStatus      string
+	Marketplace               string
+	VersionStates             []string
+	DisplayableVersionsLoaded bool
+}
+
+// GetAppRemovalState reads the app attributes needed to check removal
+// eligibility and to verify the post-PATCH removed state.
+func (c *Client) GetAppRemovalState(ctx context.Context, appID string) (*AppRemovalState, error) {
+	appID = strings.TrimSpace(appID)
+	if appID == "" {
+		return nil, fmt.Errorf("app id is required")
+	}
+
+	values := url.Values{}
+	values.Set("include", "displayableVersions")
+	values.Set("fields[apps]", "name,bundleId,removed,appStoreLegacyStatus,marketplace,displayableVersions")
+	values.Set("fields[appStoreVersions]", "platform,versionString,appStoreState,appVersionState")
+	values.Set("limit[displayableVersions]", fmt.Sprintf("%d", removedAppsDisplayableVersionMax))
+	path := queryPath("/apps/"+url.PathEscape(appID), values)
+
+	respBody, err := c.doRequest(ctx, "GET", path, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	var payload struct {
+		Data     jsonAPIResource   `json:"data"`
+		Included []jsonAPIResource `json:"included"`
+	}
+	if err := json.Unmarshal(respBody, &payload); err != nil {
+		return nil, fmt.Errorf("failed to parse app response: %w", err)
+	}
+	if strings.TrimSpace(payload.Data.ID) == "" {
+		return nil, fmt.Errorf("app %q was not found", appID)
+	}
+	if strings.TrimSpace(payload.Data.ID) != appID {
+		return nil, fmt.Errorf("app %q response returned id %q", appID, strings.TrimSpace(payload.Data.ID))
+	}
+
+	included := make(map[string]jsonAPIResource, len(payload.Included))
+	for _, resource := range payload.Included {
+		included[jsonAPIResourceKey(resource.Type, resource.ID)] = resource
+	}
+	decoded := decodeRemovedAppResource(payload.Data, included)
+	removed, removedKnown := boolAttrKnown(payload.Data.Attributes, "removed")
+
+	versionStates := make([]string, 0, len(decoded.DisplayableVersions)*2)
+	versionsHaveState := true
+	for _, version := range decoded.DisplayableVersions {
+		storeState := strings.TrimSpace(version.AppStoreState)
+		versionState := strings.TrimSpace(version.AppVersionState)
+		if storeState == "" && versionState == "" {
+			versionsHaveState = false
+		}
+		if storeState != "" {
+			versionStates = append(versionStates, storeState)
+		}
+		if versionState != "" {
+			versionStates = append(versionStates, versionState)
+		}
+	}
+
+	return &AppRemovalState{
+		ID:                        decoded.ID,
+		Name:                      decoded.Name,
+		BundleID:                  decoded.BundleID,
+		Removed:                   removed,
+		RemovedKnown:              removedKnown,
+		AppStoreLegacyStatus:      decoded.AppStoreLegacyStatus,
+		Marketplace:               decoded.Marketplace,
+		VersionStates:             versionStates,
+		DisplayableVersionsLoaded: displayableVersionsIncluded(payload.Data, included) && versionsHaveState,
+	}, nil
+}
+
+func displayableVersionsIncluded(resource jsonAPIResource, included map[string]jsonAPIResource) bool {
+	relationship, ok := resource.Relationships["displayableVersions"]
+	if !ok {
+		return false
+	}
+	trimmed := strings.TrimSpace(string(relationship.Data))
+	if trimmed == "" || trimmed == "null" {
+		return false
+	}
+	for _, ref := range parseRelationshipRefs(relationship.Data) {
+		if _, found := included[jsonAPIResourceKey(ref.Type, ref.ID)]; !found {
+			return false
+		}
+	}
+	return true
 }
 
 // FindApp finds an existing app by bundle ID.

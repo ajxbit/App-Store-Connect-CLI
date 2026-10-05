@@ -30,7 +30,7 @@ func TestConsumeResolvedSubscriptionPricePage_SelectsLatestActivePerTerritory(t 
 	}
 
 	candidates := make(map[string]resolvedSubscriptionPriceCandidate)
-	if err := consumeResolvedSubscriptionPricePage(candidates, page, now); err != nil {
+	if err := consumeResolvedSubscriptionPricePage(candidates, page, now, ""); err != nil {
 		t.Fatalf("consumeResolvedSubscriptionPricePage() error = %v", err)
 	}
 
@@ -64,7 +64,7 @@ func TestConsumeResolvedSubscriptionPricePage_PrefersNonPreservedSameDay(t *test
 	}
 
 	candidates := make(map[string]resolvedSubscriptionPriceCandidate)
-	if err := consumeResolvedSubscriptionPricePage(candidates, page, now); err != nil {
+	if err := consumeResolvedSubscriptionPricePage(candidates, page, now, ""); err != nil {
 		t.Fatalf("consumeResolvedSubscriptionPricePage() error = %v", err)
 	}
 
@@ -77,28 +77,172 @@ func TestConsumeResolvedSubscriptionPricePage_PrefersNonPreservedSameDay(t *test
 	}
 }
 
-func TestConsumeResolvedSubscriptionPricePage_DoesNotFallbackToFutureOrUndated(t *testing.T) {
+func TestConsumeResolvedSubscriptionPricePage_UsesUndatedCurrentPricesPerPlanType(t *testing.T) {
 	now := time.Date(2026, time.March, 29, 12, 0, 0, 0, time.UTC)
+
+	monthly := newResolvedSubscriptionPriceResource("price-monthly", "USA", "pp-monthly", "", false)
+	monthly.Attributes.PlanType = asc.SubscriptionPlanTypeMonthly
+	upfront := newResolvedSubscriptionPriceResource("price-upfront", "USA", "pp-upfront", "", false)
+	upfront.Attributes.PlanType = asc.SubscriptionPlanTypeUpfront
 
 	page := &asc.SubscriptionPricesResponse{
 		Data: []asc.Resource[asc.SubscriptionPriceAttributes]{
 			newResolvedSubscriptionPriceResource("price-future", "USA", "pp-future", "2030-01-01", false),
-			newResolvedSubscriptionPriceResource("price-undated", "USA", "pp-undated", "", false),
+			monthly,
+			upfront,
 		},
 		Included: mustMarshalJSON(t, []map[string]any{
 			subscriptionPricePointIncluded("pp-future", "12.99", "10.00", "11.00"),
-			subscriptionPricePointIncluded("pp-undated", "8.99", "6.20", "7.10"),
+			subscriptionPricePointIncluded("pp-monthly", "8.99", "6.20", "7.10"),
+			subscriptionPricePointIncluded("pp-upfront", "49.99", "34.90", "39.90"),
 			territoryIncluded("USA", "USD"),
 		}),
 	}
 
 	candidates := make(map[string]resolvedSubscriptionPriceCandidate)
-	if err := consumeResolvedSubscriptionPricePage(candidates, page, now); err != nil {
+	if err := consumeResolvedSubscriptionPricePage(candidates, page, now, ""); err != nil {
 		t.Fatalf("consumeResolvedSubscriptionPricePage() error = %v", err)
 	}
 
-	if len(candidates) != 0 {
-		t.Fatalf("expected no resolved rows, got %+v", candidates)
+	rows := resolvedSubscriptionRows(candidates)
+	shared.SortResolvedPrices(rows)
+
+	if len(rows) != 2 {
+		t.Fatalf("expected one row per plan type, got %+v", rows)
+	}
+	if rows[0].PlanType != "MONTHLY" || rows[0].PriceID != "price-monthly" || rows[0].CustomerPrice != "8.99" {
+		t.Fatalf("unexpected monthly row: %+v", rows[0])
+	}
+	if rows[1].PlanType != "UPFRONT" || rows[1].PriceID != "price-upfront" || rows[1].CustomerPrice != "49.99" {
+		t.Fatalf("unexpected upfront row: %+v", rows[1])
+	}
+}
+
+func TestConsumeResolvedSubscriptionPricePage_AcceptsUndatedMonthlyPrice(t *testing.T) {
+	now := time.Date(2026, time.June, 13, 12, 0, 0, 0, time.UTC)
+
+	page := &asc.SubscriptionPricesResponse{
+		Data: []asc.Resource[asc.SubscriptionPriceAttributes]{
+			newResolvedSubscriptionPriceResource("price-monthly", "NOR", "pp-monthly", "", false),
+		},
+		Included: mustMarshalJSON(t, []map[string]any{
+			subscriptionPricePointIncluded("pp-monthly", "5.0", "3.4", "3.4"),
+			territoryIncluded("NOR", "NOK"),
+		}),
+	}
+
+	candidates := make(map[string]resolvedSubscriptionPriceCandidate)
+	if err := consumeResolvedSubscriptionPricePage(candidates, page, now, asc.SubscriptionPlanTypeMonthly); err != nil {
+		t.Fatalf("consumeResolvedSubscriptionPricePage() error = %v", err)
+	}
+
+	rows := resolvedSubscriptionRows(candidates)
+	if len(rows) != 1 {
+		t.Fatal("expected undated MONTHLY price to resolve as the active price")
+	}
+	row := rows[0]
+	if row.CustomerPrice != "5.0" {
+		t.Fatalf("expected MONTHLY customer price 5.0, got %+v", row)
+	}
+	if row.PlanType != "MONTHLY" {
+		t.Fatalf("expected MONTHLY plan type, got %+v", row)
+	}
+}
+
+func TestConsumeResolvedSubscriptionPricePage_AcceptsUndatedUpfrontPrice(t *testing.T) {
+	now := time.Date(2026, time.June, 13, 12, 0, 0, 0, time.UTC)
+
+	page := &asc.SubscriptionPricesResponse{
+		Data: []asc.Resource[asc.SubscriptionPriceAttributes]{
+			newResolvedSubscriptionPriceResource("price-upfront", "NOR", "pp-upfront", "", false),
+		},
+		Included: mustMarshalJSON(t, []map[string]any{
+			subscriptionPricePointIncluded("pp-upfront", "49.0", "34.0", "34.0"),
+			territoryIncluded("NOR", "NOK"),
+		}),
+	}
+
+	candidates := make(map[string]resolvedSubscriptionPriceCandidate)
+	if err := consumeResolvedSubscriptionPricePage(candidates, page, now, asc.SubscriptionPlanTypeUpfront); err != nil {
+		t.Fatalf("consumeResolvedSubscriptionPricePage() error = %v", err)
+	}
+
+	rows := resolvedSubscriptionRows(candidates)
+	if len(rows) != 1 {
+		t.Fatal("expected undated UPFRONT price to resolve as the active price")
+	}
+	row := rows[0]
+	if row.CustomerPrice != "49.0" {
+		t.Fatalf("expected UPFRONT customer price 49.0, got %+v", row)
+	}
+	if row.PlanType != "UPFRONT" {
+		t.Fatalf("expected UPFRONT plan type, got %+v", row)
+	}
+}
+
+func TestConsumeResolvedSubscriptionPricePage_PrefersDatedCurrentOverUndatedFallback(t *testing.T) {
+	now := time.Date(2026, time.June, 13, 12, 0, 0, 0, time.UTC)
+
+	page := &asc.SubscriptionPricesResponse{
+		Data: []asc.Resource[asc.SubscriptionPriceAttributes]{
+			newResolvedSubscriptionPriceResource("price-initial", "NOR", "pp-initial", "", false),
+			newResolvedSubscriptionPriceResource("price-current", "NOR", "pp-current", "2026-01-01", false),
+		},
+		Included: mustMarshalJSON(t, []map[string]any{
+			subscriptionPricePointIncluded("pp-initial", "49.0", "34.0", "34.0"),
+			subscriptionPricePointIncluded("pp-current", "59.0", "41.0", "41.0"),
+			territoryIncluded("NOR", "NOK"),
+		}),
+	}
+
+	candidates := make(map[string]resolvedSubscriptionPriceCandidate)
+	if err := consumeResolvedSubscriptionPricePage(candidates, page, now, asc.SubscriptionPlanTypeUpfront); err != nil {
+		t.Fatalf("consumeResolvedSubscriptionPricePage() error = %v", err)
+	}
+
+	rows := resolvedSubscriptionRows(candidates)
+	if len(rows) != 1 {
+		t.Fatal("expected a resolved UPFRONT price")
+	}
+	row := rows[0]
+	if row.PriceID != "price-current" || row.CustomerPrice != "59.0" {
+		t.Fatalf("expected latest dated price to beat the undated initial fallback, got %+v", row)
+	}
+}
+
+func TestConsumeResolvedSubscriptionPricePage_EndsPriceOnSuccessorStartDate(t *testing.T) {
+	// Subscription prices carry only a startDate: each price ends on the date
+	// the next one starts, the end-equals-next-start shape App Store Connect
+	// uses for app and in-app purchase schedules.
+	page := &asc.SubscriptionPricesResponse{
+		Data: []asc.Resource[asc.SubscriptionPriceAttributes]{
+			newResolvedSubscriptionPriceResource("price-old", "USA", "pp-old", "2026-01-01", false),
+			newResolvedSubscriptionPriceResource("price-new", "USA", "pp-new", "2026-10-01", false),
+		},
+		Included: mustMarshalJSON(t, []map[string]any{
+			subscriptionPricePointIncluded("pp-old", "0.99", "0.84", "0.84"),
+			subscriptionPricePointIncluded("pp-new", "1.99", "1.69", "1.69"),
+			territoryIncluded("USA", "USD"),
+		}),
+	}
+
+	tests := []struct {
+		date time.Time
+		want string
+	}{
+		{date: time.Date(2026, time.September, 30, 0, 0, 0, 0, time.UTC), want: "0.99"},
+		{date: time.Date(2026, time.October, 1, 0, 0, 0, 0, time.UTC), want: "1.99"},
+	}
+	for _, test := range tests {
+		t.Run(test.date.Format("2006-01-02"), func(t *testing.T) {
+			candidates := make(map[string]resolvedSubscriptionPriceCandidate)
+			if err := consumeResolvedSubscriptionPricePage(candidates, page, test.date, ""); err != nil {
+				t.Fatalf("consumeResolvedSubscriptionPricePage() error = %v", err)
+			}
+			if got := candidates["USA"].row.CustomerPrice; got != test.want {
+				t.Fatalf("customerPrice = %q, want %q", got, test.want)
+			}
+		})
 	}
 }
 

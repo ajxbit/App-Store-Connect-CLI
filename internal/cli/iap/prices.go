@@ -73,7 +73,7 @@ func IAPPricesCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("summary", flag.ExitOnError)
 
 	appID := fs.String("app", "", iapLookupAppUsage)
-	iapID := fs.String("iap-id", "", "In-app purchase ID, product ID, or exact current name")
+	iapID := shared.BindResourceIDFlag(fs, "iap-id", "inAppPurchases", "In-app purchase ID, product ID, or exact current name")
 	territory := fs.String("territory", "", "Territory filter (accepts alpha-2, alpha-3, or exact English country name)")
 	output := shared.BindOutputFlags(fs)
 
@@ -95,7 +95,7 @@ Examples:
 			resolvedAppID := shared.ResolveAppID(requestedAppID)
 			if requestedIAPID == "" && resolvedAppID == "" {
 				fmt.Fprintln(os.Stderr, "Error: --app or --iap-id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("")
 			}
 
 			client, err := shared.GetASCClient()
@@ -152,7 +152,7 @@ Examples:
 				client,
 				iaps,
 				territoryFilter,
-				time.Now().UTC(),
+				shared.PricingNow(),
 			)
 			if err != nil {
 				return fmt.Errorf("iap prices: %w", err)
@@ -274,7 +274,7 @@ func resolveIAPPriceSummary(
 		entries = fallbackEntries
 	}
 
-	currentEntry, hasCurrent := findActivePriceEntry(entries, targetTerritory, now)
+	currentEntry, hasCurrent := findActivePriceEntry(entries, targetTerritory, shared.PricingDate(now))
 
 	currentPrice := (*iapMoney)(nil)
 	estimatedProceeds := (*iapMoney)(nil)
@@ -724,7 +724,7 @@ func scheduleEntriesRequireFullFetch(entries []iapPriceEntry) bool {
 }
 
 func buildScheduledChanges(entries []iapPriceEntry, now time.Time, territoryFilter string) []iapScheduledChange {
-	asOf := dateOnlyUTC(now)
+	asOf := shared.PricingDate(now)
 	filter := strings.ToUpper(strings.TrimSpace(territoryFilter))
 	futureEntries := make([]iapPriceEntry, 0, len(entries))
 	for _, entry := range entries {
@@ -781,13 +781,14 @@ func buildScheduledChanges(entries []iapPriceEntry, now time.Time, territoryFilt
 	return changes
 }
 
-func findActivePriceEntry(entries []iapPriceEntry, territoryID string, at time.Time) (iapPriceEntry, bool) {
+// findActivePriceEntry returns the territory's price that applies on date, a
+// pricing date from shared.PricingDate.
+func findActivePriceEntry(entries []iapPriceEntry, territoryID string, date time.Time) (iapPriceEntry, bool) {
 	territoryID = strings.ToUpper(strings.TrimSpace(territoryID))
 	if territoryID == "" {
 		return iapPriceEntry{}, false
 	}
 
-	at = dateOnlyUTC(at)
 	var best iapPriceEntry
 	found := false
 
@@ -795,7 +796,7 @@ func findActivePriceEntry(entries []iapPriceEntry, territoryID string, at time.T
 		if entry.TerritoryID != territoryID {
 			continue
 		}
-		if !entryActiveOn(entry, at) {
+		if !entryActiveOn(entry, date) {
 			continue
 		}
 		if !found || iapPriceEntryIsNewer(entry, best) {
@@ -807,14 +808,10 @@ func findActivePriceEntry(entries []iapPriceEntry, territoryID string, at time.T
 	return best, found
 }
 
-func entryActiveOn(entry iapPriceEntry, at time.Time) bool {
-	if entry.StartAt != nil && entry.StartAt.After(at) {
-		return false
-	}
-	if entry.EndAt != nil && entry.EndAt.Before(at) {
-		return false
-	}
-	return true
+// entryActiveOn reports whether entry applies on date, a pricing date from
+// shared.PricingDate.
+func entryActiveOn(entry iapPriceEntry, date time.Time) bool {
+	return shared.PriceActiveOn(entry.StartAt, entry.EndAt, date)
 }
 
 func iapPriceEntryIsNewer(candidate, existing iapPriceEntry) bool {

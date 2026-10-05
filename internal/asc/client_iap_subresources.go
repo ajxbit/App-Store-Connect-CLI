@@ -9,6 +9,8 @@ import (
 )
 
 // CreateInAppPurchaseLocalization creates a localization for an in-app purchase.
+//
+// Deprecated: Use CreateInAppPurchaseLocalizationV2 with an in-app purchase version ID.
 func (c *Client) CreateInAppPurchaseLocalization(ctx context.Context, iapID string, attrs InAppPurchaseLocalizationCreateAttributes) (*InAppPurchaseLocalizationResponse, error) {
 	iapID = strings.TrimSpace(iapID)
 	if iapID == "" {
@@ -61,232 +63,21 @@ func (c *Client) CreateInAppPurchaseLocalization(ctx context.Context, iapID stri
 	return &response, nil
 }
 
-// UpdateInAppPurchaseLocalization updates an IAP localization by ID.
-func (c *Client) UpdateInAppPurchaseLocalization(ctx context.Context, localizationID string, attrs InAppPurchaseLocalizationUpdateAttributes) (*InAppPurchaseLocalizationResponse, error) {
-	localizationID = strings.TrimSpace(localizationID)
-	if localizationID == "" {
-		return nil, fmt.Errorf("localizationID is required")
+// GetInAppPurchaseAppStoreReviewScreenshotForIAP retrieves the review screenshot for an IAP.
+func (c *Client) GetInAppPurchaseAppStoreReviewScreenshotForIAP(ctx context.Context, iapID string, opts ...IAPReviewScreenshotOption) (*InAppPurchaseAppStoreReviewScreenshotResponse, error) {
+	iapID = strings.TrimSpace(iapID)
+	if iapID == "" {
+		return nil, fmt.Errorf("iapID is required")
 	}
 
-	payload := InAppPurchaseLocalizationUpdateRequest{
-		Data: InAppPurchaseLocalizationUpdateData{
-			Type: ResourceTypeInAppPurchaseLocalizations,
-			ID:   localizationID,
-		},
-	}
-	if attrs.Name != nil || attrs.Description != nil {
-		payload.Data.Attributes = &attrs
-	}
-
-	body, err := BuildRequestBody(payload)
-	if err != nil {
-		return nil, err
-	}
-
-	path := fmt.Sprintf("/v1/inAppPurchaseLocalizations/%s", localizationID)
-	data, err := c.do(ctx, http.MethodPatch, path, body)
-	if err != nil {
-		return nil, err
-	}
-
-	var response InAppPurchaseLocalizationResponse
-	if err := json.Unmarshal(data, &response); err != nil {
-		return nil, fmt.Errorf("failed to parse response: %w", err)
-	}
-
-	return &response, nil
-}
-
-// DeleteInAppPurchaseLocalization deletes an IAP localization by ID.
-func (c *Client) DeleteInAppPurchaseLocalization(ctx context.Context, localizationID string) error {
-	localizationID = strings.TrimSpace(localizationID)
-	if localizationID == "" {
-		return fmt.Errorf("localizationID is required")
-	}
-	_, err := c.do(ctx, http.MethodDelete, fmt.Sprintf("/v1/inAppPurchaseLocalizations/%s", localizationID), nil)
-	return err
-}
-
-// GetInAppPurchaseLocalization retrieves an IAP localization by ID.
-func (c *Client) GetInAppPurchaseLocalization(ctx context.Context, localizationID string) (*InAppPurchaseLocalizationResponse, error) {
-	localizationID = strings.TrimSpace(localizationID)
-	if localizationID == "" {
-		return nil, fmt.Errorf("localizationID is required")
-	}
-
-	path := fmt.Sprintf("/v1/inAppPurchaseLocalizations/%s", localizationID)
-	data, err := c.do(ctx, http.MethodGet, path, nil)
-	if err != nil {
-		return nil, err
-	}
-
-	var response InAppPurchaseLocalizationResponse
-	if err := json.Unmarshal(data, &response); err != nil {
-		return nil, fmt.Errorf("failed to parse response: %w", err)
-	}
-
-	return &response, nil
-}
-
-// GetInAppPurchaseImages retrieves images for an in-app purchase.
-func (c *Client) GetInAppPurchaseImages(ctx context.Context, iapID string, opts ...IAPImagesOption) (*InAppPurchaseImagesResponse, error) {
-	query := &iapImagesQuery{}
+	query := &iapReviewScreenshotQuery{}
 	for _, opt := range opts {
 		opt(query)
 	}
-
-	iapID = strings.TrimSpace(iapID)
-	if query.nextURL == "" && iapID == "" {
-		return nil, fmt.Errorf("iapID is required")
-	}
-
-	path := fmt.Sprintf("/v2/inAppPurchases/%s/images", iapID)
-	if query.nextURL != "" {
-		if err := validateNextURL(query.nextURL); err != nil {
-			return nil, fmt.Errorf("in-app-purchase-images: %w", err)
-		}
-		path = query.nextURL
-	} else if queryString := buildIAPImagesQuery(query); queryString != "" {
+	path := fmt.Sprintf("/v2/inAppPurchases/%s/appStoreReviewScreenshot", iapID)
+	if queryString := buildIAPReviewScreenshotQuery(query); queryString != "" {
 		path += "?" + queryString
 	}
-
-	data, err := c.do(ctx, http.MethodGet, path, nil)
-	if err != nil {
-		return nil, err
-	}
-
-	var response InAppPurchaseImagesResponse
-	if err := json.Unmarshal(data, &response); err != nil {
-		return nil, fmt.Errorf("failed to parse response: %w", err)
-	}
-
-	return &response, nil
-}
-
-// GetInAppPurchaseImage retrieves an in-app purchase image by ID.
-func (c *Client) GetInAppPurchaseImage(ctx context.Context, imageID string) (*InAppPurchaseImageResponse, error) {
-	imageID = strings.TrimSpace(imageID)
-	if imageID == "" {
-		return nil, fmt.Errorf("imageID is required")
-	}
-
-	path := fmt.Sprintf("/v1/inAppPurchaseImages/%s", imageID)
-	data, err := c.do(ctx, http.MethodGet, path, nil)
-	if err != nil {
-		return nil, err
-	}
-
-	var response InAppPurchaseImageResponse
-	if err := json.Unmarshal(data, &response); err != nil {
-		return nil, fmt.Errorf("failed to parse response: %w", err)
-	}
-
-	return &response, nil
-}
-
-// CreateInAppPurchaseImage creates an image upload reservation.
-func (c *Client) CreateInAppPurchaseImage(ctx context.Context, iapID, fileName string, fileSize int64) (*InAppPurchaseImageResponse, error) {
-	iapID = strings.TrimSpace(iapID)
-	fileName = strings.TrimSpace(fileName)
-	if iapID == "" {
-		return nil, fmt.Errorf("iapID is required")
-	}
-	if fileName == "" {
-		return nil, fmt.Errorf("fileName is required")
-	}
-	if fileSize <= 0 {
-		return nil, fmt.Errorf("fileSize is required")
-	}
-
-	payload := InAppPurchaseImageCreateRequest{
-		Data: InAppPurchaseImageCreateData{
-			Type: ResourceTypeInAppPurchaseImages,
-			Attributes: InAppPurchaseImageCreateAttributes{
-				FileName: fileName,
-				FileSize: fileSize,
-			},
-			Relationships: InAppPurchaseImageRelationships{
-				InAppPurchase: Relationship{
-					Data: ResourceData{
-						Type: ResourceTypeInAppPurchases,
-						ID:   iapID,
-					},
-				},
-			},
-		},
-	}
-
-	body, err := BuildRequestBody(payload)
-	if err != nil {
-		return nil, err
-	}
-
-	data, err := c.do(ctx, http.MethodPost, "/v1/inAppPurchaseImages", body)
-	if err != nil {
-		return nil, err
-	}
-
-	var response InAppPurchaseImageResponse
-	if err := json.Unmarshal(data, &response); err != nil {
-		return nil, fmt.Errorf("failed to parse response: %w", err)
-	}
-
-	return &response, nil
-}
-
-// UpdateInAppPurchaseImage updates an in-app purchase image.
-func (c *Client) UpdateInAppPurchaseImage(ctx context.Context, imageID string, attrs InAppPurchaseImageUpdateAttributes) (*InAppPurchaseImageResponse, error) {
-	imageID = strings.TrimSpace(imageID)
-	if imageID == "" {
-		return nil, fmt.Errorf("imageID is required")
-	}
-
-	payload := InAppPurchaseImageUpdateRequest{
-		Data: InAppPurchaseImageUpdateData{
-			Type: ResourceTypeInAppPurchaseImages,
-			ID:   imageID,
-		},
-	}
-	if attrs.SourceFileChecksum != nil || attrs.Uploaded != nil {
-		payload.Data.Attributes = &attrs
-	}
-
-	body, err := BuildRequestBody(payload)
-	if err != nil {
-		return nil, err
-	}
-
-	data, err := c.do(ctx, http.MethodPatch, fmt.Sprintf("/v1/inAppPurchaseImages/%s", imageID), body)
-	if err != nil {
-		return nil, err
-	}
-
-	var response InAppPurchaseImageResponse
-	if err := json.Unmarshal(data, &response); err != nil {
-		return nil, fmt.Errorf("failed to parse response: %w", err)
-	}
-
-	return &response, nil
-}
-
-// DeleteInAppPurchaseImage deletes an in-app purchase image by ID.
-func (c *Client) DeleteInAppPurchaseImage(ctx context.Context, imageID string) error {
-	imageID = strings.TrimSpace(imageID)
-	if imageID == "" {
-		return fmt.Errorf("imageID is required")
-	}
-	_, err := c.do(ctx, http.MethodDelete, fmt.Sprintf("/v1/inAppPurchaseImages/%s", imageID), nil)
-	return err
-}
-
-// GetInAppPurchaseAppStoreReviewScreenshotForIAP retrieves the review screenshot for an IAP.
-func (c *Client) GetInAppPurchaseAppStoreReviewScreenshotForIAP(ctx context.Context, iapID string) (*InAppPurchaseAppStoreReviewScreenshotResponse, error) {
-	iapID = strings.TrimSpace(iapID)
-	if iapID == "" {
-		return nil, fmt.Errorf("iapID is required")
-	}
-
-	path := fmt.Sprintf("/v2/inAppPurchases/%s/appStoreReviewScreenshot", iapID)
 	data, err := c.do(ctx, http.MethodGet, path, nil)
 	if err != nil {
 		return nil, err
@@ -301,13 +92,20 @@ func (c *Client) GetInAppPurchaseAppStoreReviewScreenshotForIAP(ctx context.Cont
 }
 
 // GetInAppPurchaseAppStoreReviewScreenshot retrieves a review screenshot by ID.
-func (c *Client) GetInAppPurchaseAppStoreReviewScreenshot(ctx context.Context, screenshotID string) (*InAppPurchaseAppStoreReviewScreenshotResponse, error) {
+func (c *Client) GetInAppPurchaseAppStoreReviewScreenshot(ctx context.Context, screenshotID string, opts ...IAPReviewScreenshotOption) (*InAppPurchaseAppStoreReviewScreenshotResponse, error) {
 	screenshotID = strings.TrimSpace(screenshotID)
 	if screenshotID == "" {
 		return nil, fmt.Errorf("screenshotID is required")
 	}
 
+	query := &iapReviewScreenshotQuery{}
+	for _, opt := range opts {
+		opt(query)
+	}
 	path := fmt.Sprintf("/v1/inAppPurchaseAppStoreReviewScreenshots/%s", screenshotID)
+	if queryString := buildIAPReviewScreenshotQuery(query); queryString != "" {
+		path += "?" + queryString
+	}
 	data, err := c.do(ctx, http.MethodGet, path, nil)
 	if err != nil {
 		return nil, err
@@ -376,6 +174,16 @@ func (c *Client) UpdateInAppPurchaseAppStoreReviewScreenshot(ctx context.Context
 	screenshotID = strings.TrimSpace(screenshotID)
 	if screenshotID == "" {
 		return nil, fmt.Errorf("screenshotID is required")
+	}
+	if attrs.SourceFileChecksum == nil && attrs.Uploaded == nil {
+		return nil, fmt.Errorf("at least one attribute is required")
+	}
+	if attrs.SourceFileChecksum != nil {
+		checksum := strings.TrimSpace(*attrs.SourceFileChecksum)
+		if checksum == "" {
+			return nil, fmt.Errorf("sourceFileChecksum must not be empty")
+		}
+		attrs.SourceFileChecksum = &checksum
 	}
 
 	payload := InAppPurchaseAppStoreReviewScreenshotUpdateRequest{
@@ -550,13 +358,20 @@ func (c *Client) CreateInAppPurchaseAvailability(ctx context.Context, iapID stri
 }
 
 // GetInAppPurchaseContent retrieves the content resource for an IAP.
-func (c *Client) GetInAppPurchaseContent(ctx context.Context, iapID string) (*InAppPurchaseContentResponse, error) {
+func (c *Client) GetInAppPurchaseContent(ctx context.Context, iapID string, opts ...IAPContentOption) (*InAppPurchaseContentResponse, error) {
 	iapID = strings.TrimSpace(iapID)
 	if iapID == "" {
 		return nil, fmt.Errorf("iapID is required")
 	}
 
+	query := &iapContentQuery{}
+	for _, opt := range opts {
+		opt(query)
+	}
 	path := fmt.Sprintf("/v2/inAppPurchases/%s/content", iapID)
+	if queryString := buildIAPContentQuery(query); queryString != "" {
+		path += "?" + queryString
+	}
 	data, err := c.do(ctx, http.MethodGet, path, nil)
 	if err != nil {
 		return nil, err
@@ -571,13 +386,20 @@ func (c *Client) GetInAppPurchaseContent(ctx context.Context, iapID string) (*In
 }
 
 // GetInAppPurchaseContentByID retrieves an in-app purchase content resource by ID.
-func (c *Client) GetInAppPurchaseContentByID(ctx context.Context, contentID string) (*InAppPurchaseContentResponse, error) {
+func (c *Client) GetInAppPurchaseContentByID(ctx context.Context, contentID string, opts ...IAPContentOption) (*InAppPurchaseContentResponse, error) {
 	contentID = strings.TrimSpace(contentID)
 	if contentID == "" {
 		return nil, fmt.Errorf("contentID is required")
 	}
 
+	query := &iapContentQuery{}
+	for _, opt := range opts {
+		opt(query)
+	}
 	path := fmt.Sprintf("/v1/inAppPurchaseContents/%s", contentID)
+	if queryString := buildIAPContentQuery(query); queryString != "" {
+		path += "?" + queryString
+	}
 	data, err := c.do(ctx, http.MethodGet, path, nil)
 	if err != nil {
 		return nil, err
@@ -720,13 +542,20 @@ func (c *Client) GetInAppPurchasePriceScheduleByID(ctx context.Context, schedule
 }
 
 // GetInAppPurchasePromotedPurchase retrieves the promoted purchase for an in-app purchase.
-func (c *Client) GetInAppPurchasePromotedPurchase(ctx context.Context, iapID string) (*PromotedPurchaseResponse, error) {
+func (c *Client) GetInAppPurchasePromotedPurchase(ctx context.Context, iapID string, opts ...PromotedPurchaseGetOption) (*PromotedPurchaseResponse, error) {
 	iapID = strings.TrimSpace(iapID)
 	if iapID == "" {
 		return nil, fmt.Errorf("iapID is required")
 	}
 
+	query := &promotedPurchaseGetQuery{}
+	for _, opt := range opts {
+		opt(query)
+	}
 	path := fmt.Sprintf("/v2/inAppPurchases/%s/promotedPurchase", iapID)
+	if queryString := buildPromotedPurchaseGetQuery(query); queryString != "" {
+		path += "?" + queryString
+	}
 	data, err := c.do(ctx, http.MethodGet, path, nil)
 	if err != nil {
 		return nil, err
@@ -1299,23 +1128,26 @@ func (c *Client) CreateInAppPurchaseOfferCode(ctx context.Context, iapID string,
 			Type: ResourceTypeInAppPurchaseOfferPrices,
 			ID:   resourceID,
 		})
-		included = append(included, InAppPurchaseOfferPriceInlineCreateResource{
-			Type: ResourceTypeInAppPurchaseOfferPrices,
-			ID:   resourceID,
-			Relationships: InAppPurchaseOfferPriceInlineRelationships{
-				Territory: Relationship{
-					Data: ResourceData{
-						Type: ResourceTypeTerritories,
-						ID:   territoryID,
-					},
-				},
-				PricePoint: Relationship{
-					Data: ResourceData{
-						Type: ResourceTypeInAppPurchasePricePoints,
-						ID:   pricePointID,
-					},
+		relationships := InAppPurchaseOfferPriceInlineRelationships{
+			Territory: Relationship{
+				Data: ResourceData{
+					Type: ResourceTypeTerritories,
+					ID:   territoryID,
 				},
 			},
+		}
+		if !strings.EqualFold(pricePointID, "FREE") {
+			relationships.PricePoint = &Relationship{
+				Data: ResourceData{
+					Type: ResourceTypeInAppPurchasePricePoints,
+					ID:   pricePointID,
+				},
+			}
+		}
+		included = append(included, InAppPurchaseOfferPriceInlineCreateResource{
+			Type:          ResourceTypeInAppPurchaseOfferPrices,
+			ID:            resourceID,
+			Relationships: relationships,
 		})
 	}
 
@@ -1387,45 +1219,6 @@ func (c *Client) UpdateInAppPurchaseOfferCode(ctx context.Context, offerCodeID s
 	}
 
 	var response InAppPurchaseOfferCodeResponse
-	if err := json.Unmarshal(data, &response); err != nil {
-		return nil, fmt.Errorf("failed to parse response: %w", err)
-	}
-
-	return &response, nil
-}
-
-// CreateInAppPurchaseSubmission submits an IAP for review.
-func (c *Client) CreateInAppPurchaseSubmission(ctx context.Context, iapID string) (*InAppPurchaseSubmissionResponse, error) {
-	iapID = strings.TrimSpace(iapID)
-	if iapID == "" {
-		return nil, fmt.Errorf("iapID is required")
-	}
-
-	payload := InAppPurchaseSubmissionCreateRequest{
-		Data: InAppPurchaseSubmissionCreateData{
-			Type: ResourceTypeInAppPurchaseSubmissions,
-			Relationships: InAppPurchaseSubmissionRelationships{
-				InAppPurchaseV2: Relationship{
-					Data: ResourceData{
-						Type: ResourceTypeInAppPurchases,
-						ID:   iapID,
-					},
-				},
-			},
-		},
-	}
-
-	body, err := BuildRequestBody(payload)
-	if err != nil {
-		return nil, err
-	}
-
-	data, err := c.do(ctx, http.MethodPost, "/v1/inAppPurchaseSubmissions", body)
-	if err != nil {
-		return nil, err
-	}
-
-	var response InAppPurchaseSubmissionResponse
 	if err := json.Unmarshal(data, &response); err != nil {
 		return nil, fmt.Errorf("failed to parse response: %w", err)
 	}
@@ -1798,41 +1591,6 @@ func (c *Client) GetInAppPurchaseIapPriceScheduleRelationship(ctx context.Contex
 	return &response, nil
 }
 
-// GetInAppPurchaseImagesRelationships retrieves image linkages for an IAP.
-func (c *Client) GetInAppPurchaseImagesRelationships(ctx context.Context, iapID string, opts ...LinkagesOption) (*LinkagesResponse, error) {
-	query := &linkagesQuery{}
-	for _, opt := range opts {
-		opt(query)
-	}
-
-	iapID = strings.TrimSpace(iapID)
-	if query.nextURL == "" && iapID == "" {
-		return nil, fmt.Errorf("iapID is required")
-	}
-
-	path := fmt.Sprintf("/v2/inAppPurchases/%s/relationships/images", iapID)
-	if query.nextURL != "" {
-		if err := validateNextURL(query.nextURL); err != nil {
-			return nil, fmt.Errorf("inAppPurchaseImagesRelationships: %w", err)
-		}
-		path = query.nextURL
-	} else if queryString := buildLinkagesQuery(query); queryString != "" {
-		path += "?" + queryString
-	}
-
-	data, err := c.do(ctx, http.MethodGet, path, nil)
-	if err != nil {
-		return nil, err
-	}
-
-	var response LinkagesResponse
-	if err := json.Unmarshal(data, &response); err != nil {
-		return nil, fmt.Errorf("failed to parse response: %w", err)
-	}
-
-	return &response, nil
-}
-
 // GetInAppPurchaseInAppPurchaseAvailabilityRelationship retrieves the availability linkage for an IAP.
 func (c *Client) GetInAppPurchaseInAppPurchaseAvailabilityRelationship(ctx context.Context, iapID string) (*InAppPurchaseInAppPurchaseAvailabilityLinkageResponse, error) {
 	iapID = strings.TrimSpace(iapID)
@@ -1847,41 +1605,6 @@ func (c *Client) GetInAppPurchaseInAppPurchaseAvailabilityRelationship(ctx conte
 	}
 
 	var response InAppPurchaseInAppPurchaseAvailabilityLinkageResponse
-	if err := json.Unmarshal(data, &response); err != nil {
-		return nil, fmt.Errorf("failed to parse response: %w", err)
-	}
-
-	return &response, nil
-}
-
-// GetInAppPurchaseInAppPurchaseLocalizationsRelationships retrieves localization linkages for an IAP.
-func (c *Client) GetInAppPurchaseInAppPurchaseLocalizationsRelationships(ctx context.Context, iapID string, opts ...LinkagesOption) (*LinkagesResponse, error) {
-	query := &linkagesQuery{}
-	for _, opt := range opts {
-		opt(query)
-	}
-
-	iapID = strings.TrimSpace(iapID)
-	if query.nextURL == "" && iapID == "" {
-		return nil, fmt.Errorf("iapID is required")
-	}
-
-	path := fmt.Sprintf("/v2/inAppPurchases/%s/relationships/inAppPurchaseLocalizations", iapID)
-	if query.nextURL != "" {
-		if err := validateNextURL(query.nextURL); err != nil {
-			return nil, fmt.Errorf("inAppPurchaseLocalizationsRelationships: %w", err)
-		}
-		path = query.nextURL
-	} else if queryString := buildLinkagesQuery(query); queryString != "" {
-		path += "?" + queryString
-	}
-
-	data, err := c.do(ctx, http.MethodGet, path, nil)
-	if err != nil {
-		return nil, err
-	}
-
-	var response LinkagesResponse
 	if err := json.Unmarshal(data, &response); err != nil {
 		return nil, fmt.Errorf("failed to parse response: %w", err)
 	}

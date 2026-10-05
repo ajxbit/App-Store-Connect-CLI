@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/peterbourgon/ff/v3/ffcli"
+	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/asc"
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/cli/shared"
 )
 
@@ -22,7 +23,7 @@ func IAPContentCommand() *ffcli.Command {
 		LongHelp: `Fetch in-app purchase content metadata.
 
 Examples:
-  asc iap content get --iap-id "IAP_ID"`,
+  asc iap content view --iap-id "IAP_ID"`,
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
 		Subcommands: []*ffcli.Command{
@@ -36,21 +37,22 @@ Examples:
 
 // IAPContentGetCommand returns the content get subcommand.
 func IAPContentGetCommand() *ffcli.Command {
-	fs := flag.NewFlagSet("content get", flag.ExitOnError)
+	fs := flag.NewFlagSet("content view", flag.ExitOnError)
 
 	appID := addIAPLookupAppFlag(fs)
-	iapID := fs.String("iap-id", "", "In-app purchase ID, product ID, or exact current name")
-	contentID := fs.String("content-id", "", "In-app purchase content ID")
+	iapID := shared.BindResourceIDFlag(fs, "iap-id", "inAppPurchases", "In-app purchase ID, product ID, or exact current name")
+	contentID := shared.BindResourceIDFlag(fs, "content-id", "inAppPurchaseContents", "In-app purchase content ID")
+	iapFields := fs.String("iap-fields", "", "fields[inAppPurchases] for the included in-app purchase (comma-separated)")
 	output := shared.BindOutputFlags(fs)
 
 	return &ffcli.Command{
-		Name:       "get",
-		ShortUsage: "asc iap content get --iap-id \"IAP_ID\"",
-		ShortHelp:  "Get in-app purchase content metadata.",
-		LongHelp: `Get in-app purchase content metadata.
+		Name:       "view",
+		ShortUsage: "asc iap content view --iap-id \"IAP_ID\"",
+		ShortHelp:  "View in-app purchase content metadata.",
+		LongHelp: `View in-app purchase content metadata.
 
 Examples:
-  asc iap content get --iap-id "IAP_ID"`,
+  asc iap content view --iap-id "IAP_ID"`,
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
@@ -58,25 +60,29 @@ Examples:
 			contentValue := strings.TrimSpace(*contentID)
 			if iapValue == "" && contentValue == "" {
 				fmt.Fprintln(os.Stderr, "Error: --iap-id or --content-id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("")
 			}
 			if iapValue != "" && contentValue != "" {
 				fmt.Fprintln(os.Stderr, "Error: --iap-id and --content-id are mutually exclusive")
 				return flag.ErrHelp
 			}
+			fieldValues, err := shared.NormalizeSelection(*iapFields, iapVersionIAPFields, "--iap-fields")
+			if err != nil {
+				return shared.UsageError("iap content view: " + err.Error())
+			}
 
 			client, err := shared.GetASCClient()
 			if err != nil {
-				return fmt.Errorf("iap content get: %w", err)
+				return fmt.Errorf("iap content view: %w", err)
 			}
 
 			if contentValue != "" {
 				requestCtx, cancel := shared.ContextWithTimeout(ctx)
 				defer cancel()
 
-				resp, err := client.GetInAppPurchaseContentByID(requestCtx, contentValue)
+				resp, err := client.GetInAppPurchaseContentByID(requestCtx, contentValue, asc.WithIAPContentIAPFields(fieldValues))
 				if err != nil {
-					return fmt.Errorf("iap content get: failed to fetch: %w", err)
+					return fmt.Errorf("iap content view: failed to fetch: %w", err)
 				}
 
 				return shared.PrintOutput(resp, *output.Output, *output.Pretty)
@@ -90,9 +96,9 @@ Examples:
 			requestCtx, cancel := shared.ContextWithTimeout(ctx)
 			defer cancel()
 
-			resp, err := client.GetInAppPurchaseContent(requestCtx, iapValue)
+			resp, err := client.GetInAppPurchaseContent(requestCtx, iapValue, asc.WithIAPContentIAPFields(fieldValues))
 			if err != nil {
-				return fmt.Errorf("iap content get: failed to fetch: %w", err)
+				return fmt.Errorf("iap content view: failed to fetch: %w", err)
 			}
 
 			return shared.PrintOutput(resp, *output.Output, *output.Pretty)

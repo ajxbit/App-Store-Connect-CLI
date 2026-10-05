@@ -48,9 +48,11 @@ type statusApp struct {
 }
 
 type statusSummary struct {
-	Health     string   `json:"health"`
-	NextAction string   `json:"nextAction"`
-	Blockers   []string `json:"blockers"`
+	Health       string                  `json:"health"`
+	NextAction   string                  `json:"nextAction"`
+	NextCommands []asc.StatusNextCommand `json:"nextCommands"`
+	Blockers     []string                `json:"blockers"`
+	Platform     string                  `json:"platform,omitempty"`
 }
 
 type buildsSection struct {
@@ -62,15 +64,47 @@ type latestBuild struct {
 	Version         string `json:"version,omitempty"`
 	BuildNumber     string `json:"buildNumber"`
 	ProcessingState string `json:"processingState,omitempty"`
-	UploadedDate    string `json:"uploadedDate,omitempty"`
-	Platform        string `json:"platform,omitempty"`
+	// Expired reports Apple's build expiry flag, which stays independent of
+	// processingState: an expired build is still VALID but no longer installable.
+	Expired      *bool  `json:"expired,omitempty"`
+	UploadedDate string `json:"uploadedDate,omitempty"`
+	Platform     string `json:"platform,omitempty"`
 }
 
 type testFlightSection struct {
 	LatestDistributedBuildID string `json:"latestDistributedBuildId,omitempty"`
 	BetaReviewState          string `json:"betaReviewState,omitempty"`
-	ExternalBuildState       string `json:"externalBuildState,omitempty"`
-	SubmittedDate            string `json:"submittedDate,omitempty"`
+	// InternalBuildState is the TestFlight internal state of the latest uploaded
+	// build, which is the build reported in builds.latest. ExternalBuildState
+	// describes LatestDistributedBuildID instead, so the two can disagree while a
+	// newer build is still processing for internal testers.
+	InternalBuildState   string                      `json:"internalBuildState,omitempty"`
+	ExternalBuildState   string                      `json:"externalBuildState,omitempty"`
+	SubmittedDate        string                      `json:"submittedDate,omitempty"`
+	BetaReviewSubmission *betaReviewSubmissionStatus `json:"betaReviewSubmission,omitempty"`
+	latestBuild          *betaReviewBuildStatus
+}
+
+// betaBuildStates pairs the TestFlight-side states App Store Connect reports for
+// a single build.
+type betaBuildStates struct {
+	internal string
+	external string
+}
+
+type betaReviewSubmissionStatus struct {
+	ID                    string                 `json:"id"`
+	State                 string                 `json:"state,omitempty"`
+	SubmittedDate         string                 `json:"submittedDate,omitempty"`
+	RelationToLatestBuild string                 `json:"relationToLatestBuild"`
+	Build                 *betaReviewBuildStatus `json:"build,omitempty"`
+}
+
+type betaReviewBuildStatus struct {
+	ID          string `json:"id"`
+	Version     string `json:"version,omitempty"`
+	BuildNumber string `json:"buildNumber,omitempty"`
+	Platform    string `json:"platform,omitempty"`
 }
 
 type appStoreSection struct {
@@ -128,15 +162,20 @@ var allowedIncludes = []string{
 	"links",
 }
 
+const maxBetaReviewBuildPrefetches = 5
+
 // StatusCommand returns the root status dashboard command.
 func StatusCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("status", flag.ExitOnError)
 
 	appID := fs.String("app", "", "App Store Connect app ID, bundle ID, or exact app name (required, or ASC_APP_ID env)")
+	platform := fs.String("platform", "", "Filter release status by platform: IOS, MAC_OS, TV_OS, VISION_OS")
 	include := fs.String("include", "", "Comma-separated sections: app,builds,testflight,appstore,submission,review,phased-release,links")
 	watch := fs.Bool("watch", false, "Poll and emit snapshots when status changes")
 	pollInterval := fs.Duration("poll-interval", 30*time.Second, "Polling interval for --watch")
 	maxPolls := fs.Int("max-polls", 0, "Maximum polls for --watch (0 = unlimited)")
+	until := fs.String("until", "", "Wait until a condition is reached, then exit (implies --watch): "+strings.Join(untilConditions, ", "))
+	timeout := fs.Duration("timeout", 0, "Maximum time to wait for --until (0 = no limit)")
 	output := shared.BindOutputFlags(fs)
 
 	return &ffcli.Command{
@@ -152,9 +191,31 @@ Examples:
   asc status --app "123456789"
   asc status --app "com.example.app"
   asc status --app "My App"
+  asc status --app "123456789" --platform MAC_OS
   asc status --app "123456789" --include builds,testflight,submission
   asc status --app "123456789" --watch --poll-interval 15s
-  asc status --app "123456789" --output table`,
+  asc status --app "123456789" --until review-done --timeout 2h
+  asc status --app "123456789" --output table
+
+--until polls like --watch, then prints a final result after the snapshots
+({"until","reached","outcome","state","polls"}) and exits:
+  review-done       latest App Store version is approved (ACCEPTED, PENDING_*_RELEASE,
+                    PROCESSING_FOR_DISTRIBUTION, READY_FOR_DISTRIBUTION) -> exit 0,
+                    or REJECTED, METADATA_REJECTED, INVALID_BINARY, DEVELOPER_REJECTED -> exit 1
+  ready-for-sale    latest App Store version is READY_FOR_DISTRIBUTION -> exit 0,
+                    or rejected as above -> exit 1
+  processed         latest build processingState is VALID -> exit 0, FAILED or INVALID -> exit 1
+  testflight-ready  latest build internal TestFlight state is READY_FOR_BETA_TESTING or
+                    IN_BETA_TESTING -> exit 0, PROCESSING_EXCEPTION,
+                    MISSING_EXPORT_COMPLIANCE, or EXPIRED -> exit 1
+  change            first snapshot that differs from the first one -> exit 0
+Conditions are checked on every snapshot, including the first. When --max-polls,
+--timeout, or an interrupt ends the wait first, the result reports "pending"
+and the command exits 7.
+
+summary.nextCommands lists runnable asc commands for common states, with a
+reason and whether each command mutates App Store Connect. Read-only mode
+omits mutating commands.`,
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
@@ -166,7 +227,7 @@ Examples:
 			resolvedAppID := shared.ResolveAppID(*appID)
 			if resolvedAppID == "" {
 				fmt.Fprintln(os.Stderr, "Error: --app is required (or set ASC_APP_ID)")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--app")
 			}
 
 			includes, err := parseInclude(*include)
@@ -179,8 +240,27 @@ Examples:
 			if *maxPolls < 0 {
 				return shared.UsageError("--max-polls must be greater than or equal to 0")
 			}
-			if *maxPolls > 0 && !*watch {
+			if *until != "" {
+				if err := validateUntil(*until, includes); err != nil {
+					return shared.UsageError(err.Error())
+				}
+			}
+			if *timeout < 0 {
+				return shared.UsageError("--timeout must be greater than or equal to 0")
+			}
+			if *timeout > 0 && *until == "" {
+				return shared.UsageError("--timeout requires --until")
+			}
+			watching := *watch || *until != ""
+			if *maxPolls > 0 && !watching {
 				return shared.UsageError("--max-polls requires --watch")
+			}
+			normalizedPlatform := ""
+			if strings.TrimSpace(*platform) != "" {
+				normalizedPlatform, err = shared.NormalizeAppStoreVersionPlatform(*platform)
+				if err != nil {
+					return shared.UsageError(err.Error())
+				}
 			}
 
 			client, err := shared.GetASCClient()
@@ -195,14 +275,19 @@ Examples:
 				return fmt.Errorf("status: %w", err)
 			}
 
-			if *watch {
-				return watchDashboard(ctx, client, resolvedAppID, includes, *output.Output, *output.Pretty, *pollInterval, *maxPolls)
+			if watching {
+				if *timeout > 0 {
+					var cancelWait context.CancelFunc
+					ctx, cancelWait = context.WithTimeout(ctx, *timeout)
+					defer cancelWait()
+				}
+				return watchDashboard(ctx, client, resolvedAppID, normalizedPlatform, includes, *output.Output, *output.Pretty, *pollInterval, *maxPolls, *until)
 			}
 
 			requestCtx, cancel := shared.ContextWithTimeout(ctx)
 			defer cancel()
 
-			resp, err := collectDashboard(requestCtx, client, resolvedAppID, includes, false)
+			resp, err := collectDashboard(requestCtx, client, resolvedAppID, normalizedPlatform, includes, false)
 			if err != nil {
 				return fmt.Errorf("status: %w", err)
 			}
@@ -218,43 +303,57 @@ Examples:
 	}
 }
 
-func watchDashboard(ctx context.Context, client *asc.Client, appID string, includes includeSet, output string, pretty bool, pollInterval time.Duration, maxPolls int) error {
+func watchDashboard(ctx context.Context, client *asc.Client, appID string, platform string, includes includeSet, output string, pretty bool, pollInterval time.Duration, maxPolls int, until string) error {
 	seen := ""
+	polls := 0
+	var check untilCheck
+	finish := func() error {
+		if until == "" {
+			return nil
+		}
+		return finishUntil(until, check, polls, output, pretty)
+	}
 
 	for poll := 1; maxPolls == 0 || poll <= maxPolls; poll++ {
 		requestCtx, cancel := shared.ContextWithTimeout(ctx)
-		resp, err := collectDashboard(requestCtx, client, appID, includes, true)
+		resp, err := collectDashboard(requestCtx, client, appID, platform, includes, true)
 		cancel()
 		if err != nil {
 			if watchContextDone(ctx) {
-				return nil
+				return finish()
 			}
 			return fmt.Errorf("status: %w", err)
 		}
+		polls = poll
 
 		current, err := buildDashboardSnapshotSignature(resp)
 		if err != nil {
 			return fmt.Errorf("status: encode watch snapshot: %w", err)
 		}
-		if poll == 1 || current != seen {
+		changed := poll > 1 && current != seen
+		if poll == 1 || changed {
 			if err := printWatchSnapshot(resp, output, pretty, poll > 1); err != nil {
 				return err
 			}
 			seen = current
 		}
 
+		if check = evaluateUntil(until, resp, changed); check.outcome != "" {
+			return finish()
+		}
+
 		if maxPolls > 0 && poll >= maxPolls {
-			return nil
+			return finish()
 		}
 		if err := waitForNextPoll(ctx, pollInterval); err != nil {
 			if watchContextDone(ctx) {
-				return nil
+				return finish()
 			}
 			return err
 		}
 	}
 
-	return nil
+	return finish()
 }
 
 func watchContextDone(ctx context.Context) bool {
@@ -393,7 +492,7 @@ func parseInclude(value string) (includeSet, error) {
 	return includes, nil
 }
 
-func collectDashboard(ctx context.Context, client *asc.Client, appID string, includes includeSet, watchMode bool) (*dashboardResponse, error) {
+func collectDashboard(ctx context.Context, client *asc.Client, appID string, platform string, includes includeSet, watchMode bool) (*dashboardResponse, error) {
 	resp := &dashboardResponse{}
 	if includes.app {
 		appResp, err := client.GetApp(ctx, appID)
@@ -421,7 +520,7 @@ func collectDashboard(ctx context.Context, client *asc.Client, appID string, inc
 		tasks = append(tasks, sectionTask{
 			name: "builds/testflight",
 			run: func() error {
-				return fillBuildsAndTestFlight(ctx, client, appID, includes, resp)
+				return fillBuildsAndTestFlight(ctx, client, appID, platform, includes, resp)
 			},
 		})
 	}
@@ -429,7 +528,7 @@ func collectDashboard(ctx context.Context, client *asc.Client, appID string, inc
 		tasks = append(tasks, sectionTask{
 			name: "appstore/phased-release",
 			run: func() error {
-				return fillAppStoreAndPhasedRelease(ctx, client, appID, includes, resp)
+				return fillAppStoreAndPhasedRelease(ctx, client, appID, platform, includes, resp)
 			},
 		})
 	}
@@ -437,7 +536,7 @@ func collectDashboard(ctx context.Context, client *asc.Client, appID string, inc
 		tasks = append(tasks, sectionTask{
 			name: "submission/review",
 			run: func() error {
-				return fillSubmissionAndReview(ctx, client, appID, includes, resp, watchMode)
+				return fillSubmissionAndReview(ctx, client, appID, platform, includes, resp, watchMode)
 			},
 		})
 	}
@@ -446,6 +545,8 @@ func collectDashboard(ctx context.Context, client *asc.Client, appID string, inc
 		return nil, err
 	}
 	resp.Summary = buildStatusSummary(resp)
+	resp.Summary.NextCommands = resolveNextCommands(resp, appID, platform)
+	resp.Summary.Platform = platform
 
 	return resp, nil
 }
@@ -486,8 +587,20 @@ func runTasks(tasks []sectionTask, limit int) error {
 	return nil
 }
 
-func fillBuildsAndTestFlight(ctx context.Context, client *asc.Client, appID string, includes includeSet, resp *dashboardResponse) error {
-	buildsResp, err := client.GetBuilds(ctx, appID, asc.WithBuildsSort("-uploadedDate"), asc.WithBuildsLimit(50))
+func fillBuildsAndTestFlight(ctx context.Context, client *asc.Client, appID string, platform string, includes includeSet, resp *dashboardResponse) error {
+	buildIncludes := []string{"preReleaseVersion"}
+	if includes.testflight {
+		buildIncludes = append(buildIncludes, "buildBetaDetail")
+	}
+	buildOpts := []asc.BuildsOption{
+		asc.WithBuildsSort("-uploadedDate"),
+		asc.WithBuildsLimit(50),
+		asc.WithBuildsInclude(buildIncludes),
+	}
+	if platform != "" {
+		buildOpts = append(buildOpts, asc.WithBuildsPreReleaseVersionPlatforms([]string{platform}))
+	}
+	buildsResp, err := client.GetBuilds(ctx, appID, buildOpts...)
 	if err != nil {
 		return err
 	}
@@ -496,25 +609,41 @@ func fillBuildsAndTestFlight(ctx context.Context, client *asc.Client, appID stri
 	if len(buildsResp.Data) > 0 {
 		latest = &buildsResp.Data[0]
 	}
-
-	if includes.builds {
-		section := &buildsSection{}
-		if latest != nil {
-			entry := &latestBuild{
-				ID:              latest.ID,
-				BuildNumber:     latest.Attributes.Version,
-				ProcessingState: latest.Attributes.ProcessingState,
-				UploadedDate:    latest.Attributes.UploadedDate,
+	buildsByID := buildReviewContexts(buildsResp)
+	var latestContext *betaReviewBuildStatus
+	if latest != nil {
+		latestContext = buildsByID[latest.ID]
+		if latestContext == nil {
+			latestContext = &betaReviewBuildStatus{
+				ID:          latest.ID,
+				BuildNumber: latest.Attributes.Version,
 			}
-
+			buildsByID[latest.ID] = latestContext
+		}
+		if latestContext.Version == "" || latestContext.Platform == "" {
 			preRelease, preErr := client.GetBuildPreReleaseVersion(ctx, latest.ID)
 			if preErr != nil {
 				if !asc.IsNotFound(preErr) {
 					return preErr
 				}
 			} else {
-				entry.Version = preRelease.Data.Attributes.Version
-				entry.Platform = string(preRelease.Data.Attributes.Platform)
+				latestContext.Version = preRelease.Data.Attributes.Version
+				latestContext.Platform = string(preRelease.Data.Attributes.Platform)
+			}
+		}
+	}
+
+	if includes.builds {
+		section := &buildsSection{}
+		if latest != nil {
+			entry := &latestBuild{
+				ID:              latest.ID,
+				Version:         latestContext.Version,
+				BuildNumber:     latest.Attributes.Version,
+				ProcessingState: latest.Attributes.ProcessingState,
+				Expired:         optionalBuildExpired(latest.Attributes),
+				UploadedDate:    latest.Attributes.UploadedDate,
+				Platform:        latestContext.Platform,
 			}
 			section.Latest = entry
 		}
@@ -525,28 +654,22 @@ func fillBuildsAndTestFlight(ctx context.Context, client *asc.Client, appID stri
 		return nil
 	}
 
-	section := &testFlightSection{}
+	section := &testFlightSection{latestBuild: latestContext}
 	if len(buildsResp.Data) == 0 {
 		resp.TestFlight = section
 		return nil
 	}
 
-	buildIDs := make([]string, 0, len(buildsResp.Data))
-	for _, build := range buildsResp.Data {
-		buildIDs = append(buildIDs, build.ID)
+	betaStatesByBuild := buildBetaStatesByBuildID(buildsResp)
+
+	// The latest build carries the internal state operators need: it can still be
+	// PROCESSING for internal testers while processingState already reads VALID.
+	if latest != nil {
+		section.InternalBuildState = strings.ToUpper(strings.TrimSpace(betaStatesByBuild[latest.ID].internal))
 	}
 
-	betaDetails, err := client.GetBuildBetaDetails(ctx,
-		asc.WithBuildBetaDetailsBuildIDs(buildIDs),
-		asc.WithBuildBetaDetailsLimit(200),
-	)
-	if err != nil {
-		return err
-	}
-	externalStateByBuild := buildExternalStatesByBuildID(buildIDs, betaDetails)
-
 	for _, build := range buildsResp.Data {
-		state := strings.ToUpper(strings.TrimSpace(externalStateByBuild[build.ID]))
+		state := strings.ToUpper(strings.TrimSpace(betaStatesByBuild[build.ID].external))
 		if isDistributedState(state) {
 			section.LatestDistributedBuildID = build.ID
 			section.ExternalBuildState = state
@@ -554,47 +677,212 @@ func fillBuildsAndTestFlight(ctx context.Context, client *asc.Client, appID stri
 		}
 	}
 
-	reviewSubmissions, err := client.GetBetaAppReviewSubmissions(ctx,
-		asc.WithBetaAppReviewSubmissionsBuildIDs(buildIDs),
-		asc.WithBetaAppReviewSubmissionsLimit(200),
-	)
+	reviewSubmissions, err := fetchBetaReviewSubmissionsForStatus(ctx, client, appID, platform, buildsResp, buildsByID)
 	if err != nil {
 		return err
 	}
-	latestReviewSubmission := selectLatestBetaReviewSubmission(reviewSubmissions.Data)
+	reviewBuildsBySubmissionID := make(map[string]*betaReviewBuildStatus, len(reviewSubmissions.Data))
+	missingActiveBuilds := make([]asc.Resource[asc.BetaAppReviewSubmissionAttributes], 0)
+	attemptedBuildFallbacks := make(map[string]struct{}, maxBetaReviewBuildPrefetches)
+	for _, submission := range reviewSubmissions.Data {
+		reviewBuild := reviewBuildForSubmission(submission, buildsByID)
+		if reviewBuild != nil {
+			reviewBuildsBySubmissionID[submission.ID] = reviewBuild
+		}
+		if isInProgressBetaReviewState(submission.Attributes.BetaReviewState) && betaReviewBuildContextIncomplete(reviewBuild) {
+			missingActiveBuilds = append(missingActiveBuilds, submission)
+		}
+	}
+	// include=build is the normal correlation path. Prefetch at most five partial
+	// active contexts, then reserve one final fallback for the selected submission.
+	// This caps resolution at six contexts and at most twelve related API requests.
+	sortBetaReviewSubmissionsLatestFirst(missingActiveBuilds)
+	for index, submission := range missingActiveBuilds {
+		if index >= maxBetaReviewBuildPrefetches {
+			break
+		}
+		attemptedBuildFallbacks[submission.ID] = struct{}{}
+		if reviewBuild := resolveBetaReviewBuildContext(ctx, client, submission, buildsByID); reviewBuild != nil {
+			reviewBuildsBySubmissionID[submission.ID] = reviewBuild
+		}
+	}
+
+	latestReviewSubmission := selectBetaReviewSubmissionForLatestBuild(reviewSubmissions.Data, latestContext, buildsByID, reviewBuildsBySubmissionID)
 	if latestReviewSubmission != nil {
+		reviewBuild := reviewBuildsBySubmissionID[latestReviewSubmission.ID]
+		_, fallbackAttempted := attemptedBuildFallbacks[latestReviewSubmission.ID]
+		if betaReviewBuildContextIncomplete(reviewBuild) && !fallbackAttempted {
+			if resolvedBuild := resolveBetaReviewBuildContext(ctx, client, *latestReviewSubmission, buildsByID); resolvedBuild != nil {
+				reviewBuildsBySubmissionID[latestReviewSubmission.ID] = resolvedBuild
+			}
+			latestReviewSubmission = selectBetaReviewSubmissionForLatestBuild(reviewSubmissions.Data, latestContext, buildsByID, reviewBuildsBySubmissionID)
+			reviewBuild = reviewBuildsBySubmissionID[latestReviewSubmission.ID]
+		}
+
 		section.BetaReviewState = latestReviewSubmission.Attributes.BetaReviewState
 		section.SubmittedDate = latestReviewSubmission.Attributes.SubmittedDate
+		section.BetaReviewSubmission = &betaReviewSubmissionStatus{
+			ID:                    latestReviewSubmission.ID,
+			State:                 latestReviewSubmission.Attributes.BetaReviewState,
+			SubmittedDate:         latestReviewSubmission.Attributes.SubmittedDate,
+			RelationToLatestBuild: betaReviewBuildRelation(latestContext, reviewBuild),
+			Build:                 reviewBuild,
+		}
 	}
 
 	resp.TestFlight = section
 	return nil
 }
 
-func buildExternalStatesByBuildID(buildIDs []string, betaDetails *asc.BuildBetaDetailsResponse) map[string]string {
-	// BuildBetaDetails can omit relationships.build in some real API responses.
-	// Use relationship mapping when available, otherwise fall back to positional mapping.
-	externalStateByBuild := make(map[string]string, len(buildIDs))
-	if betaDetails != nil {
-		usedRelationshipMapping := false
-		for _, detail := range betaDetails.Data {
-			buildID, ok := optionalRelationshipResourceID(detail.Relationships, "build")
-			if !ok {
-				continue
-			}
-			usedRelationshipMapping = true
-			externalStateByBuild[buildID] = strings.TrimSpace(detail.Attributes.ExternalBuildState)
+func fetchBetaReviewSubmissionsForStatus(
+	ctx context.Context,
+	client *asc.Client,
+	appID string,
+	platform string,
+	latestBuilds *asc.BuildsResponse,
+	buildsByID map[string]*betaReviewBuildStatus,
+) (*asc.BetaAppReviewSubmissionsResponse, error) {
+	result := &asc.BetaAppReviewSubmissionsResponse{}
+	seenSubmissions := make(map[string]struct{})
+	appendSubmissions := func(firstPage *asc.BetaAppReviewSubmissionsResponse) error {
+		paginated, err := asc.PaginateAll(ctx, firstPage, func(pageCtx context.Context, nextURL string) (asc.PaginatedResponse, error) {
+			return client.GetBetaAppReviewSubmissions(pageCtx, asc.WithBetaAppReviewSubmissionsNextURL(nextURL))
+		})
+		if err != nil {
+			return err
 		}
+		all, ok := paginated.(*asc.BetaAppReviewSubmissionsResponse)
+		if !ok {
+			return fmt.Errorf("unexpected beta review submissions response type %T", paginated)
+		}
+		for _, submission := range all.Data {
+			if submission.ID != "" {
+				if _, exists := seenSubmissions[submission.ID]; exists {
+					continue
+				}
+				seenSubmissions[submission.ID] = struct{}{}
+			}
+			result.Data = append(result.Data, submission)
+		}
+		return nil
+	}
 
-		// Without relationships, mapping by position is ambiguous for multiple
-		// builds because the API does not guarantee response order for filters.
-		// Keep a single-item fallback where positional mapping is unambiguous.
-		if !usedRelationshipMapping && len(buildIDs) == 1 && len(betaDetails.Data) == 1 {
-			externalStateByBuild[buildIDs[0]] = strings.TrimSpace(betaDetails.Data[0].Attributes.ExternalBuildState)
+	latestBuildIDs := make(map[string]struct{}, len(latestBuilds.Data))
+	buildIDs := make([]string, 0, len(latestBuilds.Data))
+	for _, build := range latestBuilds.Data {
+		latestBuildIDs[build.ID] = struct{}{}
+		buildIDs = append(buildIDs, build.ID)
+	}
+	if len(buildIDs) > 0 {
+		firstPage, err := client.GetBetaAppReviewSubmissions(
+			ctx,
+			asc.WithBetaAppReviewSubmissionsBuildIDs(buildIDs),
+			asc.WithBetaAppReviewSubmissionsIncludeBuild(),
+			asc.WithBetaAppReviewSubmissionsLimit(200),
+		)
+		if err != nil {
+			return nil, err
+		}
+		if err := appendSubmissions(firstPage); err != nil {
+			return nil, err
 		}
 	}
 
-	return externalStateByBuild
+	activeBuildOpts := []asc.BuildsOption{
+		asc.WithBuildsBetaReviewStates([]string{"WAITING_FOR_REVIEW", "IN_REVIEW"}),
+		asc.WithBuildsLimit(50),
+		asc.WithBuildsInclude([]string{"preReleaseVersion"}),
+	}
+	if platform != "" {
+		activeBuildOpts = append(activeBuildOpts, asc.WithBuildsPreReleaseVersionPlatforms([]string{platform}))
+	}
+	activeBuilds, err := client.GetBuilds(ctx, appID, activeBuildOpts...)
+	if err != nil {
+		return nil, err
+	}
+
+	err = asc.PaginateEach(ctx, activeBuilds, func(pageCtx context.Context, nextURL string) (asc.PaginatedResponse, error) {
+		return client.GetBuilds(pageCtx, appID, asc.WithBuildsNextURL(nextURL))
+	}, func(page asc.PaginatedResponse) error {
+		buildPage, ok := page.(*asc.BuildsResponse)
+		if !ok {
+			return fmt.Errorf("unexpected active beta review builds response type %T", page)
+		}
+		for buildID, buildContext := range buildReviewContexts(buildPage) {
+			if existing := buildsByID[buildID]; existing == nil || betaReviewBuildContextIncomplete(existing) {
+				buildsByID[buildID] = buildContext
+			}
+		}
+
+		olderActiveBuildIDs := make([]string, 0, len(buildPage.Data))
+		for _, build := range buildPage.Data {
+			if _, alreadyQueried := latestBuildIDs[build.ID]; !alreadyQueried {
+				olderActiveBuildIDs = append(olderActiveBuildIDs, build.ID)
+			}
+		}
+		if len(olderActiveBuildIDs) == 0 {
+			return nil
+		}
+
+		firstPage, err := client.GetBetaAppReviewSubmissions(
+			ctx,
+			asc.WithBetaAppReviewSubmissionsBuildIDs(olderActiveBuildIDs),
+			asc.WithBetaAppReviewSubmissionsIncludeBuild(),
+			asc.WithBetaAppReviewSubmissionsLimit(200),
+		)
+		if err != nil {
+			return err
+		}
+		return appendSubmissions(firstPage)
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	return result, nil
+}
+
+func buildBetaStatesByBuildID(builds *asc.BuildsResponse) map[string]betaBuildStates {
+	statesByBuild := make(map[string]betaBuildStates, len(builds.Data))
+	if len(builds.Included) == 0 {
+		return statesByBuild
+	}
+
+	var included []asc.Resource[asc.BuildBetaDetailAttributes]
+	if err := json.Unmarshal(builds.Included, &included); err != nil {
+		return statesByBuild
+	}
+	statesByDetail := make(map[string]betaBuildStates, len(included))
+	for _, resource := range included {
+		if resource.Type == asc.ResourceTypeBuildBetaDetails {
+			statesByDetail[resource.ID] = betaBuildStatesFromAttributes(resource.Attributes)
+		}
+	}
+
+	for _, build := range builds.Data {
+		if detailID, ok := optionalRelationshipResourceID(build.Relationships, "buildBetaDetail"); ok {
+			if states, found := statesByDetail[detailID]; found {
+				statesByBuild[build.ID] = states
+			}
+		}
+	}
+
+	return statesByBuild
+}
+
+func optionalBuildExpired(attributes asc.BuildAttributes) *bool {
+	expired, known := attributes.ExpiredValue()
+	if !known {
+		return nil
+	}
+	return &expired
+}
+
+func betaBuildStatesFromAttributes(attributes asc.BuildBetaDetailAttributes) betaBuildStates {
+	return betaBuildStates{
+		internal: strings.TrimSpace(attributes.InternalBuildState),
+		external: strings.TrimSpace(attributes.ExternalBuildState),
+	}
 }
 
 func optionalRelationshipResourceID(relationships json.RawMessage, key string) (string, bool) {
@@ -620,8 +908,119 @@ func optionalRelationshipResourceID(relationships json.RawMessage, key string) (
 	return id, true
 }
 
-func fillAppStoreAndPhasedRelease(ctx context.Context, client *asc.Client, appID string, includes includeSet, resp *dashboardResponse) error {
-	versions, err := shared.FetchAllAppStoreVersions(ctx, client, appID, asc.WithAppStoreVersionsLimit(200))
+func buildReviewContexts(builds *asc.BuildsResponse) map[string]*betaReviewBuildStatus {
+	contexts := make(map[string]*betaReviewBuildStatus)
+	if builds == nil {
+		return contexts
+	}
+
+	preReleaseVersions := make(map[string]asc.PreReleaseVersionAttributes)
+	if len(builds.Included) > 0 {
+		var included []asc.Resource[asc.PreReleaseVersionAttributes]
+		if err := json.Unmarshal(builds.Included, &included); err == nil {
+			for _, resource := range included {
+				if resource.Type == asc.ResourceTypePreReleaseVersions {
+					preReleaseVersions[resource.ID] = resource.Attributes
+				}
+			}
+		}
+	}
+
+	for _, build := range builds.Data {
+		context := &betaReviewBuildStatus{
+			ID:          build.ID,
+			BuildNumber: build.Attributes.Version,
+		}
+		if preReleaseID, ok := optionalRelationshipResourceID(build.Relationships, "preReleaseVersion"); ok {
+			if preRelease, found := preReleaseVersions[preReleaseID]; found {
+				context.Version = preRelease.Version
+				context.Platform = string(preRelease.Platform)
+			}
+		}
+		contexts[build.ID] = context
+	}
+
+	return contexts
+}
+
+func reviewBuildForSubmission(submission asc.Resource[asc.BetaAppReviewSubmissionAttributes], buildsByID map[string]*betaReviewBuildStatus) *betaReviewBuildStatus {
+	buildID, ok := optionalRelationshipResourceID(submission.Relationships, "build")
+	if !ok {
+		return nil
+	}
+	if build := buildsByID[buildID]; build != nil {
+		return build
+	}
+	return &betaReviewBuildStatus{ID: buildID}
+}
+
+func resolveBetaReviewBuildContext(
+	ctx context.Context,
+	client *asc.Client,
+	submission asc.Resource[asc.BetaAppReviewSubmissionAttributes],
+	buildsByID map[string]*betaReviewBuildStatus,
+) *betaReviewBuildStatus {
+	reviewBuild := reviewBuildForSubmission(submission, buildsByID)
+	if reviewBuild == nil || reviewBuild.BuildNumber == "" {
+		relatedBuild, err := client.GetBetaAppReviewSubmissionBuild(ctx, submission.ID)
+		if err != nil || relatedBuild == nil || strings.TrimSpace(relatedBuild.Data.ID) == "" {
+			return reviewBuild
+		}
+		reviewBuild = buildsByID[relatedBuild.Data.ID]
+		if reviewBuild == nil {
+			reviewBuild = &betaReviewBuildStatus{ID: relatedBuild.Data.ID}
+			buildsByID[relatedBuild.Data.ID] = reviewBuild
+		}
+		if reviewBuild.BuildNumber == "" {
+			reviewBuild.BuildNumber = relatedBuild.Data.Attributes.Version
+		}
+	}
+
+	if reviewBuild.Version == "" || reviewBuild.Platform == "" {
+		if preRelease, err := client.GetBuildPreReleaseVersion(ctx, reviewBuild.ID); err == nil && preRelease != nil {
+			reviewBuild.Version = preRelease.Data.Attributes.Version
+			reviewBuild.Platform = string(preRelease.Data.Attributes.Platform)
+		}
+	}
+	return reviewBuild
+}
+
+func betaReviewBuildContextIncomplete(build *betaReviewBuildStatus) bool {
+	return build == nil || build.BuildNumber == "" || build.Version == "" || build.Platform == ""
+}
+
+func betaReviewBuildRelation(latest, review *betaReviewBuildStatus) string {
+	if latest == nil || review == nil || strings.TrimSpace(review.ID) == "" {
+		return "unknown"
+	}
+	if latest.ID == review.ID {
+		return "sameBuild"
+	}
+	if sameBetaReviewVersionTrain(latest, review) {
+		return "sameVersionTrain"
+	}
+	if latest.Version != "" && latest.Platform != "" && review.Version != "" && review.Platform != "" {
+		return "differentVersionTrain"
+	}
+	return "unknown"
+}
+
+func sameBetaReviewVersionTrain(first, second *betaReviewBuildStatus) bool {
+	if first == nil || second == nil {
+		return false
+	}
+	return strings.TrimSpace(first.Version) != "" &&
+		strings.EqualFold(first.Version, second.Version) &&
+		strings.TrimSpace(first.Platform) != "" &&
+		strings.EqualFold(first.Platform, second.Platform)
+}
+
+func fillAppStoreAndPhasedRelease(ctx context.Context, client *asc.Client, appID string, platform string, includes includeSet, resp *dashboardResponse) error {
+	versionOpts := []asc.AppStoreVersionsOption{asc.WithAppStoreVersionsLimit(200)}
+	if platform != "" {
+		versionOpts = append(versionOpts, asc.WithAppStoreVersionsPlatforms([]string{platform}))
+	}
+	versions, err := shared.FetchAllAppStoreVersions(ctx, client, appID, versionOpts...)
 	if err != nil {
 		return err
 	}
@@ -664,8 +1063,8 @@ func fillAppStoreAndPhasedRelease(ctx context.Context, client *asc.Client, appID
 	return nil
 }
 
-func fillSubmissionAndReview(ctx context.Context, client *asc.Client, appID string, includes includeSet, resp *dashboardResponse, watchMode bool) error {
-	submissions, err := fetchStatusReviewSubmissions(ctx, client, appID, watchMode)
+func fillSubmissionAndReview(ctx context.Context, client *asc.Client, appID string, platform string, includes includeSet, resp *dashboardResponse, watchMode bool) error {
+	submissions, err := fetchStatusReviewSubmissions(ctx, client, appID, platform, watchMode)
 	if err != nil {
 		return err
 	}
@@ -704,13 +1103,17 @@ func fillSubmissionAndReview(ctx context.Context, client *asc.Client, appID stri
 	return nil
 }
 
-func fetchStatusReviewSubmissions(ctx context.Context, client *asc.Client, appID string, watchMode bool) ([]asc.ReviewSubmissionResource, error) {
+func fetchStatusReviewSubmissions(ctx context.Context, client *asc.Client, appID string, platform string, watchMode bool) ([]asc.ReviewSubmissionResource, error) {
+	opts := []asc.ReviewSubmissionsOption{asc.WithReviewSubmissionsLimit(200)}
+	if platform != "" {
+		opts = append(opts, asc.WithReviewSubmissionsPlatforms([]string{platform}))
+	}
 	if !watchMode {
-		return shared.FetchAllReviewSubmissions(ctx, client, appID, asc.WithReviewSubmissionsLimit(200))
+		return shared.FetchAllReviewSubmissions(ctx, client, appID, opts...)
 	}
 
 	// Watch mode uses a bounded recent snapshot instead of walking submission history on every poll.
-	resp, err := client.GetReviewSubmissions(ctx, appID, asc.WithReviewSubmissionsLimit(200))
+	resp, err := client.GetReviewSubmissions(ctx, appID, opts...)
 	if err != nil {
 		return nil, err
 	}
@@ -800,6 +1203,70 @@ func selectLatestBetaReviewSubmission(submissions []asc.Resource[asc.BetaAppRevi
 	return &best
 }
 
+func selectBetaReviewSubmissionForLatestBuild(
+	submissions []asc.Resource[asc.BetaAppReviewSubmissionAttributes],
+	latestBuild *betaReviewBuildStatus,
+	buildsByID map[string]*betaReviewBuildStatus,
+	reviewBuildsBySubmissionID map[string]*betaReviewBuildStatus,
+) *asc.Resource[asc.BetaAppReviewSubmissionAttributes] {
+	if len(submissions) == 0 {
+		return nil
+	}
+
+	relevantActive := make([]asc.Resource[asc.BetaAppReviewSubmissionAttributes], 0)
+	unknownActive := make([]asc.Resource[asc.BetaAppReviewSubmissionAttributes], 0)
+	relevantTerminal := make([]asc.Resource[asc.BetaAppReviewSubmissionAttributes], 0)
+	for _, submission := range submissions {
+		reviewBuild := reviewBuildsBySubmissionID[submission.ID]
+		if reviewBuild == nil {
+			reviewBuild = reviewBuildForSubmission(submission, buildsByID)
+		}
+		relation := betaReviewBuildRelation(latestBuild, reviewBuild)
+		if relation == "unknown" && isInProgressBetaReviewState(submission.Attributes.BetaReviewState) {
+			unknownActive = append(unknownActive, submission)
+			continue
+		}
+		if relation != "sameBuild" && relation != "sameVersionTrain" {
+			continue
+		}
+		if isInProgressBetaReviewState(submission.Attributes.BetaReviewState) {
+			relevantActive = append(relevantActive, submission)
+		} else {
+			relevantTerminal = append(relevantTerminal, submission)
+		}
+	}
+
+	if selected := selectLatestBetaReviewSubmission(relevantActive); selected != nil {
+		return selected
+	}
+	if selected := selectLatestBetaReviewSubmission(unknownActive); selected != nil {
+		return selected
+	}
+	if selected := selectLatestBetaReviewSubmission(relevantTerminal); selected != nil {
+		return selected
+	}
+	return selectLatestBetaReviewSubmission(submissions)
+}
+
+func sortBetaReviewSubmissionsLatestFirst(submissions []asc.Resource[asc.BetaAppReviewSubmissionAttributes]) {
+	slices.SortFunc(submissions, func(first, second asc.Resource[asc.BetaAppReviewSubmissionAttributes]) int {
+		dateOrder := shared.CompareRFC3339DateStrings(first.Attributes.SubmittedDate, second.Attributes.SubmittedDate)
+		if dateOrder != 0 {
+			return -dateOrder
+		}
+		return -strings.Compare(first.ID, second.ID)
+	})
+}
+
+func isInProgressBetaReviewState(state string) bool {
+	switch strings.ToUpper(strings.TrimSpace(state)) {
+	case "WAITING_FOR_REVIEW", "IN_REVIEW":
+		return true
+	default:
+		return false
+	}
+}
+
 func isDistributedState(state string) bool {
 	switch strings.ToUpper(strings.TrimSpace(state)) {
 	case "IN_BETA_TESTING", "READY_FOR_TESTING":
@@ -863,6 +1330,9 @@ func collectBlockers(resp *dashboardResponse) []string {
 	if resp.Builds != nil && resp.Builds.Latest == nil {
 		blockers = append(blockers, "No builds found for this app")
 	}
+	if blocker := betaReviewBlocker(resp); blocker != "" {
+		blockers = append(blockers, blocker)
+	}
 
 	slices.Sort(blockers)
 	return slices.Compact(blockers)
@@ -885,12 +1355,24 @@ func resolveHealth(resp *dashboardResponse, blockers []string) string {
 	if resp.AppStore != nil && isInProgressAppStoreState(resp.AppStore.State) {
 		return "yellow"
 	}
+	if resp.TestFlight != nil && resp.TestFlight.BetaReviewSubmission != nil {
+		review := resp.TestFlight.BetaReviewSubmission
+		if isInProgressBetaReviewState(review.State) && (review.RelationToLatestBuild == "sameBuild" || review.RelationToLatestBuild == "unknown") {
+			return "yellow"
+		}
+		if strings.EqualFold(strings.TrimSpace(review.State), "REJECTED") && (review.RelationToLatestBuild == "sameBuild" || review.RelationToLatestBuild == "sameVersionTrain") {
+			return "yellow"
+		}
+	}
 
 	return "green"
 }
 
 func resolveNextAction(resp *dashboardResponse, blockers []string) string {
 	if len(blockers) > 0 {
+		if action := betaReviewBlockerNextAction(resp); action != "" && len(blockers) == 1 {
+			return action
+		}
 		return fmt.Sprintf("Resolve blocker: %s", blockers[0])
 	}
 	if resp == nil {
@@ -903,12 +1385,26 @@ func resolveNextAction(resp *dashboardResponse, blockers []string) string {
 	if resp.Review != nil && isInProgressReviewState(resp.Review.State) {
 		return "Monitor App Store review progress."
 	}
+	if resp.TestFlight != nil && resp.TestFlight.BetaReviewSubmission != nil {
+		review := resp.TestFlight.BetaReviewSubmission
+		if isInProgressBetaReviewState(review.State) {
+			switch review.RelationToLatestBuild {
+			case "sameBuild":
+				return fmt.Sprintf("Wait for Beta App Review of %s to finish.", betaReviewBuildLabel(review.Build))
+			case "unknown":
+				return fmt.Sprintf("Inspect Beta App Review submission %s to identify its build.", review.ID)
+			}
+		}
+		if strings.EqualFold(strings.TrimSpace(review.State), "REJECTED") && (review.RelationToLatestBuild == "sameBuild" || review.RelationToLatestBuild == "sameVersionTrain") {
+			return fmt.Sprintf("Review Beta App Review feedback for %s before the next external testing submission.", betaReviewBuildLabel(review.Build))
+		}
+	}
 	if resp.AppStore != nil {
 		state := strings.ToUpper(strings.TrimSpace(resp.AppStore.State))
-		switch state {
-		case "PREPARE_FOR_SUBMISSION":
+		switch {
+		case state == "PREPARE_FOR_SUBMISSION":
 			return "Prepare metadata and submit for review."
-		case "READY_FOR_SALE":
+		case shared.IsLiveAppStoreVersionState(state):
 			return "No action needed."
 		}
 	}
@@ -920,6 +1416,56 @@ func resolveNextAction(resp *dashboardResponse, blockers []string) string {
 	}
 
 	return "Review release status."
+}
+
+func betaReviewBlocker(resp *dashboardResponse) string {
+	if resp == nil || resp.TestFlight == nil || resp.TestFlight.BetaReviewSubmission == nil {
+		return ""
+	}
+	review := resp.TestFlight.BetaReviewSubmission
+	latest := resp.TestFlight.latestBuild
+	if review.RelationToLatestBuild != "sameVersionTrain" || !isInProgressBetaReviewState(review.State) || review.Build == nil || latest == nil || review.Build.ID == latest.ID {
+		return ""
+	}
+	if resp.TestFlight.LatestDistributedBuildID == latest.ID {
+		return ""
+	}
+	return fmt.Sprintf(
+		"Beta App Review for %s is %s and blocks external testing for latest %s",
+		betaReviewBuildLabel(review.Build),
+		strings.ToUpper(strings.TrimSpace(review.State)),
+		betaReviewBuildLabel(latest),
+	)
+}
+
+func betaReviewBlockerNextAction(resp *dashboardResponse) string {
+	if betaReviewBlocker(resp) == "" {
+		return ""
+	}
+	review := resp.TestFlight.BetaReviewSubmission
+	return fmt.Sprintf(
+		"Wait for Beta App Review of %s to finish before submitting %s for external testing.",
+		betaReviewBuildLabel(review.Build),
+		betaReviewBuildLabel(resp.TestFlight.latestBuild),
+	)
+}
+
+func betaReviewBuildLabel(build *betaReviewBuildStatus) string {
+	if build == nil {
+		return "unknown build"
+	}
+	identifier := strings.TrimSpace(build.BuildNumber)
+	if identifier == "" {
+		identifier = strings.TrimSpace(build.ID)
+	}
+	if identifier == "" {
+		return "unknown build"
+	}
+	label := "build " + identifier
+	if strings.TrimSpace(build.Version) != "" {
+		label += " (version " + strings.TrimSpace(build.Version) + ")"
+	}
+	return label
 }
 
 func isInProgressReviewState(state string) bool {
@@ -966,11 +1512,15 @@ func renderDashboard(resp *dashboardResponse, markdown bool) {
 		summary = buildStatusSummary(resp)
 	}
 
-	shared.RenderSection("Summary", []string{"field", "value"}, [][]string{
+	summaryRows := [][]string{
 		{"health", fmt.Sprintf("%s %s", healthSymbol(summary.Health), shared.OrNA(summary.Health))},
 		{"nextAction", shared.OrNA(summary.NextAction)},
 		{"blockerCount", fmt.Sprintf("%d", len(summary.Blockers))},
-	}, markdown)
+	}
+	if summary.Platform != "" {
+		summaryRows = append(summaryRows, []string{"platform", summary.Platform})
+	}
+	shared.RenderSection("Summary", []string{"field", "value"}, summaryRows, markdown)
 
 	if len(summary.Blockers) > 0 {
 		attentionRows := make([][]string, 0, len(summary.Blockers))
@@ -978,6 +1528,14 @@ func renderDashboard(resp *dashboardResponse, markdown bool) {
 			attentionRows = append(attentionRows, []string{fmt.Sprintf("[x] blocker_%d", i+1), blocker})
 		}
 		shared.RenderSection("Needs Attention", []string{"item", "detail"}, attentionRows, markdown)
+	}
+
+	if len(summary.NextCommands) > 0 {
+		commandRows := make([][]string, 0, len(summary.NextCommands))
+		for _, next := range summary.NextCommands {
+			commandRows = append(commandRows, []string{next.Command, fmt.Sprintf("%t", next.Mutates), next.Reason})
+		}
+		shared.RenderSection("Next Commands", []string{"command", "mutates", "reason"}, commandRows, markdown)
 	}
 
 	if resp.App != nil {
@@ -993,11 +1551,20 @@ func renderDashboard(resp *dashboardResponse, markdown bool) {
 		if resp.Builds.Latest == nil {
 			rows = append(rows, []string{"latest", "[-] none"})
 		} else {
-			rows = append(rows,
+			expired := "[-] unknown"
+			if resp.Builds.Latest.Expired != nil && !*resp.Builds.Latest.Expired {
+				expired = "[+] false"
+			}
+			if resp.Builds.Latest.Expired != nil && *resp.Builds.Latest.Expired {
+				expired = "[x] true"
+			}
+			rows = append(
+				rows,
 				[]string{"latest.id", resp.Builds.Latest.ID},
 				[]string{"latest.version", shared.OrNA(resp.Builds.Latest.Version)},
 				[]string{"latest.buildNumber", shared.OrNA(resp.Builds.Latest.BuildNumber)},
 				[]string{"latest.processingState", prefixedState(resp.Builds.Latest.ProcessingState)},
+				[]string{"latest.expired", expired},
 				[]string{"latest.uploadedDate", formatDateWithRelative(resp.Builds.Latest.UploadedDate)},
 				[]string{"latest.platform", shared.OrNA(resp.Builds.Latest.Platform)},
 			)
@@ -1006,12 +1573,39 @@ func renderDashboard(resp *dashboardResponse, markdown bool) {
 	}
 
 	if resp.TestFlight != nil {
-		shared.RenderSection("TestFlight", []string{"field", "value"}, [][]string{
+		rows := [][]string{
+			{"internalBuildState", prefixedInternalBuildState(resp.TestFlight.InternalBuildState)},
 			{"latestDistributedBuildId", shared.OrNA(resp.TestFlight.LatestDistributedBuildID)},
-			{"betaReviewState", prefixedState(resp.TestFlight.BetaReviewState)},
 			{"externalBuildState", prefixedState(resp.TestFlight.ExternalBuildState)},
-			{"submittedDate", formatDateWithRelative(resp.TestFlight.SubmittedDate)},
-		}, markdown)
+		}
+		if review := resp.TestFlight.BetaReviewSubmission; review != nil {
+			rows = append(
+				rows,
+				[]string{"betaReviewSubmission.id", shared.OrNA(review.ID)},
+				[]string{"betaReviewSubmission.state", prefixedState(review.State)},
+				[]string{"betaReviewSubmission.submittedDate", formatDateWithRelative(review.SubmittedDate)},
+				[]string{"betaReviewSubmission.relationToLatestBuild", shared.OrNA(review.RelationToLatestBuild)},
+			)
+			if review.Build == nil {
+				rows = append(rows, []string{"betaReviewSubmission.build", "[-] unknown"})
+			} else {
+				rows = append(
+					rows,
+					[]string{"betaReviewSubmission.build.id", shared.OrNA(review.Build.ID)},
+					[]string{"betaReviewSubmission.build.version", shared.OrNA(review.Build.Version)},
+					[]string{"betaReviewSubmission.build.buildNumber", shared.OrNA(review.Build.BuildNumber)},
+					[]string{"betaReviewSubmission.build.platform", shared.OrNA(review.Build.Platform)},
+				)
+			}
+		} else {
+			rows = append(rows, []string{"betaReviewSubmission", "[-] none"})
+		}
+		rows = append(
+			rows,
+			[]string{"betaReviewState", prefixedState(resp.TestFlight.BetaReviewState)},
+			[]string{"submittedDate", formatDateWithRelative(resp.TestFlight.SubmittedDate)},
+		)
+		shared.RenderSection("TestFlight", []string{"field", "value"}, rows, markdown)
 	}
 
 	if resp.AppStore != nil {
@@ -1088,6 +1682,27 @@ func prefixedState(value string) string {
 		return "[-] n/a"
 	}
 	return fmt.Sprintf("%s %s", stateSymbol(trimmed), trimmed)
+}
+
+func prefixedInternalBuildState(value string) string {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return "[-] n/a"
+	}
+	return fmt.Sprintf("%s %s", internalBuildStateSymbol(trimmed), trimmed)
+}
+
+func internalBuildStateSymbol(value string) string {
+	switch strings.ToUpper(strings.TrimSpace(value)) {
+	case "PROCESSING", "IN_EXPORT_COMPLIANCE_REVIEW":
+		return "[~]"
+	case "PROCESSING_EXCEPTION", "MISSING_EXPORT_COMPLIANCE", "EXPIRED":
+		return "[x]"
+	case "READY_FOR_BETA_TESTING", "IN_BETA_TESTING":
+		return "[+]"
+	default:
+		return stateSymbol(value)
+	}
 }
 
 func stateSymbol(value string) string {

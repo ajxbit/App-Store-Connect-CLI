@@ -27,13 +27,13 @@ func WebXcodeCloudCommand() *ffcli.Command {
 	return &ffcli.Command{
 		Name:       "xcode-cloud",
 		ShortUsage: "asc web xcode-cloud <subcommand> [flags]",
-		ShortHelp:  "[experimental] Xcode Cloud usage and workflow management.",
-		LongHelp: `EXPERIMENTAL / UNOFFICIAL / DISCOURAGED
+		ShortHelp:  "Xcode Cloud usage and workflow management.",
+		LongHelp: `WEB SESSION WORKFLOWS
 
 Query Xcode Cloud compute usage (plan quota, monthly/daily breakdowns, products)
-using Apple's private CI API. Requires a web session.
+using Apple's CI API. Requires a web session.
 
-` + webWarningText + `
+
 
 Examples:
   asc web xcode-cloud usage summary --apple-id "user@example.com"
@@ -43,12 +43,20 @@ Examples:
   asc web xcode-cloud usage months --product-ids "UUID" --apple-id "user@example.com" --output table
   asc web xcode-cloud usage days --product-ids "UUID" --apple-id "user@example.com"
   asc web xcode-cloud usage workflows --product-id "UUID" --apple-id "user@example.com" --output table
+  asc web xcode-cloud workflows list --product-id "UUID" --apple-id "user@example.com"
   asc web xcode-cloud workflows create --product-id "UUID" --file ./workflow.json --apple-id "user@example.com"
   asc web xcode-cloud workflows describe --product-id "UUID" --workflow-id "WF-UUID" --apple-id "user@example.com"
   asc web xcode-cloud workflows options product-config --product-id "UUID" --apple-id "user@example.com"
   asc web xcode-cloud workflows edit --product-id "UUID" --workflow-id "WF-UUID" --patch-file ./workflow.patch.json --apple-id "user@example.com"
   asc web xcode-cloud env-vars shared list --product-id "UUID" --apple-id "user@example.com"
-  asc web xcode-cloud env-vars shared set --product-id "UUID" --name MY_VAR --value hello --apple-id "user@example.com"`,
+  asc web xcode-cloud env-vars shared set --product-id "UUID" --name MY_VAR --value hello --apple-id "user@example.com"
+  asc web xcode-cloud settings next-build-number show --product-id "UUID" --apple-id "user@example.com"
+  asc web xcode-cloud settings next-build-number set --product-id "UUID" --value 102 --confirm --apple-id "user@example.com"
+  asc web xcode-cloud settings version-aliases list --product-id "UUID" --apple-id "user@example.com"
+  asc web xcode-cloud settings version-aliases view --product-id "UUID" --id "ALIAS_UUID" --apple-id "user@example.com"
+  asc web xcode-cloud settings version-aliases create --product-id "UUID" --type xcode_version --name "Stable" --build "latest:stable" --confirm --apple-id "user@example.com"
+  asc web xcode-cloud settings version-aliases update --product-id "UUID" --id "ALIAS_UUID" --name "Stable" --confirm --apple-id "user@example.com"
+  asc web xcode-cloud settings version-aliases delete --product-id "UUID" --id "ALIAS_UUID" --confirm --apple-id "user@example.com"`,
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
 		Subcommands: []*ffcli.Command{
@@ -56,6 +64,8 @@ Examples:
 			webXcodeCloudProductsCommand(),
 			webXcodeCloudWorkflowsCommand(),
 			webXcodeCloudEnvVarsCommand(),
+			webXcodeCloudNextBuildNumberCommand(),
+			webXcodeCloudScmCommand(),
 		},
 		Exec: func(ctx context.Context, args []string) error {
 			return flag.ErrHelp
@@ -69,12 +79,12 @@ func webXcodeCloudUsageCommand() *ffcli.Command {
 	return &ffcli.Command{
 		Name:       "usage",
 		ShortUsage: "asc web xcode-cloud usage <subcommand> [flags]",
-		ShortHelp:  "[experimental] Xcode Cloud usage queries.",
-		LongHelp: `EXPERIMENTAL / UNOFFICIAL / DISCOURAGED
+		ShortHelp:  "Xcode Cloud usage queries.",
+		LongHelp: `WEB SESSION WORKFLOWS
 
 Query Xcode Cloud compute usage: plan summary, monthly history, daily breakdown, per-workflow usage.
 
-` + webWarningText,
+`,
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
 		Subcommands: []*ffcli.Command{
@@ -98,12 +108,12 @@ func webXcodeCloudUsageSummaryCommand() *ffcli.Command {
 	return &ffcli.Command{
 		Name:       "summary",
 		ShortUsage: "asc web xcode-cloud usage summary [flags]",
-		ShortHelp:  "[experimental] Show Xcode Cloud plan quota.",
-		LongHelp: `EXPERIMENTAL / UNOFFICIAL / DISCOURAGED
+		ShortHelp:  "Show Xcode Cloud plan quota.",
+		LongHelp: `WEB SESSION WORKFLOWS
 
 Show current Xcode Cloud plan usage: used/available/total compute minutes and reset date.
 
-` + webWarningText + `
+
 
 Examples:
   asc web xcode-cloud usage summary --apple-id "user@example.com"
@@ -111,10 +121,8 @@ Examples:
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
-			requestCtx, cancel := shared.ContextWithTimeout(ctx)
+			session, requestCtx, cancel, err := resolveWebSessionForCommand(ctx, sessionFlags)
 			defer cancel()
-
-			session, err := resolveWebSessionForCommand(requestCtx, sessionFlags)
 			if err != nil {
 				return err
 			}
@@ -162,13 +170,13 @@ func webXcodeCloudUsageMonthsCommand() *ffcli.Command {
 	return &ffcli.Command{
 		Name:       "months",
 		ShortUsage: "asc web xcode-cloud usage months [flags]",
-		ShortHelp:  "[experimental] Show monthly Xcode Cloud usage.",
-		LongHelp: `EXPERIMENTAL / UNOFFICIAL / DISCOURAGED
+		ShortHelp:  "Show monthly Xcode Cloud usage.",
+		LongHelp: `WEB SESSION WORKFLOWS
 
 Show monthly Xcode Cloud compute usage with per-product breakdown.
 Defaults to the last 12 months. Use --product-ids to filter the product breakdown.
 
-` + webWarningText + `
+
 
 Examples:
   asc web xcode-cloud usage months --apple-id "user@example.com"
@@ -191,10 +199,8 @@ Examples:
 				return flag.ErrHelp
 			}
 
-			requestCtx, cancel := shared.ContextWithTimeout(ctx)
+			session, requestCtx, cancel, err := resolveWebSessionForCommand(ctx, sessionFlags)
 			defer cancel()
-
-			session, err := resolveWebSessionForCommand(requestCtx, sessionFlags)
 			if err != nil {
 				return err
 			}
@@ -254,14 +260,14 @@ func webXcodeCloudUsageDaysCommand() *ffcli.Command {
 	return &ffcli.Command{
 		Name:       "days",
 		ShortUsage: "asc web xcode-cloud usage days --product-ids IDS [flags]",
-		ShortHelp:  "[experimental] Show daily Xcode Cloud usage for products.",
-		LongHelp: `EXPERIMENTAL / UNOFFICIAL / DISCOURAGED
+		ShortHelp:  "Show daily Xcode Cloud usage for products.",
+		LongHelp: `WEB SESSION WORKFLOWS
 
 Show daily Xcode Cloud compute usage for one or more products with per-workflow breakdown.
 The first product ID drives the daily/workflow tables; all product IDs are shown in the scope comparison table.
 Defaults to the last 30 days.
 
-` + webWarningText + `
+
 
 Examples:
   asc web xcode-cloud usage days --product-ids "UUID" --apple-id "user@example.com"
@@ -277,7 +283,7 @@ Examples:
 			}
 			if len(requestedProductIDs) == 0 {
 				fmt.Fprintln(os.Stderr, "Error: --product-ids is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--product-ids")
 			}
 			primaryProductID := requestedProductIDs[0]
 			if err := validateDateFlag("--start", *start); err != nil {
@@ -289,10 +295,8 @@ Examples:
 				return flag.ErrHelp
 			}
 
-			requestCtx, cancel := shared.ContextWithTimeout(ctx)
+			session, requestCtx, cancel, err := resolveWebSessionForCommand(ctx, sessionFlags)
 			defer cancel()
-
-			session, err := resolveWebSessionForCommand(requestCtx, sessionFlags)
 			if err != nil {
 				return err
 			}
@@ -382,15 +386,15 @@ func webXcodeCloudUsageWorkflowsCommand() *ffcli.Command {
 	return &ffcli.Command{
 		Name:       "workflows",
 		ShortUsage: "asc web xcode-cloud usage workflows --product-id ID [flags]",
-		ShortHelp:  "[experimental] Show per-workflow Xcode Cloud usage.",
-		LongHelp: `EXPERIMENTAL / UNOFFICIAL / DISCOURAGED
+		ShortHelp:  "Show per-workflow Xcode Cloud usage.",
+		LongHelp: `WEB SESSION WORKFLOWS
 
 Show Xcode Cloud compute usage broken down by workflow for a product.
 Without --workflow-id, lists all workflows and their usage.
 With --workflow-id, shows daily breakdown for that specific workflow.
 Defaults to the last 30 days.
 
-` + webWarningText + `
+
 
 Examples:
   asc web xcode-cloud usage workflows --product-id "UUID" --apple-id "user@example.com" --output table
@@ -401,7 +405,7 @@ Examples:
 			pid := strings.TrimSpace(*productID)
 			if pid == "" {
 				fmt.Fprintln(os.Stderr, "Error: --product-id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--product-id")
 			}
 			if err := validateDateFlag("--start", *start); err != nil {
 				fmt.Fprintf(os.Stderr, "Error: %s\n", err)
@@ -412,10 +416,8 @@ Examples:
 				return flag.ErrHelp
 			}
 
-			requestCtx, cancel := shared.ContextWithTimeout(ctx)
+			session, requestCtx, cancel, err := resolveWebSessionForCommand(ctx, sessionFlags)
 			defer cancel()
-
-			session, err := resolveWebSessionForCommand(requestCtx, sessionFlags)
 			if err != nil {
 				return err
 			}
@@ -627,13 +629,13 @@ func webXcodeCloudProductsCommand() *ffcli.Command {
 	return &ffcli.Command{
 		Name:       "products",
 		ShortUsage: "asc web xcode-cloud products [flags]",
-		ShortHelp:  "[experimental] List Xcode Cloud products.",
-		LongHelp: `EXPERIMENTAL / UNOFFICIAL / DISCOURAGED
+		ShortHelp:  "List Xcode Cloud products.",
+		LongHelp: `WEB SESSION WORKFLOWS
 
 List Xcode Cloud products (apps) for the authenticated team.
 Use the product IDs with 'usage days' for per-product daily breakdowns.
 
-` + webWarningText + `
+
 
 Examples:
   asc web xcode-cloud products --apple-id "user@example.com"
@@ -641,10 +643,8 @@ Examples:
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
-			requestCtx, cancel := shared.ContextWithTimeout(ctx)
+			session, requestCtx, cancel, err := resolveWebSessionForCommand(ctx, sessionFlags)
 			defer cancel()
-
-			session, err := resolveWebSessionForCommand(requestCtx, sessionFlags)
 			if err != nil {
 				return err
 			}

@@ -7,8 +7,7 @@
 The `apps` command is the main app-management surface for App Store Connect.
 
 App creation no longer lives under `asc apps` in 1.0. Use `asc web apps create`
-for the unofficial web-session creation flow, and see the
-[Migrate to 1.0](/migrate-to-1-0) guide if you are updating older scripts.
+for the web-session creation flow.
 
 ## Commands
 
@@ -44,6 +43,24 @@ List apps from App Store Connect.
   Automatically fetch all pages (aggregate results)
 </ParamField>
 
+<ParamField path="--app-info-fields" type="string">
+  Legacy sparse fields for included app-info records: `kidsAgeBand`. API 4.5
+  removed this property from `AppInfo`. The CLI forwards the selector for
+  compatibility and emits a deprecation warning on stderr. Supplying this flag
+  automatically includes `appInfos`. Use `asc age-rating view` for current
+  age-rating data.
+</ParamField>
+
+<ParamField path="--iap-fields" type="string">
+  Sparse fields for included in-app purchases. API 4.4.1 supports `versions`.
+  Supplying this flag automatically includes `inAppPurchases`.
+</ParamField>
+
+<ParamField path="--subscription-group-fields" type="string">
+  Sparse fields for included subscription groups. API 4.4.1 supports
+  `versions`. Supplying this flag automatically includes `subscriptionGroups`.
+</ParamField>
+
 <ParamField path="--output" type="string" default="json">
   Output format: `json`, `table`, `markdown`
 </ParamField>
@@ -56,6 +73,7 @@ asc apps list --bundle-id "com.example.app"
 asc apps list --name "My App"
 asc apps list --limit 10
 asc apps list --sort name
+asc apps list --app-info-fields kidsAgeBand --iap-fields versions --subscription-group-fields versions
 asc apps list --output table
 asc apps list --paginate
 ```
@@ -88,8 +106,34 @@ asc apps list --paginate
 
 View app details by ID.
 
+Apple omits notification endpoints from its default response. Request them using
+`--fields` to verify the configured URLs and payload versions.
+
+<ParamField path="--fields" type="string">
+  Comma-separated app attributes: `name`, `bundleId`, `sku`, `primaryLocale`,
+  `contentRightsDeclaration`, `subscriptionStatusUrl`, `subscriptionStatusUrlVersion`,
+  `subscriptionStatusUrlForSandbox`, `subscriptionStatusUrlVersionForSandbox`.
+</ParamField>
+
 <ParamField path="--id" type="string" required>
   App Store Connect app ID
+</ParamField>
+
+<ParamField path="--app-info-fields" type="string">
+  Legacy sparse fields for included app-info records: `kidsAgeBand`. API 4.5
+  removed this property from `AppInfo`. The selector is still forwarded with a
+  stderr deprecation warning and automatically includes `appInfos`. Use
+  `asc age-rating view` for current age-rating data.
+</ParamField>
+
+<ParamField path="--iap-fields" type="string">
+  Sparse fields for included in-app purchases: `versions`. Automatically
+  includes `inAppPurchases`.
+</ParamField>
+
+<ParamField path="--subscription-group-fields" type="string">
+  Sparse fields for included subscription groups: `versions`. Automatically
+  includes `subscriptionGroups`.
 </ParamField>
 
 <ParamField path="--output" type="string" default="json">
@@ -100,7 +144,9 @@ View app details by ID.
 
 ```bash  theme={null}
 asc apps view --id "APP_ID"
+asc apps view --id "APP_ID" --app-info-fields kidsAgeBand --iap-fields versions --subscription-group-fields versions
 asc apps view --id "APP_ID" --output table
+asc apps view --id "APP_ID" --fields "subscriptionStatusUrl,subscriptionStatusUrlVersion,subscriptionStatusUrlForSandbox,subscriptionStatusUrlVersionForSandbox" --output json
 ```
 
 **Response:**
@@ -123,9 +169,110 @@ asc apps view --id "APP_ID" --output table
 
 ***
 
+### `asc apps rename`
+
+Create or update the localized App Store name for one locale. When the locale
+does not exist, the command creates its app-info localization.
+
+<ParamField path="--app" type="string" required>
+  App Store Connect app ID (or `ASC_APP_ID`)
+</ParamField>
+
+<ParamField path="--locale" type="string" required>
+  App name locale (for example, `en-US`)
+</ParamField>
+
+<ParamField path="--name" type="string" required>
+  New localized app name, up to 30 characters
+</ParamField>
+
+<ParamField path="--app-info" type="string">
+  App Info ID override. Use this when the app has multiple App Info records.
+</ParamField>
+
+<ParamField path="--output" type="string">
+  Output format: `json`, `table`, `markdown`. Defaults to `table` in an
+  interactive terminal and minified `json` for pipes or CI.
+</ParamField>
+
+**Examples:**
+
+```bash  theme={null}
+asc apps rename --app "APP_ID" --locale "en-US" --name "New Name"
+asc apps rename --app "APP_ID" --app-info "APP_INFO_ID" --locale "fr-FR" --name "Nouveau nom"
+```
+
+**Response:**
+
+```json  theme={null}
+{
+  "appId": "APP_ID",
+  "appInfoId": "APP_INFO_ID",
+  "locale": "en-US",
+  "name": "New Name",
+  "action": "update",
+  "localizationId": "LOCALIZATION_ID"
+}
+```
+
+***
+
+### `asc apps info list`
+
+List app-info records for an app, with optional sparse fields on included
+age-rating declarations. The legacy AppInfo kids-age-band selector remains
+available with a deprecation warning.
+
+<ParamField path="--app" type="string" required>
+  App Store Connect app ID (or `ASC_APP_ID`)
+</ParamField>
+
+<ParamField path="--fields" type="string">
+  Legacy sparse app-info fields: `kidsAgeBand`. API 4.5 removed this property
+  from `AppInfo`; the CLI still forwards it with a stderr deprecation warning.
+  Use `asc age-rating view` for current age-rating data.
+</ParamField>
+
+<ParamField path="--age-rating-fields" type="string">
+  Sparse fields for the included age-rating declaration:
+  `socialMedia`, `socialMediaAgeRestricted`, `gracRatingClassificationNumber`.
+  Automatically includes `ageRatingDeclaration`.
+</ParamField>
+
+```bash  theme={null}
+asc apps info list --app "APP_ID" --fields kidsAgeBand
+asc apps info list --app "APP_ID" --age-rating-fields socialMedia,socialMediaAgeRestricted,gracRatingClassificationNumber
+```
+
+<Note>
+  API 4.5 removed `AppInfo.kidsAgeBand` and its sparse-field selectors. The CLI
+  preserves existing selectors for compatibility, but Apple may reject them.
+  Explicit selectors and continuation URLs containing this field emit one
+  deprecation warning on stderr.
+</Note>
+
+<Warning>
+  Migrate AppInfo selectors to `asc age-rating view --app-info-id "APP_INFO_ID"`.
+  `AgeRatingDeclaration.kidsAgeBand` and the `--kids-age-band` flag on
+  `asc age-rating edit` remain supported.
+</Warning>
+
+### `asc apps info view`
+
+Use an app-info ID to request the same sparse fields from one record. These
+app-info flags cannot be combined with version-localization selectors such as
+`--version-id`, `--locale`, `--next`, or `--paginate`.
+
+```bash  theme={null}
+asc apps info view --info-id "APP_INFO_ID" --fields kidsAgeBand
+asc apps info view --info-id "APP_INFO_ID" --age-rating-fields socialMedia,socialMediaAgeRestricted
+```
+
+***
+
 ### `asc apps update`
 
-Update an app's bundle ID, primary locale, or content rights declaration.
+Update app metadata and App Store Server Notifications URLs.
 
 <ParamField path="--id" type="string" required>
   App Store Connect app ID
@@ -143,12 +290,27 @@ Update an app's bundle ID, primary locale, or content rights declaration.
   Content rights declaration: `DOES_NOT_USE_THIRD_PARTY_CONTENT` or `USES_THIRD_PARTY_CONTENT`
 </ParamField>
 
+<ParamField path="--subscription-status-url" type="string">
+  Production App Store Server Notifications HTTPS URL. Sets notification version V2.
+</ParamField>
+
+<ParamField path="--sandbox-subscription-status-url" type="string">
+  Sandbox App Store Server Notifications HTTPS URL. Sets notification version V2.
+</ParamField>
+
+Notification URLs must be absolute HTTPS URLs without credentials or fragments.
+Each supplied URL is configured for version V2, which delivers signed payloads.
+Omitting an endpoint leaves its URL and version unchanged. Empty URLs are rejected;
+these flags do not remove existing endpoints. Use `asc apps view --id "APP_ID" --fields "subscriptionStatusUrl,subscriptionStatusUrlVersion,subscriptionStatusUrlForSandbox,subscriptionStatusUrlVersionForSandbox" --output json` to read back the configured URLs and versions.
+
 **Examples:**
 
 ```bash  theme={null}
 asc apps update --id "APP_ID" --bundle-id "com.example.app"
 asc apps update --id "APP_ID" --primary-locale "en-US"
 asc apps update --id "APP_ID" --content-rights "DOES_NOT_USE_THIRD_PARTY_CONTENT"
+asc apps update --id "APP_ID" --subscription-status-url "https://example.com/notifications"
+asc apps update --id "APP_ID" --sandbox-subscription-status-url "https://example.com/sandbox-notifications"
 ```
 
 **Response:**
@@ -191,7 +353,7 @@ expanded on this page yet:
 * `asc apps ci-product` - View the CI product for an app
 * `asc apps remove-beta-testers` - Remove beta testers from an app
 * `asc apps subscription-grace-period` - Inspect an app's subscription grace period
-* `asc apps search-keywords` - Manage raw search-keyword relationships
+* `asc apps search-keywords` - Read app keywords and update version-localized keyword text
 * `asc apps app-encryption-declarations` - List app encryption declarations
 * `asc apps content-rights` - Manage content-rights declarations
 

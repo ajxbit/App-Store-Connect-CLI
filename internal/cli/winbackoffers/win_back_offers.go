@@ -2,6 +2,8 @@ package winbackoffers
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
@@ -85,8 +87,8 @@ func WinBackOffersCommand() *ffcli.Command {
 
 Examples:
   asc win-back-offers list --subscription-id "SUB_ID"
-  asc win-back-offers get --id "OFFER_ID"
-  asc win-back-offers create --subscription-id "SUB_ID" --reference-name "spring-2026" --offer-id "OFFER-1" --duration ONE_MONTH --offer-mode PAY_AS_YOU_GO --period-count 1 --eligibility-paid-months 6 --eligibility-last-subscribed-min 3 --eligibility-last-subscribed-max 12 --start-date "2026-02-01" --priority HIGH --price "PRICE_ID"
+  asc win-back-offers view --id "OFFER_ID"
+  asc win-back-offers create --subscription-id "SUB_ID" --reference-name "spring-2026" --offer-id "OFFER-1" --duration ONE_MONTH --offer-mode PAY_AS_YOU_GO --period-count 1 --eligibility-paid-months 6 --eligibility-last-subscribed-min 3 --eligibility-last-subscribed-max 12 --start-date "2026-02-01" --priority HIGH --price "SUBSCRIPTION_PRICE_POINT_ID"
   asc win-back-offers update --id "OFFER_ID" --priority NORMAL
   asc win-back-offers prices --id "OFFER_ID"`,
 		FlagSet:   fs,
@@ -111,7 +113,7 @@ Examples:
 func WinBackOffersListCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("list", flag.ExitOnError)
 
-	subscriptionID := fs.String("subscription-id", "", "Subscription ID, product ID, or exact current name")
+	subscriptionID := shared.BindResourceIDFlag(fs, "subscription-id", "subscriptions", "Subscription ID, product ID, or exact current name")
 	appID := fs.String("app", "", "App Store Connect app ID (or ASC_APP_ID env; required when --subscription-id uses a product ID or name)")
 	fields := fs.String("fields", "", "Fields to include: "+strings.Join(winBackOfferFieldsList(), ", "))
 	priceFields := fs.String("price-fields", "", "Price fields to include: "+strings.Join(winBackOfferPriceFieldsList(), ", "))
@@ -169,7 +171,7 @@ Examples:
 			id := strings.TrimSpace(*subscriptionID)
 			if id == "" && strings.TrimSpace(*next) == "" {
 				fmt.Fprintln(os.Stderr, "Error: --subscription-id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--subscription-id")
 			}
 
 			client, err := shared.GetASCClient()
@@ -232,17 +234,18 @@ Examples:
 // WinBackOffersGetCommand returns the win-back offers get subcommand.
 func WinBackOffersGetCommand() *ffcli.Command {
 	return shared.BuildIDGetCommand(shared.IDGetCommandConfig{
-		FlagSetName: "get",
-		Name:        "get",
-		ShortUsage:  "asc win-back-offers get --id OFFER_ID",
-		ShortHelp:   "Get a win-back offer by ID.",
-		LongHelp: `Get a win-back offer by ID.
+		FlagSetName: "view",
+		Name:        "view",
+		ShortUsage:  "asc win-back-offers view --id OFFER_ID",
+		ShortHelp:   "View a win-back offer by ID.",
+		LongHelp: `View a win-back offer by ID.
 
 Examples:
-  asc win-back-offers get --id "OFFER_ID"`,
+  asc win-back-offers view --id "OFFER_ID"`,
 		IDFlag:      "id",
 		IDUsage:     "Win-back offer ID",
-		ErrorPrefix: "win-back-offers get",
+		IDType:      "winBackOffers",
+		ErrorPrefix: "win-back-offers view",
 		Fetch: func(ctx context.Context, client *asc.Client, id string) (any, error) {
 			return client.GetWinBackOffer(ctx, id)
 		},
@@ -253,7 +256,7 @@ Examples:
 func WinBackOffersCreateCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("create", flag.ExitOnError)
 
-	subscriptionID := fs.String("subscription-id", "", "Subscription ID, product ID, or exact current name")
+	subscriptionID := shared.BindResourceIDFlag(fs, "subscription-id", "subscriptions", "Subscription ID, product ID, or exact current name")
 	appID := fs.String("app", "", "App Store Connect app ID (or ASC_APP_ID env; required when --subscription-id uses a product ID or name)")
 	referenceName := fs.String("reference-name", "", "Reference name")
 	offerID := fs.String("offer-id", "", "Offer ID")
@@ -273,7 +276,8 @@ func WinBackOffersCreateCommand() *ffcli.Command {
 	endDate := fs.String("end-date", "", "End date (YYYY-MM-DD)")
 	priority := fs.String("priority", "", "Offer priority: "+strings.Join(winBackOfferPriorityValues, ", "))
 	promotionIntent := fs.String("promotion-intent", "", "Promotion intent: "+strings.Join(winBackOfferPromotionIntentValues, ", "))
-	priceIDs := fs.String("price", "", "Win-back offer price ID(s), comma-separated")
+	priceIDs := shared.BindOnceCSVFlag(fs, "price", "Subscription price point ID(s), comma-separated (required for paid offer modes)")
+	territories := shared.BindOnceCSVFlag(fs, "territory", "Territories for FREE_TRIAL offers, comma-separated (accepts alpha-2, alpha-3, or exact English country names)")
 	output := shared.BindOutputFlags(fs)
 
 	return &ffcli.Command{
@@ -282,32 +286,37 @@ func WinBackOffersCreateCommand() *ffcli.Command {
 		ShortHelp:  "Create a win-back offer.",
 		LongHelp: `Create a win-back offer.
 
+Paid offer modes (PAY_AS_YOU_GO, PAY_UP_FRONT) require --price with
+subscription price point IDs. FREE_TRIAL offers carry no price point, so
+they require --territory instead.
+
 Examples:
-  asc win-back-offers create --subscription-id "SUB_ID" --reference-name "spring-2026" --offer-id "OFFER-1" --duration ONE_MONTH --offer-mode PAY_AS_YOU_GO --period-count 1 --eligibility-paid-months 6 --eligibility-last-subscribed-min 3 --eligibility-last-subscribed-max 12 --start-date "2026-02-01" --priority HIGH --price "PRICE_ID"`,
+  asc win-back-offers create --subscription-id "SUB_ID" --reference-name "spring-2026" --offer-id "OFFER-1" --duration ONE_MONTH --offer-mode PAY_AS_YOU_GO --period-count 1 --eligibility-paid-months 6 --eligibility-last-subscribed-min 3 --eligibility-last-subscribed-max 12 --start-date "2026-02-01" --priority HIGH --price "SUBSCRIPTION_PRICE_POINT_ID"
+  asc win-back-offers create --subscription-id "SUB_ID" --reference-name "spring-2026" --offer-id "OFFER-2" --duration ONE_MONTH --offer-mode FREE_TRIAL --period-count 1 --eligibility-paid-months 6 --eligibility-last-subscribed-min 3 --eligibility-last-subscribed-max 12 --start-date "2026-02-01" --priority HIGH --territory "USA,FRA"`,
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
 			subscription := strings.TrimSpace(*subscriptionID)
 			if subscription == "" {
 				fmt.Fprintln(os.Stderr, "Error: --subscription-id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--subscription-id")
 			}
 
 			name := strings.TrimSpace(*referenceName)
 			if name == "" {
 				fmt.Fprintln(os.Stderr, "Error: --reference-name is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--reference-name")
 			}
 
 			offer := strings.TrimSpace(*offerID)
 			if offer == "" {
 				fmt.Fprintln(os.Stderr, "Error: --offer-id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--offer-id")
 			}
 
 			if strings.TrimSpace(*duration) == "" {
 				fmt.Fprintln(os.Stderr, "Error: --duration is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--duration")
 			}
 			durationValue, err := normalizeWinBackOfferDuration(*duration)
 			if err != nil {
@@ -316,7 +325,7 @@ Examples:
 
 			if strings.TrimSpace(*offerMode) == "" {
 				fmt.Fprintln(os.Stderr, "Error: --offer-mode is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--offer-mode")
 			}
 			offerModeValue, err := normalizeWinBackOfferMode(*offerMode)
 			if err != nil {
@@ -325,7 +334,7 @@ Examples:
 
 			if !periodCount.set {
 				fmt.Fprintln(os.Stderr, "Error: --period-count is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--period-count")
 			}
 			if periodCount.value <= 0 {
 				return fmt.Errorf("win-back-offers create: --period-count must be greater than 0")
@@ -333,7 +342,7 @@ Examples:
 
 			if !eligibilityPaidMonths.set {
 				fmt.Fprintln(os.Stderr, "Error: --eligibility-paid-months is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--eligibility-paid-months")
 			}
 			if eligibilityPaidMonths.value < 0 {
 				return fmt.Errorf("win-back-offers create: --eligibility-paid-months must be 0 or greater")
@@ -341,7 +350,7 @@ Examples:
 
 			if !eligibilityLastSubscribedMin.set && !eligibilityLastSubscribedMax.set {
 				fmt.Fprintln(os.Stderr, "Error: --eligibility-last-subscribed-min or --eligibility-last-subscribed-max is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("")
 			}
 			if eligibilityLastSubscribedMin.set && eligibilityLastSubscribedMin.value < 0 {
 				return fmt.Errorf("win-back-offers create: eligibility last subscribed min must be 0 or greater")
@@ -363,7 +372,7 @@ Examples:
 
 			if strings.TrimSpace(*startDate) == "" {
 				fmt.Fprintln(os.Stderr, "Error: --start-date is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--start-date")
 			}
 			normalizedStartDate, err := shared.NormalizeDate(*startDate, "--start-date")
 			if err != nil {
@@ -372,17 +381,40 @@ Examples:
 
 			if strings.TrimSpace(*priority) == "" {
 				fmt.Fprintln(os.Stderr, "Error: --priority is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--priority")
 			}
 			priorityValue, err := normalizeWinBackOfferPriority(*priority)
 			if err != nil {
 				return fmt.Errorf("win-back-offers create: %w", err)
 			}
 
-			prices := shared.SplitCSV(*priceIDs)
-			if len(prices) == 0 {
-				fmt.Fprintln(os.Stderr, "Error: --price is required")
-				return flag.ErrHelp
+			isFreeTrial := offerModeValue == asc.SubscriptionOfferModeFreeTrial
+			priceProvided := false
+			fs.Visit(func(f *flag.Flag) { priceProvided = priceProvided || f.Name == "price" })
+			prices := shared.SplitCSV(priceIDs.String())
+			var freeTrialTerritories []string
+			if isFreeTrial {
+				if priceProvided {
+					fmt.Fprintln(os.Stderr, "Error: --price is not supported when --offer-mode is FREE_TRIAL; use --territory to choose territories")
+					return shared.WithDiagnostic(flag.ErrHelp, shared.DiagnosticConflictingInput, "--price")
+				}
+				freeTrialTerritories, err = shared.NormalizeASCTerritoryCSV(territories.String())
+				if err != nil {
+					return shared.UsageError(fmt.Sprintf("win-back-offers create: %v", err))
+				}
+				if len(freeTrialTerritories) == 0 {
+					fmt.Fprintln(os.Stderr, "Error: --territory is required when --offer-mode is FREE_TRIAL")
+					return shared.MissingRequiredUsageError("--territory")
+				}
+			} else {
+				if strings.TrimSpace(territories.String()) != "" {
+					fmt.Fprintln(os.Stderr, "Error: --territory is only supported when --offer-mode is FREE_TRIAL")
+					return shared.WithDiagnostic(flag.ErrHelp, shared.DiagnosticConflictingInput, "--territory")
+				}
+				if len(prices) == 0 {
+					fmt.Fprintln(os.Stderr, "Error: --price is required")
+					return shared.MissingRequiredUsageError("--price")
+				}
 			}
 
 			if eligibilityWaitMonths.set && eligibilityWaitMonths.value < 0 {
@@ -406,12 +438,58 @@ Examples:
 				promotionIntentValue = &intent
 			}
 
-			priceData := make([]asc.ResourceData, 0, len(prices))
-			for _, priceID := range prices {
+			// Win-back offer prices don't exist before the offer does, so
+			// inline-create them in `included` with temp `${price-N}` IDs.
+			// Paid modes pair each entry with territory (decoded from the
+			// price point ID itself) + subscriptionPricePoint relationships;
+			// FREE_TRIAL entries carry only the territory because the API
+			// rejects price points on free offers.
+			var priceData []asc.ResourceData
+			var includedPrices []asc.WinBackOfferPriceInlineCreate
+			appendInlinePrice := func(relationships *asc.WinBackOfferPriceRelationships) {
+				tempID := fmt.Sprintf("${price-%d}", len(priceData)+1)
 				priceData = append(priceData, asc.ResourceData{
 					Type: asc.ResourceTypeWinBackOfferPrices,
-					ID:   priceID,
+					ID:   tempID,
 				})
+				includedPrices = append(includedPrices, asc.WinBackOfferPriceInlineCreate{
+					Type:          asc.ResourceTypeWinBackOfferPrices,
+					ID:            tempID,
+					Relationships: relationships,
+				})
+			}
+			if isFreeTrial {
+				for _, territory := range freeTrialTerritories {
+					appendInlinePrice(&asc.WinBackOfferPriceRelationships{
+						Territory: asc.Relationship{
+							Data: asc.ResourceData{
+								Type: asc.ResourceTypeTerritories,
+								ID:   territory,
+							},
+						},
+					})
+				}
+			} else {
+				for _, priceID := range prices {
+					territory, err := territoryFromPricePointID(priceID)
+					if err != nil {
+						return shared.UsageError(fmt.Sprintf("win-back-offers create: %v", err))
+					}
+					appendInlinePrice(&asc.WinBackOfferPriceRelationships{
+						Territory: asc.Relationship{
+							Data: asc.ResourceData{
+								Type: asc.ResourceTypeTerritories,
+								ID:   territory,
+							},
+						},
+						SubscriptionPricePoint: &asc.Relationship{
+							Data: asc.ResourceData{
+								Type: asc.ResourceTypeSubscriptionPricePoints,
+								ID:   priceID,
+							},
+						},
+					})
+				}
 			}
 
 			var waitBetween *int
@@ -470,6 +548,7 @@ Examples:
 						Prices: asc.RelationshipList{Data: priceData},
 					},
 				},
+				Included: includedPrices,
 			}
 
 			resp, err := client.CreateWinBackOffer(requestCtx, req)
@@ -486,7 +565,7 @@ Examples:
 func WinBackOffersUpdateCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("update", flag.ExitOnError)
 
-	id := fs.String("id", "", "Win-back offer ID")
+	id := shared.BindResourceIDFlag(fs, "id", "winBackOffers", "Win-back offer ID")
 	var eligibilityPaidMonths optionalInt
 	fs.Var(&eligibilityPaidMonths, "eligibility-paid-months", "Paid subscription duration in months")
 	var eligibilityLastSubscribedMin optionalInt
@@ -516,7 +595,7 @@ Examples:
 			trimmedID := strings.TrimSpace(*id)
 			if trimmedID == "" {
 				fmt.Fprintln(os.Stderr, "Error: --id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--id")
 			}
 
 			hasUpdates := false
@@ -597,7 +676,7 @@ Examples:
 
 			if !hasUpdates {
 				fmt.Fprintln(os.Stderr, "Error: at least one update flag is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("")
 			}
 
 			client, err := shared.GetASCClient()
@@ -622,7 +701,7 @@ Examples:
 func WinBackOffersDeleteCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("delete", flag.ExitOnError)
 
-	id := fs.String("id", "", "Win-back offer ID")
+	id := shared.BindResourceIDFlag(fs, "id", "winBackOffers", "Win-back offer ID")
 	confirm := fs.Bool("confirm", false, "Confirm deletion")
 	output := shared.BindOutputFlags(fs)
 
@@ -640,11 +719,11 @@ Examples:
 			trimmedID := strings.TrimSpace(*id)
 			if trimmedID == "" {
 				fmt.Fprintln(os.Stderr, "Error: --id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--id")
 			}
 			if !*confirm {
 				fmt.Fprintln(os.Stderr, "Error: --confirm is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--confirm")
 			}
 
 			client, err := shared.GetASCClient()
@@ -673,7 +752,7 @@ Examples:
 func WinBackOffersPricesCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("prices", flag.ExitOnError)
 
-	id := fs.String("id", "", "Win-back offer ID")
+	id := shared.BindResourceIDFlag(fs, "id", "winBackOffers", "Win-back offer ID")
 	territories := fs.String("territory", "", "Territory inputs, comma-separated (accepts alpha-2, alpha-3, or exact English country names)")
 	fields := fs.String("fields", "", "Fields to include: "+strings.Join(winBackOfferPriceFieldsList(), ", "))
 	territoryFields := fs.String("territory-fields", "", "Territory fields to include: "+strings.Join(winBackOfferTerritoryFieldsList(), ", "))
@@ -706,7 +785,7 @@ Examples:
 			trimmedID := strings.TrimSpace(*id)
 			if trimmedID == "" && strings.TrimSpace(*next) == "" {
 				fmt.Fprintln(os.Stderr, "Error: --id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--id")
 			}
 
 			fieldsValue, err := normalizeWinBackOfferPriceFields(*fields, "--fields")
@@ -797,6 +876,7 @@ Examples:
   asc win-back-offers prices-links --id "OFFER_ID" --paginate`,
 		ParentFlag:  "id",
 		ParentUsage: "Win-back offer ID",
+		ParentType:  "winBackOffers",
 		LimitMax:    winBackOffersMaxLimit,
 		ErrorPrefix: "win-back-offers prices-links",
 		FetchPage: func(ctx context.Context, client *asc.Client, offerID string, limit int, next string) (asc.PaginatedResponse, error) {
@@ -813,7 +893,7 @@ Examples:
 func WinBackOffersRelationshipsCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("links", flag.ExitOnError)
 
-	subscriptionID := fs.String("subscription-id", "", "Subscription ID, product ID, or exact current name")
+	subscriptionID := shared.BindResourceIDFlag(fs, "subscription-id", "subscriptions", "Subscription ID, product ID, or exact current name")
 	appID := fs.String("app", "", "App Store Connect app ID (or ASC_APP_ID env; required when --subscription-id uses a product ID or name)")
 	limit := fs.Int("limit", 0, fmt.Sprintf("Maximum results per page (1-%d)", winBackOffersMaxLimit))
 	next := fs.String("next", "", "Fetch next page using a links.next URL")
@@ -1024,4 +1104,22 @@ func winBackOfferSubscriptionPricePointFieldsList() []string {
 
 func winBackOfferPriceIncludeList() []string {
 	return []string{"territory", "subscriptionPricePoint"}
+}
+
+// territoryFromPricePointID extracts the territory code embedded in a
+// subscriptionPricePoint ID. Price point IDs are unpadded base64 of
+// {"s":"<subscriptionID>","t":"<territory>","p":"<pricePoint>"}.
+func territoryFromPricePointID(id string) (string, error) {
+	trimmed := strings.TrimRight(strings.TrimSpace(id), "=")
+	decoded, err := base64.RawStdEncoding.DecodeString(trimmed)
+	if err != nil {
+		return "", fmt.Errorf("--price %q is not a subscription price point ID: %w", id, err)
+	}
+	var payload struct {
+		Territory string `json:"t"`
+	}
+	if err := json.Unmarshal(decoded, &payload); err != nil || payload.Territory == "" {
+		return "", fmt.Errorf("--price %q does not decode to a subscription price point ID", id)
+	}
+	return payload.Territory, nil
 }

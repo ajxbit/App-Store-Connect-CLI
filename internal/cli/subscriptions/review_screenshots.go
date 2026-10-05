@@ -2,8 +2,10 @@ package subscriptions
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"time"
@@ -27,7 +29,7 @@ func SubscriptionsReviewScreenshotsCommand() *ffcli.Command {
 		LongHelp: `Manage subscription App Store review screenshots.
 
 Examples:
-  asc subscriptions review-screenshots get --screenshot-id "SHOT_ID"
+  asc subscriptions review-screenshots view --screenshot-id "SHOT_ID"
   asc subscriptions review-screenshots create --subscription-id "SUB_ID" --file "./screenshot.png"`,
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
@@ -45,39 +47,48 @@ Examples:
 
 // SubscriptionsReviewScreenshotsGetCommand returns the review screenshots get subcommand.
 func SubscriptionsReviewScreenshotsGetCommand() *ffcli.Command {
-	fs := flag.NewFlagSet("review-screenshots get", flag.ExitOnError)
+	fs := flag.NewFlagSet("review-screenshots view", flag.ExitOnError)
 
-	screenshotID := fs.String("screenshot-id", "", "Review screenshot ID")
+	screenshotID := shared.BindResourceIDFlag(fs, "screenshot-id", "subscriptionAppStoreReviewScreenshots", "Review screenshot ID")
+	subscriptionFields := fs.String("subscription-fields", "", "Included subscription fields (comma-separated)")
 	output := shared.BindOutputFlags(fs)
 
 	return &ffcli.Command{
-		Name:       "get",
-		ShortUsage: "asc subscriptions review-screenshots get --screenshot-id \"SHOT_ID\"",
-		ShortHelp:  "Get a review screenshot by ID.",
-		LongHelp: `Get a review screenshot by ID.
+		Name:       "view",
+		ShortUsage: "asc subscriptions review-screenshots view --screenshot-id \"SHOT_ID\"",
+		ShortHelp:  "View a review screenshot by ID.",
+		LongHelp: `View a review screenshot by ID.
 
 Examples:
-  asc subscriptions review-screenshots get --screenshot-id "SHOT_ID"`,
+  asc subscriptions review-screenshots view --screenshot-id "SHOT_ID"`,
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
+			selectedSubscriptionFields, err := normalizeSparseFieldsFlag(fs, "", "subscription-fields", *subscriptionFields, subscriptionFieldsList())
+			if err != nil {
+				return err
+			}
 			id := strings.TrimSpace(*screenshotID)
 			if id == "" {
 				fmt.Fprintln(os.Stderr, "Error: --screenshot-id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--screenshot-id")
 			}
 
 			client, err := shared.GetASCClient()
 			if err != nil {
-				return fmt.Errorf("subscriptions review-screenshots get: %w", err)
+				return fmt.Errorf("subscriptions review-screenshots view: %w", err)
 			}
 
 			requestCtx, cancel := shared.ContextWithTimeout(ctx)
 			defer cancel()
 
-			resp, err := client.GetSubscriptionAppStoreReviewScreenshot(requestCtx, id)
+			resp, err := client.GetSubscriptionAppStoreReviewScreenshot(
+				requestCtx, id,
+				asc.WithSubscriptionAppStoreReviewScreenshotSubscriptionFields(selectedSubscriptionFields),
+				asc.WithSubscriptionAppStoreReviewScreenshotInclude(includeRelationshipForFields(selectedSubscriptionFields, "subscription")),
+			)
 			if err != nil {
-				return fmt.Errorf("subscriptions review-screenshots get: failed to fetch: %w", err)
+				return fmt.Errorf("subscriptions review-screenshots view: failed to fetch: %w", err)
 			}
 
 			return shared.PrintOutput(resp, *output.Output, *output.Pretty)
@@ -89,7 +100,7 @@ Examples:
 func SubscriptionsReviewScreenshotsCreateCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("review-screenshots create", flag.ExitOnError)
 
-	subscriptionID := fs.String("subscription-id", "", "Subscription ID, product ID, or exact current name")
+	subscriptionID := shared.BindResourceIDFlag(fs, "subscription-id", "subscriptions", "Subscription ID, product ID, or exact current name")
 	appID := addSubscriptionLookupAppFlag(fs)
 	filePath := fs.String("file", "", "Path to review screenshot file")
 	output := shared.BindOutputFlags(fs)
@@ -100,28 +111,53 @@ func SubscriptionsReviewScreenshotsCreateCommand() *ffcli.Command {
 		ShortHelp:  "Upload a review screenshot for a subscription.",
 		LongHelp: `Upload a review screenshot for a subscription.
 
+The file must be a PNG or JPEG named .png, .jpg, or .jpeg; any other file is
+rejected before anything is uploaded. The command also warns, and still
+uploads, when the size matches no documented App Store screenshot size (such
+as 1290x2796 for iPhone), the image has an alpha channel, or the image data
+does not fully decode. App Store Connect may still reject such an image at
+delivery; if it does, delete the failed screenshot and upload a corrected file:
+  asc subscriptions review-screenshots delete --screenshot-id "SHOT_ID" --confirm
+
 Examples:
   asc subscriptions review-screenshots create --subscription-id "SUB_ID" --file "./screenshot.png"`,
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
+			if len(args) > 0 {
+				return shared.UsageErrorf("subscriptions review screenshots create does not accept positional arguments: %s", strings.Join(args, " "))
+			}
 			id := strings.TrimSpace(*subscriptionID)
 			if id == "" {
 				fmt.Fprintln(os.Stderr, "Error: --subscription-id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--subscription-id")
 			}
 
 			pathValue := strings.TrimSpace(*filePath)
 			if pathValue == "" {
 				fmt.Fprintln(os.Stderr, "Error: --file is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--file")
+			}
+			if _, err := shared.ValidateOutputFormat(*output.Output, *output.Pretty); err != nil {
+				return shared.UsageError(err.Error())
 			}
 
-			file, info, err := openSubscriptionImageFile(pathValue)
+			snapshot, info, cleanupSnapshot, err := snapshotSubscriptionReviewScreenshot(pathValue)
 			if err != nil {
-				return fmt.Errorf("subscriptions review-screenshots create: %w", err)
+				err = fmt.Errorf("subscriptions review-screenshots create: %w", err)
+				if errors.Is(err, os.ErrNotExist) {
+					return shared.WithDiagnostic(shared.NewValidationError(err), shared.DiagnosticFileNotFound, "--file")
+				}
+				return err
 			}
-			defer file.Close()
+			defer cleanupSnapshot()
+			if err := shared.PreflightReviewScreenshot(pathValue, snapshot, info.Size()); err != nil {
+				return shared.ReviewScreenshotUsageError("--file", shared.RewriteUsageMessage(ctx, "subscriptions review-screenshots create: "+err.Error()))
+			}
+			checksum, err := asc.ComputeChecksumFromReader(io.NewSectionReader(snapshot, 0, info.Size()), asc.ChecksumAlgorithmMD5)
+			if err != nil {
+				return fmt.Errorf("subscriptions review-screenshots create: checksum failed: %w", err)
+			}
 
 			client, err := shared.GetASCClient()
 			if err != nil {
@@ -133,43 +169,9 @@ Examples:
 				return err
 			}
 
-			requestCtx, cancel := shared.ContextWithUploadTimeout(ctx)
-			defer cancel()
-
-			resp, err := client.CreateSubscriptionAppStoreReviewScreenshot(requestCtx, id, info.Name(), info.Size())
+			finalResp, err := createOrResumeSubscriptionReviewScreenshot(ctx, client, id, snapshot, info, checksum.Hash)
 			if err != nil {
-				return fmt.Errorf("subscriptions review-screenshots create: failed to create: %w", err)
-			}
-			if resp == nil || len(resp.Data.Attributes.UploadOperations) == 0 {
-				return fmt.Errorf("subscriptions review-screenshots create: no upload operations returned")
-			}
-
-			if err := asc.UploadAssetFromFile(requestCtx, file, info.Size(), resp.Data.Attributes.UploadOperations); err != nil {
-				return fmt.Errorf("subscriptions review-screenshots create: upload failed: %w", err)
-			}
-
-			checksum, err := asc.ComputeFileChecksum(pathValue, asc.ChecksumAlgorithmMD5)
-			if err != nil {
-				return fmt.Errorf("subscriptions review-screenshots create: checksum failed: %w", err)
-			}
-
-			uploaded := true
-			updateAttrs := asc.SubscriptionAppStoreReviewScreenshotUpdateAttributes{
-				SourceFileChecksum: &checksum.Hash,
-				Uploaded:           &uploaded,
-			}
-
-			if _, err := client.UpdateSubscriptionAppStoreReviewScreenshot(requestCtx, resp.Data.ID, updateAttrs); err != nil {
-				return fmt.Errorf("subscriptions review-screenshots create: failed to commit upload: %w", err)
-			}
-
-			// Verify asset delivery — poll until COMPLETE or FAILED
-			screenshotID := resp.Data.ID
-			verifyCtx, verifyCancel := shared.ContextWithUploadTimeout(ctx)
-			defer verifyCancel()
-			finalResp, verifyErr := waitForSubscriptionReviewScreenshotDelivery(verifyCtx, client, screenshotID)
-			if verifyErr != nil {
-				return fmt.Errorf("subscriptions review-screenshots create: %w", verifyErr)
+				return fmt.Errorf("subscriptions review-screenshots create: %w", err)
 			}
 
 			return shared.PrintOutput(finalResp, *output.Output, *output.Pretty)
@@ -181,7 +183,7 @@ Examples:
 func SubscriptionsReviewScreenshotsUpdateCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("review-screenshots update", flag.ExitOnError)
 
-	screenshotID := fs.String("screenshot-id", "", "Review screenshot ID")
+	screenshotID := shared.BindResourceIDFlag(fs, "screenshot-id", "subscriptionAppStoreReviewScreenshots", "Review screenshot ID")
 	checksum := fs.String("checksum", "", "Source file checksum (MD5)")
 	var uploaded shared.OptionalBool
 	fs.Var(&uploaded, "uploaded", "Mark upload complete: true or false")
@@ -201,13 +203,13 @@ Examples:
 			id := strings.TrimSpace(*screenshotID)
 			if id == "" {
 				fmt.Fprintln(os.Stderr, "Error: --screenshot-id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--screenshot-id")
 			}
 
 			checksumValue := strings.TrimSpace(*checksum)
 			if checksumValue == "" && !uploaded.IsSet() {
 				fmt.Fprintln(os.Stderr, "Error: at least one update flag is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("")
 			}
 
 			client, err := shared.GetASCClient()
@@ -241,7 +243,7 @@ Examples:
 func SubscriptionsReviewScreenshotsDeleteCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("review-screenshots delete", flag.ExitOnError)
 
-	screenshotID := fs.String("screenshot-id", "", "Review screenshot ID")
+	screenshotID := shared.BindResourceIDFlag(fs, "screenshot-id", "subscriptionAppStoreReviewScreenshots", "Review screenshot ID")
 	confirm := fs.Bool("confirm", false, "Confirm deletion")
 	output := shared.BindOutputFlags(fs)
 
@@ -259,11 +261,11 @@ Examples:
 			id := strings.TrimSpace(*screenshotID)
 			if id == "" {
 				fmt.Fprintln(os.Stderr, "Error: --screenshot-id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--screenshot-id")
 			}
 			if !*confirm {
 				fmt.Fprintln(os.Stderr, "Error: --confirm is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--confirm")
 			}
 
 			client, err := shared.GetASCClient()
@@ -286,10 +288,12 @@ Examples:
 
 // waitForSubscriptionReviewScreenshotDelivery polls until the screenshot reaches
 // a terminal delivery state and returns the successful response for output.
-func waitForSubscriptionReviewScreenshotDelivery(ctx context.Context, client *asc.Client, screenshotID string) (*asc.SubscriptionAppStoreReviewScreenshotResponse, error) {
+func waitForSubscriptionReviewScreenshotDelivery(ctx context.Context, client *asc.Client, screenshotID, expectedChecksum string) (*asc.SubscriptionAppStoreReviewScreenshotResponse, error) {
 	var verifiedResp *asc.SubscriptionAppStoreReviewScreenshotResponse
 	_, err := asc.PollUntil(ctx, reviewScreenshotPollInterval, func(ctx context.Context) (struct{}, bool, error) {
-		resp, err := client.GetSubscriptionAppStoreReviewScreenshot(ctx, screenshotID)
+		resp, err := shared.RetryReadWithFreshTimeout(ctx, func(requestCtx context.Context) (*asc.SubscriptionAppStoreReviewScreenshotResponse, error) {
+			return client.GetSubscriptionAppStoreReviewScreenshot(requestCtx, screenshotID)
+		})
 		if err != nil {
 			return struct{}{}, false, err
 		}
@@ -297,22 +301,14 @@ func waitForSubscriptionReviewScreenshotDelivery(ctx context.Context, client *as
 		if state != nil && state.State != nil {
 			switch strings.ToUpper(*state.State) {
 			case "COMPLETE":
+				actualChecksum := strings.TrimSpace(resp.Data.Attributes.SourceFileChecksum)
+				if !strings.EqualFold(actualChecksum, strings.TrimSpace(expectedChecksum)) {
+					return struct{}{}, false, newSubscriptionReviewScreenshotConflictError("screenshot %s checksum changed while waiting for delivery", screenshotID)
+				}
 				verifiedResp = resp
 				return struct{}{}, true, nil
 			case "FAILED":
-				errMsgs := make([]string, 0, len(state.Errors))
-				for _, e := range state.Errors {
-					if e.Code != "" {
-						errMsgs = append(errMsgs, e.Code)
-					} else if e.Message != "" {
-						errMsgs = append(errMsgs, e.Message)
-					}
-				}
-				detail := strings.Join(errMsgs, "; ")
-				if detail == "" {
-					detail = "unknown error"
-				}
-				return struct{}{}, false, fmt.Errorf("screenshot %s delivery failed: %s", screenshotID, detail)
+				return struct{}{}, false, subscriptionReviewScreenshotDeliveryError(resp)
 			}
 		}
 		return struct{}{}, false, nil

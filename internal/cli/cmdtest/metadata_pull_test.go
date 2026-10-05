@@ -12,35 +12,39 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/cli/shared"
 )
 
 func TestMetadataPullValidationErrors(t *testing.T) {
 	t.Setenv("ASC_APP_ID", "")
 
 	tests := []struct {
-		name    string
-		args    []string
-		wantErr string
+		name          string
+		args          []string
+		wantErr       string
+		wantStderr    string
+		wantParameter string
+		wantConcise   bool
 	}{
 		{
-			name:    "missing app",
-			args:    []string{"metadata", "pull", "--version", "1.2.3", "--dir", "./metadata"},
-			wantErr: "Error: --app is required (or set ASC_APP_ID)",
+			name:          "missing app",
+			args:          []string{"metadata", "pull", "--version", "1.2.3", "--dir", "./metadata"},
+			wantStderr:    "Error: --app is required (or set ASC_APP_ID)\n",
+			wantParameter: "--app",
+			wantConcise:   true,
 		},
 		{
-			name:    "missing version",
-			args:    []string{"metadata", "pull", "--app", "app-1", "--dir", "./metadata"},
-			wantErr: "Error: --version is required",
-		},
-		{
-			name:    "missing dir",
-			args:    []string{"metadata", "pull", "--app", "app-1", "--version", "1.2.3"},
-			wantErr: "Error: --dir is required",
+			name:          "missing dir",
+			args:          []string{"metadata", "pull", "--app", "app-1", "--version", "1.2.3"},
+			wantStderr:    "Error: --dir is required\n",
+			wantParameter: "--dir",
+			wantConcise:   true,
 		},
 		{
 			name:    "invalid include",
 			args:    []string{"metadata", "pull", "--app", "app-1", "--version", "1.2.3", "--dir", "./metadata", "--include", "screenshots"},
-			wantErr: "Error: --include supports only \"localizations\"",
+			wantErr: "Error: --include supports localizations, app-clip, and previews",
 		},
 	}
 
@@ -57,13 +61,24 @@ func TestMetadataPullValidationErrors(t *testing.T) {
 				runErr = root.Run(context.Background())
 			})
 
-			if !errors.Is(runErr, flag.ErrHelp) {
+			if test.wantConcise {
+				if errors.Is(runErr, flag.ErrHelp) || !shared.IsReportedUsageError(runErr) {
+					t.Fatalf("expected reported usage error without ErrHelp, got %v", runErr)
+				}
+				diagnostic, ok := shared.DiagnosticFromError(runErr)
+				if !ok || diagnostic.Code != shared.DiagnosticRequiredInputMissing || diagnostic.Parameter != test.wantParameter {
+					t.Fatalf("diagnostic = %+v, found=%t", diagnostic, ok)
+				}
+			} else if !errors.Is(runErr, flag.ErrHelp) {
 				t.Fatalf("expected ErrHelp, got %v", runErr)
 			}
 			if stdout != "" {
 				t.Fatalf("expected empty stdout, got %q", stdout)
 			}
-			if !strings.Contains(stderr, test.wantErr) {
+			if test.wantConcise && stderr != test.wantStderr {
+				t.Fatalf("stderr = %q, want %q", stderr, test.wantStderr)
+			}
+			if !test.wantConcise && !strings.Contains(stderr, test.wantErr) {
 				t.Fatalf("expected %q in stderr, got %q", test.wantErr, stderr)
 			}
 		})
@@ -107,7 +122,8 @@ func TestMetadataPullWritesCanonicalLayout(t *testing.T) {
 			body := `{
 				"data":[
 					{"type":"appInfoLocalizations","id":"appinfo-loc-1","attributes":{"locale":"en-US","name":"App Name","subtitle":"Great app"}},
-					{"type":"appInfoLocalizations","id":"appinfo-loc-2","attributes":{"locale":"ja","name":"アプリ"}}
+					{"type":"appInfoLocalizations","id":"appinfo-loc-2","attributes":{"locale":"bn-BD","name":"Bangla App"}},
+					{"type":"appInfoLocalizations","id":"appinfo-loc-3","attributes":{"locale":"ja","name":"アプリ"}}
 				],
 				"links":{"next":""}
 			}`
@@ -120,7 +136,8 @@ func TestMetadataPullWritesCanonicalLayout(t *testing.T) {
 			body := `{
 				"data":[
 					{"type":"appStoreVersionLocalizations","id":"version-loc-1","attributes":{"locale":"en-US","description":"English description","keywords":"one,two","whatsNew":"Bug fixes"}},
-					{"type":"appStoreVersionLocalizations","id":"version-loc-2","attributes":{"locale":"ja","description":"日本語説明"}}
+					{"type":"appStoreVersionLocalizations","id":"version-loc-2","attributes":{"locale":"bn-BD","description":"Bangla description"}},
+					{"type":"appStoreVersionLocalizations","id":"version-loc-3","attributes":{"locale":"ja","description":"日本語説明"}}
 				],
 				"links":{"next":""}
 			}`
@@ -157,8 +174,10 @@ func TestMetadataPullWritesCanonicalLayout(t *testing.T) {
 	}
 
 	paths := []string{
+		filepath.Join(outputDir, "app-info", "bn-BD.json"),
 		filepath.Join(outputDir, "app-info", "en-US.json"),
 		filepath.Join(outputDir, "app-info", "ja.json"),
+		filepath.Join(outputDir, "version", "1.2.3", "bn-BD.json"),
 		filepath.Join(outputDir, "version", "1.2.3", "en-US.json"),
 		filepath.Join(outputDir, "version", "1.2.3", "ja.json"),
 	}
@@ -197,11 +216,11 @@ func TestMetadataPullWritesCanonicalLayout(t *testing.T) {
 		t.Fatalf("unmarshal output: %v\nstdout=%q", err, stdout)
 	}
 
-	if payload.FileCount != 4 {
-		t.Fatalf("expected fileCount 4, got %d", payload.FileCount)
+	if payload.FileCount != 6 {
+		t.Fatalf("expected fileCount 6, got %d", payload.FileCount)
 	}
-	if len(payload.Files) != 4 {
-		t.Fatalf("expected 4 files in output, got %d", len(payload.Files))
+	if len(payload.Files) != 6 {
+		t.Fatalf("expected 6 files in output, got %d", len(payload.Files))
 	}
 	sortedFiles := append([]string(nil), payload.Files...)
 	slices.Sort(sortedFiles)
@@ -355,8 +374,11 @@ func TestMetadataPullRejectsAmbiguousVersionWithoutPlatform(t *testing.T) {
 	if stdout != "" {
 		t.Fatalf("expected empty stdout, got %q", stdout)
 	}
-	if !strings.Contains(stderr, `Error: --platform is required when multiple app store versions match --version "1.2.3"`) {
+	if !strings.Contains(stderr, `Error: 2 app store versions match version "1.2.3"; pass --platform with one of:`) {
 		t.Fatalf("expected ambiguous-version error, got %q", stderr)
+	}
+	if !strings.Contains(stderr, "\n  IOS     version version-ios\n  MAC_OS  version version-mac\n") {
+		t.Fatalf("expected platform candidates in stderr, got %q", stderr)
 	}
 }
 

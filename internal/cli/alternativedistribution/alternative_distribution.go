@@ -18,12 +18,18 @@ func AlternativeDistributionCommand() *ffcli.Command {
 		ShortHelp:  "Manage alternative distribution resources.",
 		LongHelp: `Manage alternative distribution resources.
 
+Agent guidance:
+  If Apple requires the Alternative Distribution Addendum for EU Apps, tell the
+  Account Holder to review and sign it in App Store Connect. The App Store
+  Connect API and asc cannot accept or sign this agreement:
+  https://appstoreconnect.apple.com/agreements/#/
+
 Examples:
   asc alternative-distribution domains list
   asc alternative-distribution domains create --domain "example.com" --reference-name "Example"
   asc alternative-distribution keys list
   asc alternative-distribution keys create --app "APP_ID" --public-key-path "./key.pem"
-  asc alternative-distribution packages get --package-id "PACKAGE_ID"`,
+  asc alternative-distribution packages view --package-id "PACKAGE_ID"`,
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
 		Subcommands: []*ffcli.Command{

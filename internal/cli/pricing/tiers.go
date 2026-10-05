@@ -45,7 +45,7 @@ Examples:
 			resolvedAppID := shared.ResolveAppID(*appID)
 			if resolvedAppID == "" {
 				fmt.Fprintln(os.Stderr, "Error: --app is required (or set ASC_APP_ID)")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--app")
 			}
 
 			territoryInput := strings.TrimSpace(*territory)
@@ -70,7 +70,8 @@ Examples:
 				return fmt.Errorf("pricing tiers: %w", err)
 			}
 
-			return shared.PrintOutputWithRenderers(tiers, *output.Output, *output.Pretty,
+			return shared.PrintOutputWithRenderers(
+				tiers, *output.Output, *output.Pretty,
 				func() error {
 					return printTiersTable(tiers)
 				},

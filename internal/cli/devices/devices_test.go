@@ -21,6 +21,22 @@ func TestDevicesRegisterCommand_MissingName(t *testing.T) {
 	}
 }
 
+func TestDevicesCommand_BatchExampleConfirmsMutation(t *testing.T) {
+	cmd := DevicesCommand()
+
+	if !strings.Contains(cmd.LongHelp, `asc devices register-batch --file "./devices.txt" --confirm`) {
+		t.Fatalf("devices help must show a runnable confirmed batch example, got:\n%s", cmd.LongHelp)
+	}
+}
+
+func TestDevicesRegisterBatchHelpDoesNotDuplicateContinueDefault(t *testing.T) {
+	cmd := DevicesRegisterBatchCommand()
+	usage := cmd.FlagSet.Lookup("continue-on-error").Usage
+	if strings.Contains(usage, "default true") {
+		t.Fatalf("continue-on-error usage must leave default rendering to the shared formatter, got %q", usage)
+	}
+}
+
 func TestDevicesRegisterCommand_MissingUDID(t *testing.T) {
 	cmd := DevicesRegisterCommand()
 
@@ -78,6 +94,43 @@ func TestDevicesUpdateCommand_MissingStatus(t *testing.T) {
 
 	if err := cmd.Exec(context.Background(), []string{}); !errors.Is(err, flag.ErrHelp) {
 		t.Fatalf("expected flag.ErrHelp when --status is missing, got %v", err)
+	}
+}
+
+func TestDevicePlatformContract(t *testing.T) {
+	if got := strings.Join(devicePlatformList(), ", "); got != "IOS, MAC_OS, UNIVERSAL" {
+		t.Fatalf("devicePlatformList() = %q, want %q", got, "IOS, MAC_OS, UNIVERSAL")
+	}
+
+	tests := []struct {
+		name    string
+		value   string
+		want    string
+		wantErr string
+	}{
+		{name: "iOS", value: " ios ", want: "IOS"},
+		{name: "macOS", value: "mac_os", want: "MAC_OS"},
+		{name: "universal", value: "universal", want: "UNIVERSAL"},
+		{name: "reject tvOS", value: "TV_OS", wantErr: "--platform must be one of: IOS, MAC_OS, UNIVERSAL"},
+		{name: "reject visionOS", value: "VISION_OS", wantErr: "--platform must be one of: IOS, MAC_OS, UNIVERSAL"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := normalizeDevicePlatform(tt.value)
+			if tt.wantErr != "" {
+				if err == nil || err.Error() != tt.wantErr {
+					t.Fatalf("normalizeDevicePlatform(%q) error = %v, want %q", tt.value, err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("normalizeDevicePlatform(%q) error = %v", tt.value, err)
+			}
+			if got != tt.want {
+				t.Fatalf("normalizeDevicePlatform(%q) = %q, want %q", tt.value, got, tt.want)
+			}
+		})
 	}
 }
 

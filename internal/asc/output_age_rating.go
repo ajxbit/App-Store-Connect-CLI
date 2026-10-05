@@ -25,6 +25,10 @@ func ageRatingFields(resp *AgeRatingDeclarationResponse) []ageRatingField {
 		return nil
 	}
 	attrs := resp.Data.Attributes
+	var gracNumber *string
+	if attrs.GracRatingClassificationNumber != nil {
+		gracNumber = attrs.GracRatingClassificationNumber.Value
+	}
 	fields := []ageRatingField{
 		{Name: "ID", Value: fallbackValue(resp.Data.ID)},
 		{Name: "Type", Value: fallbackValue(string(resp.Data.Type))},
@@ -36,6 +40,8 @@ func ageRatingFields(resp *AgeRatingDeclarationResponse) []ageRatingField {
 		{Name: "Messaging and Chat", Value: formatOptionalBool(attrs.MessagingAndChat)},
 		{Name: "Parental Controls", Value: formatOptionalBool(attrs.ParentalControls)},
 		{Name: "Age Assurance", Value: formatOptionalBool(attrs.AgeAssurance)},
+		{Name: "Social Media", Value: formatOptionalBool(nullableBoolPointer(attrs.SocialMedia))},
+		{Name: "Social Media Age Restricted", Value: formatOptionalBool(nullableBoolPointer(attrs.SocialMediaAgeRestricted))},
 		{Name: "Unrestricted Web Access", Value: formatOptionalBool(attrs.UnrestrictedWebAccess)},
 		{Name: "User-Generated Content", Value: formatOptionalBool(attrs.UserGeneratedContent)},
 		// Enum content descriptors
@@ -57,6 +63,7 @@ func ageRatingFields(resp *AgeRatingDeclarationResponse) []ageRatingField {
 		{Name: "Age Rating Override", Value: formatOptionalString(attrs.AgeRatingOverride)},
 		{Name: "Age Rating Override V2", Value: formatOptionalString(attrs.AgeRatingOverrideV2)},
 		{Name: "Korea Age Rating Override", Value: formatOptionalString(attrs.KoreaAgeRatingOverride)},
+		{Name: "GRAC Rating Classification Number", Value: formatOptionalString(gracNumber)},
 		{Name: "Developer Age Rating Info URL", Value: formatOptionalString(attrs.DeveloperAgeRatingInfoURL)},
 	}
 	return fields
@@ -67,6 +74,13 @@ func formatOptionalBool(value *bool) string {
 		return "-"
 	}
 	return strconv.FormatBool(*value)
+}
+
+func nullableBoolPointer(value *NullableBool) *bool {
+	if value == nil {
+		return nil
+	}
+	return value.Value
 }
 
 func formatOptionalString(value *string) string {

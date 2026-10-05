@@ -4,6 +4,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"math"
 	"os"
 	"sort"
 	"strconv"
@@ -27,6 +28,7 @@ func BuildsExpireAllCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("builds expire-all", flag.ExitOnError)
 
 	appID := fs.String("app", "", "App Store Connect app ID (required, or ASC_APP_ID env)")
+	version := fs.String("version", "", "Only consider builds of this marketing version (CFBundleShortVersionString)")
 	olderThan := fs.String("older-than", "", "Expire builds older than duration (e.g., 90d, 2w, 30d) or date (YYYY-MM-DD)")
 	keepLatest := fs.Int("keep-latest", 0, "Keep the N most recent builds")
 	dryRun := fs.Bool("dry-run", false, "Preview builds that would be expired without expiring")
@@ -41,12 +43,24 @@ func BuildsExpireAllCommand() *ffcli.Command {
 
 Use --older-than to expire builds older than a duration or date, and optionally
 --keep-latest to preserve recent builds. Use --dry-run to preview without
-expiring.
+expiring. Either --older-than or --keep-latest is always required.
+
+Use --version to restrict the candidate set to one marketing version
+(CFBundleShortVersionString). It only narrows candidates and never expires
+anything on its own, so it must still be combined with --older-than or
+--keep-latest. Builds of other versions are left untouched, and an empty
+--version is rejected.
+
+Candidates are ordered newest first by uploaded date, so --keep-latest N
+preserves the N most recently uploaded candidates, and it is applied after the
+--version filter.
 
 Examples:
   asc builds expire-all --app "123456789" --older-than 90d --dry-run
   asc builds expire-all --app "123456789" --older-than 30d --confirm
   asc builds expire-all --app "123456789" --keep-latest 5 --confirm
+  asc builds expire-all --app "123456789" --version "1.2.3" --keep-latest 1 --confirm
+  asc builds expire-all --app "123456789" --version "1.2.3" --older-than 30d --confirm
   asc builds expire-all --app "123456789" --older-than "2025-01-01" --confirm`,
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
@@ -54,20 +68,25 @@ Examples:
 			resolvedAppID := shared.ResolveAppID(*appID)
 			if resolvedAppID == "" {
 				fmt.Fprintf(os.Stderr, "Error: --app is required (or set ASC_APP_ID)\n\n")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--app")
+			}
+
+			versionValue := strings.TrimSpace(*version)
+			if versionValue == "" && flagProvided(fs, "version") {
+				return shared.UsageErrorf("builds expire-all: --version must not be empty")
 			}
 
 			olderThanValue := strings.TrimSpace(*olderThan)
 			if olderThanValue == "" && *keepLatest == 0 {
 				fmt.Fprintln(os.Stderr, "Error: --older-than or --keep-latest is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("")
 			}
 			if *keepLatest < 0 {
 				return fmt.Errorf("builds expire-all: --keep-latest must be greater than or equal to 0")
 			}
 			if !*dryRun && !*confirm {
 				fmt.Fprintln(os.Stderr, "Error: --confirm is required to expire builds")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--confirm")
 			}
 
 			now := time.Now().UTC()
@@ -85,30 +104,36 @@ Examples:
 				return fmt.Errorf("builds expire-all: %w", err)
 			}
 
-			requestCtx, cancel := shared.ContextWithTimeout(ctx)
-			defer cancel()
-
-			firstPage, err := client.GetBuilds(requestCtx, resolvedAppID, asc.WithBuildsLimit(200), asc.WithBuildsSort("-uploadedDate"))
-			if err != nil {
-				return fmt.Errorf("builds expire-all: failed to fetch: %w", err)
+			// Marketing version lives on the related pre-release version, so the
+			// candidate set is narrowed with the same lookup "builds list" uses.
+			filterOpts := []asc.BuildsOption{}
+			versionMatchedNoTrain := false
+			if versionValue != "" {
+				lookupCtx, lookupCancel := shared.ContextWithTimeout(ctx)
+				preReleaseVersionIDs, lookupErr := shared.FindPreReleaseVersionIDs(lookupCtx, client, resolvedAppID, versionValue, "")
+				lookupCancel()
+				if lookupErr != nil {
+					return fmt.Errorf("builds expire-all: %w", lookupErr)
+				}
+				if len(preReleaseVersionIDs) == 0 {
+					versionMatchedNoTrain = true
+				} else {
+					filterOpts = append(filterOpts, asc.WithBuildsPreReleaseVersions(preReleaseVersionIDs))
+				}
 			}
 
-			allPages, err := asc.PaginateAll(requestCtx, firstPage, func(ctx context.Context, nextURL string) (asc.PaginatedResponse, error) {
-				return client.GetBuilds(ctx, resolvedAppID, asc.WithBuildsNextURL(nextURL))
-			})
-			if err != nil {
-				return fmt.Errorf("builds expire-all: %w", err)
+			var fetchedBuilds []asc.Resource[asc.BuildAttributes]
+			if !versionMatchedNoTrain {
+				fetchedBuilds, err = fetchBuildExpireAllCandidates(ctx, client, resolvedAppID, filterOpts)
+				if err != nil {
+					return err
+				}
 			}
 
-			builds, ok := allPages.(*asc.BuildsResponse)
-			if !ok {
-				return fmt.Errorf("builds expire-all: unexpected response type")
-			}
-
-			candidates := make([]buildExpireCandidate, 0, len(builds.Data))
+			candidates := make([]buildExpireCandidate, 0, len(fetchedBuilds))
 			skippedExpired := 0
 			skippedInvalid := 0
-			for _, item := range builds.Data {
+			for _, item := range fetchedBuilds {
 				if item.Attributes.Expired {
 					skippedExpired++
 					continue
@@ -160,10 +185,13 @@ Examples:
 					continue
 				}
 
-				if _, err := client.ExpireBuild(requestCtx, candidate.resource.ID); err != nil {
+				requestCtx, cancel := shared.ContextWithTimeout(ctx)
+				_, expireErr := client.ExpireBuild(requestCtx, candidate.resource.ID)
+				cancel()
+				if expireErr != nil {
 					failures = append(failures, asc.BuildExpireAllFailure{
 						ID:    candidate.resource.ID,
-						Error: err.Error(),
+						Error: expireErr.Error(),
 					})
 					continue
 				}
@@ -172,6 +200,11 @@ Examples:
 				expired := true
 				item.Expired = &expired
 				items = append(items, item)
+			}
+
+			var versionPtr *string
+			if versionValue != "" {
+				versionPtr = &versionValue
 			}
 
 			var olderThanPtr *string
@@ -200,6 +233,7 @@ Examples:
 			result := &asc.BuildExpireAllResult{
 				DryRun:              *dryRun,
 				AppID:               resolvedAppID,
+				Version:             versionPtr,
 				OlderThan:           olderThanPtr,
 				KeepLatest:          keepLatestPtr,
 				SelectedCount:       len(candidates),
@@ -221,6 +255,53 @@ Examples:
 			return nil
 		},
 	}
+}
+
+// fetchBuildExpireAllCandidates returns every build matching filterOpts, newest
+// uploaded first, so selection and --keep-latest operate on the same ordering.
+func fetchBuildExpireAllCandidates(
+	ctx context.Context,
+	client *asc.Client,
+	appID string,
+	filterOpts []asc.BuildsOption,
+) ([]asc.Resource[asc.BuildAttributes], error) {
+	opts := append([]asc.BuildsOption{
+		asc.WithBuildsLimit(200),
+		asc.WithBuildsSort("-uploadedDate"),
+	}, filterOpts...)
+
+	firstPageCtx, firstPageCancel := shared.ContextWithTimeout(ctx)
+	firstPage, err := client.GetBuilds(firstPageCtx, appID, opts...)
+	firstPageCancel()
+	if err != nil {
+		return nil, fmt.Errorf("builds expire-all: failed to fetch: %w", err)
+	}
+
+	allPages, err := asc.PaginateAll(ctx, firstPage, func(ctx context.Context, nextURL string) (asc.PaginatedResponse, error) {
+		requestCtx, cancel := shared.ContextWithTimeout(ctx)
+		defer cancel()
+		return client.GetBuilds(requestCtx, appID, asc.WithBuildsNextURL(nextURL))
+	})
+	if err != nil {
+		return nil, fmt.Errorf("builds expire-all: %w", err)
+	}
+
+	builds, ok := allPages.(*asc.BuildsResponse)
+	if !ok {
+		return nil, fmt.Errorf("builds expire-all: unexpected response type")
+	}
+
+	return builds.Data, nil
+}
+
+func flagProvided(fs *flag.FlagSet, name string) bool {
+	provided := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == name {
+			provided = true
+		}
+	})
+	return provided
 }
 
 func buildExpireAllItem(candidate buildExpireCandidate) asc.BuildExpireAllItem {
@@ -268,14 +349,23 @@ func parseOlderThanDuration(value string) (time.Duration, error) {
 		return 0, fmt.Errorf("--older-than must be a duration like 90d, 2w, or 3m")
 	}
 
+	var unitDays int
 	switch unit {
 	case 'd':
-		return time.Duration(valueInt) * 24 * time.Hour, nil
+		unitDays = 1
 	case 'w':
-		return time.Duration(valueInt) * 7 * 24 * time.Hour, nil
+		unitDays = 7
 	case 'm':
-		return time.Duration(valueInt) * 30 * 24 * time.Hour, nil
+		unitDays = 30
 	default:
 		return 0, fmt.Errorf("--older-than must be a duration like 90d, 2w, or 3m")
 	}
+
+	// Reject values that would overflow time.Duration and wrap negative,
+	// which would move the threshold into the future and match every build.
+	const maxDays = int64(math.MaxInt64 / int64(24*time.Hour))
+	if int64(valueInt) > maxDays/int64(unitDays) {
+		return 0, fmt.Errorf("--older-than duration is too large")
+	}
+	return time.Duration(valueInt) * time.Duration(unitDays) * 24 * time.Hour, nil
 }

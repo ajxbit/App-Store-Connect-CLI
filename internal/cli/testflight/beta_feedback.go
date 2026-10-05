@@ -29,7 +29,7 @@ Examples:
   asc testflight feedback view --submission-id "SUBMISSION_ID"
   asc testflight feedback delete --submission-id "SUBMISSION_ID" --confirm`,
 		FlagSet:   fs,
-		UsageFunc: testflightVisibleUsageFunc,
+		UsageFunc: shared.DefaultUsageFunc,
 		Subcommands: []*ffcli.Command{
 			TestFlightFeedbackListCommand(),
 			TestFlightFeedbackViewCommand(),
@@ -61,7 +61,7 @@ Examples:
 func TestFlightFeedbackViewCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("view", flag.ExitOnError)
 
-	submissionID := fs.String("submission-id", "", "Feedback submission ID")
+	submissionID := shared.BindResourceIDFlag(fs, "submission-id", "betaFeedbackScreenshotSubmissions", "Feedback submission ID")
 	output := shared.BindOutputFlags(fs)
 
 	return &ffcli.Command{
@@ -78,7 +78,7 @@ Examples:
 			submissionIDValue := strings.TrimSpace(*submissionID)
 			if submissionIDValue == "" {
 				fmt.Fprintln(os.Stderr, "Error: --submission-id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--submission-id")
 			}
 			return runFeedbackSubmissionView(ctx, submissionIDValue, output)
 		},
@@ -88,7 +88,7 @@ Examples:
 func TestFlightFeedbackDeleteCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("delete", flag.ExitOnError)
 
-	submissionID := fs.String("submission-id", "", "Feedback submission ID")
+	submissionID := shared.BindResourceIDFlag(fs, "submission-id", "betaFeedbackScreenshotSubmissions", "Feedback submission ID")
 	confirm := fs.Bool("confirm", false, "Confirm deletion")
 	output := shared.BindOutputFlags(fs)
 
@@ -106,11 +106,11 @@ Examples:
 			submissionIDValue := strings.TrimSpace(*submissionID)
 			if submissionIDValue == "" {
 				fmt.Fprintln(os.Stderr, "Error: --submission-id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--submission-id")
 			}
 			if !*confirm {
 				fmt.Fprintln(os.Stderr, "Error: --confirm is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--confirm")
 			}
 			return runFeedbackSubmissionDelete(ctx, submissionIDValue, output)
 		},
@@ -133,7 +133,7 @@ Examples:
   asc testflight crashes log --submission-id "SUBMISSION_ID"
   asc testflight crashes log --crash-log-id "CRASH_LOG_ID"`,
 		FlagSet:   fs,
-		UsageFunc: testflightVisibleUsageFunc,
+		UsageFunc: shared.DefaultUsageFunc,
 		Subcommands: []*ffcli.Command{
 			TestFlightCrashesListCommand(),
 			TestFlightCrashesViewCommand(),
@@ -165,7 +165,7 @@ Examples:
 func TestFlightCrashesViewCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("view", flag.ExitOnError)
 
-	submissionID := fs.String("submission-id", "", "Crash submission ID")
+	submissionID := shared.BindResourceIDFlag(fs, "submission-id", "betaFeedbackCrashSubmissions", "Crash submission ID")
 	output := shared.BindOutputFlags(fs)
 
 	return &ffcli.Command{
@@ -182,7 +182,7 @@ Examples:
 			submissionIDValue := strings.TrimSpace(*submissionID)
 			if submissionIDValue == "" {
 				fmt.Fprintln(os.Stderr, "Error: --submission-id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--submission-id")
 			}
 			return runCrashSubmissionView(ctx, submissionIDValue, output)
 		},
@@ -192,7 +192,7 @@ Examples:
 func TestFlightCrashesDeleteCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("delete", flag.ExitOnError)
 
-	submissionID := fs.String("submission-id", "", "Crash submission ID")
+	submissionID := shared.BindResourceIDFlag(fs, "submission-id", "betaFeedbackCrashSubmissions", "Crash submission ID")
 	confirm := fs.Bool("confirm", false, "Confirm deletion")
 	output := shared.BindOutputFlags(fs)
 
@@ -210,11 +210,11 @@ Examples:
 			submissionIDValue := strings.TrimSpace(*submissionID)
 			if submissionIDValue == "" {
 				fmt.Fprintln(os.Stderr, "Error: --submission-id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--submission-id")
 			}
 			if !*confirm {
 				fmt.Fprintln(os.Stderr, "Error: --confirm is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--confirm")
 			}
 			return runCrashSubmissionDelete(ctx, submissionIDValue, output)
 		},
@@ -224,8 +224,8 @@ Examples:
 func TestFlightCrashesLogCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("log", flag.ExitOnError)
 
-	submissionID := fs.String("submission-id", "", "Crash submission ID")
-	crashLogID := fs.String("crash-log-id", "", "Crash log ID")
+	submissionID := shared.BindResourceIDFlag(fs, "submission-id", "betaFeedbackCrashSubmissions", "Crash submission ID")
+	crashLogID := shared.BindResourceIDFlag(fs, "crash-log-id", "betaCrashLogs", "Crash log ID")
 	output := shared.BindOutputFlags(fs)
 
 	return &ffcli.Command{
@@ -242,267 +242,19 @@ Examples:
 		Exec: func(ctx context.Context, args []string) error {
 			submissionIDValue := strings.TrimSpace(*submissionID)
 			crashLogIDValue := strings.TrimSpace(*crashLogID)
-			if (submissionIDValue == "" && crashLogIDValue == "") || (submissionIDValue != "" && crashLogIDValue != "") {
+			if submissionIDValue == "" && crashLogIDValue == "" {
 				fmt.Fprintln(os.Stderr, "Error: exactly one of --submission-id or --crash-log-id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("")
+			}
+			if submissionIDValue != "" && crashLogIDValue != "" {
+				fmt.Fprintln(os.Stderr, "Error: exactly one of --submission-id or --crash-log-id is required")
+				return shared.WithDiagnostic(flag.ErrHelp, shared.DiagnosticConflictingInput, "")
 			}
 			if submissionIDValue != "" {
 				return runCrashLogBySubmissionID(ctx, submissionIDValue, output)
 			}
 			return runCrashLogByCrashLogID(ctx, crashLogIDValue, output)
 		},
-	}
-}
-
-func DeprecatedBetaFeedbackAliasCommand() *ffcli.Command {
-	fs := flag.NewFlagSet("beta-feedback", flag.ExitOnError)
-
-	cmd := &ffcli.Command{
-		Name:       "beta-feedback",
-		ShortUsage: "asc testflight feedback <subcommand> | asc testflight crashes <subcommand>",
-		ShortHelp:  "Compatibility aliases for older feedback paths.",
-		LongHelp: `Compatibility aliases for older feedback and crash paths.
-
-Prefer:
-  asc testflight feedback ...
-  asc testflight crashes ...`,
-		FlagSet:   fs,
-		UsageFunc: shared.DeprecatedUsageFunc,
-		Subcommands: []*ffcli.Command{
-			deprecatedBetaFeedbackCrashSubmissionsAliasCommand(),
-			deprecatedBetaFeedbackScreenshotSubmissionsAliasCommand(),
-			deprecatedBetaFeedbackCrashLogAliasCommand(),
-		},
-		Exec: func(ctx context.Context, args []string) error {
-			return flag.ErrHelp
-		},
-	}
-
-	return hideTestFlightCommand(cmd)
-}
-
-func deprecatedBetaFeedbackCrashSubmissionsAliasCommand() *ffcli.Command {
-	fs := flag.NewFlagSet("crash-submissions", flag.ExitOnError)
-
-	return &ffcli.Command{
-		Name:       "crash-submissions",
-		ShortUsage: "asc testflight crashes <view|delete> [flags]",
-		ShortHelp:  "Compatibility alias: use `asc testflight crashes ...`.",
-		LongHelp:   `Compatibility alias: use ` + "`asc testflight crashes view`" + ` and ` + "`asc testflight crashes delete`" + `.`,
-		FlagSet:    fs,
-		UsageFunc:  shared.DeprecatedUsageFunc,
-		Subcommands: []*ffcli.Command{
-			deprecatedBetaFeedbackCrashSubmissionsGetAliasCommand(),
-			deprecatedBetaFeedbackCrashSubmissionsDeleteAliasCommand(),
-		},
-		Exec: func(ctx context.Context, args []string) error {
-			return flag.ErrHelp
-		},
-	}
-}
-
-func deprecatedBetaFeedbackCrashSubmissionsGetAliasCommand() *ffcli.Command {
-	fs := flag.NewFlagSet("get", flag.ExitOnError)
-
-	id := fs.String("id", "", "Beta feedback crash submission ID")
-	submissionID := fs.String("submission-id", "", "Crash submission ID")
-	output := shared.BindOutputFlags(fs)
-
-	return &ffcli.Command{
-		Name:       "get",
-		ShortUsage: "asc testflight crashes view --submission-id \"SUBMISSION_ID\"",
-		ShortHelp:  "Compatibility alias: use `asc testflight crashes view`.",
-		LongHelp:   "Compatibility alias: use `asc testflight crashes view --submission-id SUBMISSION_ID`.",
-		FlagSet:    fs,
-		UsageFunc:  shared.DeprecatedUsageFunc,
-		Exec: func(ctx context.Context, args []string) error {
-			idValue, err := resolveLegacyAliasID(strings.TrimSpace(*id), strings.TrimSpace(*submissionID), "--submission-id")
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %s\n", err.Error())
-				return flag.ErrHelp
-			}
-			if idValue == "" {
-				fmt.Fprintln(os.Stderr, "Error: --submission-id is required")
-				return flag.ErrHelp
-			}
-			return runCrashSubmissionView(ctx, idValue, output)
-		},
-	}
-}
-
-func deprecatedBetaFeedbackCrashSubmissionsDeleteAliasCommand() *ffcli.Command {
-	fs := flag.NewFlagSet("delete", flag.ExitOnError)
-
-	id := fs.String("id", "", "Beta feedback crash submission ID")
-	submissionID := fs.String("submission-id", "", "Crash submission ID")
-	confirm := fs.Bool("confirm", false, "Confirm deletion")
-	output := shared.BindOutputFlags(fs)
-
-	return &ffcli.Command{
-		Name:       "delete",
-		ShortUsage: "asc testflight crashes delete --submission-id \"SUBMISSION_ID\" --confirm",
-		ShortHelp:  "Compatibility alias: use `asc testflight crashes delete`.",
-		LongHelp:   "Compatibility alias: use `asc testflight crashes delete --submission-id SUBMISSION_ID --confirm`.",
-		FlagSet:    fs,
-		UsageFunc:  shared.DeprecatedUsageFunc,
-		Exec: func(ctx context.Context, args []string) error {
-			idValue, err := resolveLegacyAliasID(strings.TrimSpace(*id), strings.TrimSpace(*submissionID), "--submission-id")
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %s\n", err.Error())
-				return flag.ErrHelp
-			}
-			if idValue == "" {
-				fmt.Fprintln(os.Stderr, "Error: --submission-id is required")
-				return flag.ErrHelp
-			}
-			if !*confirm {
-				fmt.Fprintln(os.Stderr, "Error: --confirm is required")
-				return flag.ErrHelp
-			}
-			return runCrashSubmissionDelete(ctx, idValue, output)
-		},
-	}
-}
-
-func deprecatedBetaFeedbackScreenshotSubmissionsAliasCommand() *ffcli.Command {
-	fs := flag.NewFlagSet("screenshot-submissions", flag.ExitOnError)
-
-	return &ffcli.Command{
-		Name:       "screenshot-submissions",
-		ShortUsage: "asc testflight feedback <view|delete> [flags]",
-		ShortHelp:  "Compatibility alias: use `asc testflight feedback ...`.",
-		LongHelp:   "Compatibility alias: use `asc testflight feedback view` and `asc testflight feedback delete`.",
-		FlagSet:    fs,
-		UsageFunc:  shared.DeprecatedUsageFunc,
-		Subcommands: []*ffcli.Command{
-			deprecatedBetaFeedbackScreenshotSubmissionsGetAliasCommand(),
-			deprecatedBetaFeedbackScreenshotSubmissionsDeleteAliasCommand(),
-		},
-		Exec: func(ctx context.Context, args []string) error {
-			return flag.ErrHelp
-		},
-	}
-}
-
-func deprecatedBetaFeedbackScreenshotSubmissionsGetAliasCommand() *ffcli.Command {
-	fs := flag.NewFlagSet("get", flag.ExitOnError)
-
-	id := fs.String("id", "", "Beta feedback screenshot submission ID")
-	submissionID := fs.String("submission-id", "", "Feedback submission ID")
-	output := shared.BindOutputFlags(fs)
-
-	return &ffcli.Command{
-		Name:       "get",
-		ShortUsage: "asc testflight feedback view --submission-id \"SUBMISSION_ID\"",
-		ShortHelp:  "Compatibility alias: use `asc testflight feedback view`.",
-		LongHelp:   "Compatibility alias: use `asc testflight feedback view --submission-id SUBMISSION_ID`.",
-		FlagSet:    fs,
-		UsageFunc:  shared.DeprecatedUsageFunc,
-		Exec: func(ctx context.Context, args []string) error {
-			idValue, err := resolveLegacyAliasID(strings.TrimSpace(*id), strings.TrimSpace(*submissionID), "--submission-id")
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %s\n", err.Error())
-				return flag.ErrHelp
-			}
-			if idValue == "" {
-				fmt.Fprintln(os.Stderr, "Error: --submission-id is required")
-				return flag.ErrHelp
-			}
-			return runFeedbackSubmissionView(ctx, idValue, output)
-		},
-	}
-}
-
-func deprecatedBetaFeedbackScreenshotSubmissionsDeleteAliasCommand() *ffcli.Command {
-	fs := flag.NewFlagSet("delete", flag.ExitOnError)
-
-	id := fs.String("id", "", "Beta feedback screenshot submission ID")
-	submissionID := fs.String("submission-id", "", "Feedback submission ID")
-	confirm := fs.Bool("confirm", false, "Confirm deletion")
-	output := shared.BindOutputFlags(fs)
-
-	return &ffcli.Command{
-		Name:       "delete",
-		ShortUsage: "asc testflight feedback delete --submission-id \"SUBMISSION_ID\" --confirm",
-		ShortHelp:  "Compatibility alias: use `asc testflight feedback delete`.",
-		LongHelp:   "Compatibility alias: use `asc testflight feedback delete --submission-id SUBMISSION_ID --confirm`.",
-		FlagSet:    fs,
-		UsageFunc:  shared.DeprecatedUsageFunc,
-		Exec: func(ctx context.Context, args []string) error {
-			idValue, err := resolveLegacyAliasID(strings.TrimSpace(*id), strings.TrimSpace(*submissionID), "--submission-id")
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %s\n", err.Error())
-				return flag.ErrHelp
-			}
-			if idValue == "" {
-				fmt.Fprintln(os.Stderr, "Error: --submission-id is required")
-				return flag.ErrHelp
-			}
-			if !*confirm {
-				fmt.Fprintln(os.Stderr, "Error: --confirm is required")
-				return flag.ErrHelp
-			}
-			return runFeedbackSubmissionDelete(ctx, idValue, output)
-		},
-	}
-}
-
-func deprecatedBetaFeedbackCrashLogAliasCommand() *ffcli.Command {
-	fs := flag.NewFlagSet("crash-log", flag.ExitOnError)
-
-	return &ffcli.Command{
-		Name:       "crash-log",
-		ShortUsage: "asc testflight crashes log [flags]",
-		ShortHelp:  "Compatibility alias: use `asc testflight crashes log`.",
-		LongHelp:   "Compatibility alias: use `asc testflight crashes log --submission-id SUBMISSION_ID`.",
-		FlagSet:    fs,
-		UsageFunc:  shared.DeprecatedUsageFunc,
-		Subcommands: []*ffcli.Command{
-			deprecatedBetaFeedbackCrashLogGetAliasCommand(),
-		},
-		Exec: func(ctx context.Context, args []string) error {
-			return flag.ErrHelp
-		},
-	}
-}
-
-func deprecatedBetaFeedbackCrashLogGetAliasCommand() *ffcli.Command {
-	fs := flag.NewFlagSet("get", flag.ExitOnError)
-
-	id := fs.String("id", "", "Beta feedback crash submission ID")
-	submissionID := fs.String("submission-id", "", "Crash submission ID")
-	output := shared.BindOutputFlags(fs)
-
-	return &ffcli.Command{
-		Name:       "get",
-		ShortUsage: "asc testflight crashes log --submission-id \"SUBMISSION_ID\"",
-		ShortHelp:  "Compatibility alias: use `asc testflight crashes log`.",
-		LongHelp:   "Compatibility alias: use `asc testflight crashes log --submission-id SUBMISSION_ID`.",
-		FlagSet:    fs,
-		UsageFunc:  shared.DeprecatedUsageFunc,
-		Exec: func(ctx context.Context, args []string) error {
-			idValue, err := resolveLegacyAliasID(strings.TrimSpace(*id), strings.TrimSpace(*submissionID), "--submission-id")
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %s\n", err.Error())
-				return flag.ErrHelp
-			}
-			if idValue == "" {
-				fmt.Fprintln(os.Stderr, "Error: --submission-id is required")
-				return flag.ErrHelp
-			}
-			return runCrashLogBySubmissionID(ctx, idValue, output)
-		},
-	}
-}
-
-func resolveLegacyAliasID(legacyID, canonicalID, canonicalFlag string) (string, error) {
-	switch {
-	case legacyID != "" && canonicalID != "" && legacyID != canonicalID:
-		return "", fmt.Errorf("%s and --id must match", canonicalFlag)
-	case canonicalID != "":
-		return canonicalID, nil
-	default:
-		return legacyID, nil
 	}
 }
 

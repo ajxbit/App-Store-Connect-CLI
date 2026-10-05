@@ -34,8 +34,9 @@ type AppDataUsage struct {
 
 // AppDataUsagesPublishState captures publication state for app privacy data usages.
 type AppDataUsagesPublishState struct {
-	ID        string `json:"id"`
-	Published bool   `json:"published"`
+	ID             string `json:"id"`
+	Published      bool   `json:"published"`
+	PublishedKnown bool   `json:"-"`
 }
 
 // AppDataUsageCategory models one appDataUsageCategories resource.
@@ -92,9 +93,11 @@ func decodeAppDataUsages(resources []jsonAPIResource) []AppDataUsage {
 }
 
 func decodeAppDataUsagesPublishStateResource(resource jsonAPIResource) AppDataUsagesPublishState {
+	published, publishedKnown := boolAttrKnown(resource.Attributes, "published")
 	return AppDataUsagesPublishState{
-		ID:        strings.TrimSpace(resource.ID),
-		Published: boolAttr(resource.Attributes, "published"),
+		ID:             strings.TrimSpace(resource.ID),
+		Published:      published,
+		PublishedKnown: publishedKnown,
 	}
 }
 
@@ -192,47 +195,11 @@ func normalizeNextPath(nextLink, baseURL string) (string, error) {
 }
 
 func (c *Client) listPaginatedResources(ctx context.Context, path, responseName string) ([]jsonAPIResource, error) {
-	nextPath := strings.TrimSpace(path)
-	if nextPath == "" {
-		return nil, fmt.Errorf("%s path is required", responseName)
+	payload, err := c.fetchJSONAPIPages(ctx, path, responseName)
+	if err != nil {
+		return nil, err
 	}
-
-	allResources := make([]jsonAPIResource, 0, 128)
-	visited := map[string]struct{}{}
-
-	for nextPath != "" {
-		if _, seen := visited[nextPath]; seen {
-			return nil, fmt.Errorf("%s pagination loop detected", responseName)
-		}
-		visited[nextPath] = struct{}{}
-
-		responseBody, err := c.doRequest(ctx, http.MethodGet, nextPath, nil)
-		if err != nil {
-			return nil, err
-		}
-
-		var payload jsonAPIListPayload
-		if err := json.Unmarshal(responseBody, &payload); err != nil {
-			return nil, fmt.Errorf("failed to parse %s response: %w", responseName, err)
-		}
-		allResources = append(allResources, payload.Data...)
-
-		nextLink, err := extractNextLink(payload.Links)
-		if err != nil {
-			return nil, fmt.Errorf("failed to parse %s pagination links: %w", responseName, err)
-		}
-		if strings.TrimSpace(nextLink) == "" {
-			nextPath = ""
-			continue
-		}
-
-		nextPath, err = normalizeNextPath(nextLink, c.baseURL)
-		if err != nil {
-			return nil, fmt.Errorf("failed to normalize %s pagination link: %w", responseName, err)
-		}
-	}
-
-	return allResources, nil
+	return payload.Data, nil
 }
 
 func normalizeDataUsageTuple(tuple DataUsageTuple) (DataUsageTuple, error) {

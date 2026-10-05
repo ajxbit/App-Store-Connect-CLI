@@ -13,39 +13,39 @@ import (
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/cli/shared"
 )
 
-// SandboxGetCommand returns the sandbox get subcommand.
+// SandboxGetCommand returns the sandbox view subcommand.
 func SandboxGetCommand() *ffcli.Command {
-	fs := flag.NewFlagSet("get", flag.ExitOnError)
+	fs := flag.NewFlagSet("view", flag.ExitOnError)
 
-	testerID := fs.String("id", "", "Sandbox tester ID")
+	testerID := shared.BindResourceIDFlag(fs, "id", "sandboxTesters", "Sandbox tester ID")
 	email := fs.String("email", "", "Tester email address")
 	output := shared.BindOutputFlags(fs)
 
 	return &ffcli.Command{
-		Name:       "get",
-		ShortUsage: "asc sandbox get [flags]",
-		ShortHelp:  "Get sandbox tester details.",
-		LongHelp: `Get sandbox tester details by ID or email.
+		Name:       "view",
+		ShortUsage: "asc sandbox view [flags]",
+		ShortHelp:  "View sandbox tester details.",
+		LongHelp: `View sandbox tester details by ID or email.
 
 Examples:
-  asc sandbox get --id "SANDBOX_TESTER_ID"
-  asc sandbox get --email "tester@example.com"`,
+  asc sandbox view --id "SANDBOX_TESTER_ID"
+  asc sandbox view --email "tester@example.com"`,
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
 			if strings.TrimSpace(*testerID) == "" && strings.TrimSpace(*email) == "" {
 				fmt.Fprintln(os.Stderr, "Error: --id or --email is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("")
 			}
 			if strings.TrimSpace(*email) != "" {
 				if err := validateSandboxEmail(*email); err != nil {
-					return fmt.Errorf("sandbox get: %w", err)
+					return fmt.Errorf("sandbox view: %w", err)
 				}
 			}
 
 			client, err := shared.GetASCClient()
 			if err != nil {
-				return fmt.Errorf("sandbox get: %w", err)
+				return fmt.Errorf("sandbox view: %w", err)
 			}
 
 			requestCtx, cancel := shared.ContextWithTimeout(ctx)
@@ -58,7 +58,7 @@ Examples:
 				response, err = findSandboxTesterByEmail(requestCtx, client, strings.TrimSpace(*email))
 			}
 			if err != nil {
-				return fmt.Errorf("sandbox get: %w", err)
+				return fmt.Errorf("sandbox view: %w", err)
 			}
 
 			return shared.PrintOutput(response, *output.Output, *output.Pretty)
@@ -70,7 +70,7 @@ Examples:
 func SandboxUpdateCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("update", flag.ExitOnError)
 
-	testerID := fs.String("id", "", "Sandbox tester ID")
+	testerID := shared.BindResourceIDFlag(fs, "id", "sandboxTesters", "Sandbox tester ID")
 	email := fs.String("email", "", "Tester email address")
 	territory := fs.String("territory", "", "App Store territory input (accepts alpha-2, alpha-3, or exact English country name)")
 	subscriptionRenewalRate := fs.String("subscription-renewal-rate", "", "Subscription renewal rate (MONTHLY_RENEWAL_EVERY_ONE_HOUR, MONTHLY_RENEWAL_EVERY_THIRTY_MINUTES, MONTHLY_RENEWAL_EVERY_FIFTEEN_MINUTES, MONTHLY_RENEWAL_EVERY_FIVE_MINUTES, MONTHLY_RENEWAL_EVERY_THREE_MINUTES)")
@@ -93,7 +93,7 @@ Examples:
 		Exec: func(ctx context.Context, args []string) error {
 			if strings.TrimSpace(*testerID) == "" && strings.TrimSpace(*email) == "" {
 				fmt.Fprintln(os.Stderr, "Error: --id or --email is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("")
 			}
 			if strings.TrimSpace(*email) != "" {
 				if err := validateSandboxEmail(*email); err != nil {
@@ -112,7 +112,7 @@ Examples:
 
 			if !interruptPurchases.IsSet() && normalizedTerritory == "" && normalizedRate == "" {
 				fmt.Fprintln(os.Stderr, "Error: --territory, --interrupt-purchases, or --subscription-renewal-rate is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("")
 			}
 
 			client, err := shared.GetASCClient()
@@ -162,7 +162,7 @@ Examples:
 func SandboxClearHistoryCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("clear-history", flag.ExitOnError)
 
-	testerID := fs.String("id", "", "Sandbox tester ID")
+	testerID := shared.BindResourceIDFlag(fs, "id", "sandboxTesters", "Sandbox tester ID")
 	email := fs.String("email", "", "Tester email address")
 	confirm := fs.Bool("confirm", false, "Confirm clearing purchase history")
 	output := shared.BindOutputFlags(fs)
@@ -181,11 +181,11 @@ Examples:
 		Exec: func(ctx context.Context, args []string) error {
 			if !*confirm {
 				fmt.Fprintln(os.Stderr, "Error: --confirm is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--confirm")
 			}
 			if strings.TrimSpace(*testerID) == "" && strings.TrimSpace(*email) == "" {
 				fmt.Fprintln(os.Stderr, "Error: --id or --email is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("")
 			}
 			if strings.TrimSpace(*email) != "" {
 				if err := validateSandboxEmail(*email); err != nil {

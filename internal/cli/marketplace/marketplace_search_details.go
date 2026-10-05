@@ -24,7 +24,7 @@ func MarketplaceSearchDetailsCommand() *ffcli.Command {
 		LongHelp: `Manage marketplace search details.
 
 Examples:
-  asc marketplace search-details get --app "APP_ID"
+  asc marketplace search-details view --app "APP_ID"
   asc marketplace search-details create --app "APP_ID" --catalog-url "https://example.com"
   asc marketplace search-details update --search-detail-id "DETAIL_ID" --catalog-url "https://example.com"
   asc marketplace search-details delete --search-detail-id "DETAIL_ID" --confirm`,
@@ -44,37 +44,37 @@ Examples:
 
 // MarketplaceSearchDetailsGetCommand returns the search details get subcommand.
 func MarketplaceSearchDetailsGetCommand() *ffcli.Command {
-	fs := flag.NewFlagSet("get", flag.ExitOnError)
+	fs := flag.NewFlagSet("view", flag.ExitOnError)
 
 	appID := fs.String("app", "", "App Store Connect app ID (or ASC_APP_ID env)")
 	fields := fs.String("fields", "", "Fields to include: "+strings.Join(marketplaceSearchDetailFieldsList(), ", "))
 	output := shared.BindOutputFlags(fs)
 
 	return &ffcli.Command{
-		Name:       "get",
-		ShortUsage: "asc marketplace search-details get --app \"APP_ID\" [flags]",
-		ShortHelp:  "Get marketplace search details for an app.",
-		LongHelp: `Get marketplace search details for an app.
+		Name:       "view",
+		ShortUsage: "asc marketplace search-details view --app \"APP_ID\" [flags]",
+		ShortHelp:  "View marketplace search details for an app.",
+		LongHelp: `View marketplace search details for an app.
 
 Examples:
-  asc marketplace search-details get --app "APP_ID"`,
+  asc marketplace search-details view --app "APP_ID"`,
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
 			resolvedAppID := shared.ResolveAppID(*appID)
 			if resolvedAppID == "" {
 				fmt.Fprintln(os.Stderr, "Error: --app is required (or set ASC_APP_ID)")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--app")
 			}
 
 			fieldsValue, err := normalizeMarketplaceSearchDetailFields(*fields)
 			if err != nil {
-				return fmt.Errorf("marketplace search-details get: %w", err)
+				return fmt.Errorf("marketplace search-details view: %w", err)
 			}
 
 			client, err := shared.GetASCClient()
 			if err != nil {
-				return fmt.Errorf("marketplace search-details get: %w", err)
+				return fmt.Errorf("marketplace search-details view: %w", err)
 			}
 
 			requestCtx, cancel := shared.ContextWithTimeout(ctx)
@@ -82,7 +82,7 @@ Examples:
 
 			detail, err := client.GetMarketplaceSearchDetailForApp(requestCtx, resolvedAppID, fieldsValue)
 			if err != nil {
-				return fmt.Errorf("marketplace search-details get: failed to fetch: %w", err)
+				return fmt.Errorf("marketplace search-details view: failed to fetch: %w", err)
 			}
 
 			return shared.PrintOutput(detail, *output.Output, *output.Pretty)
@@ -112,13 +112,13 @@ Examples:
 			resolvedAppID := shared.ResolveAppID(*appID)
 			if resolvedAppID == "" {
 				fmt.Fprintln(os.Stderr, "Error: --app is required (or set ASC_APP_ID)")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--app")
 			}
 
 			catalogURLValue := strings.TrimSpace(*catalogURL)
 			if catalogURLValue == "" {
 				fmt.Fprintln(os.Stderr, "Error: --catalog-url is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--catalog-url")
 			}
 
 			client, err := shared.GetASCClient()
@@ -143,7 +143,7 @@ Examples:
 func MarketplaceSearchDetailsUpdateCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("update", flag.ExitOnError)
 
-	detailID := fs.String("search-detail-id", "", "Marketplace search detail ID")
+	detailID := shared.BindResourceIDFlag(fs, "search-detail-id", "marketplaceSearchDetails", "Marketplace search detail ID")
 	catalogURL := fs.String("catalog-url", "", "Marketplace catalog URL")
 	output := shared.BindOutputFlags(fs)
 
@@ -161,7 +161,7 @@ Examples:
 			trimmedID := strings.TrimSpace(*detailID)
 			if trimmedID == "" {
 				fmt.Fprintln(os.Stderr, "Error: --search-detail-id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--search-detail-id")
 			}
 
 			visited := map[string]bool{}
@@ -171,7 +171,7 @@ Examples:
 
 			if !visited["catalog-url"] {
 				fmt.Fprintln(os.Stderr, "Error: at least one update flag is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("")
 			}
 
 			attrs := asc.MarketplaceSearchDetailUpdateAttributes{}
@@ -202,7 +202,7 @@ Examples:
 func MarketplaceSearchDetailsDeleteCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("delete", flag.ExitOnError)
 
-	detailID := fs.String("search-detail-id", "", "Marketplace search detail ID")
+	detailID := shared.BindResourceIDFlag(fs, "search-detail-id", "marketplaceSearchDetails", "Marketplace search detail ID")
 	confirm := fs.Bool("confirm", false, "Confirm deletion")
 	output := shared.BindOutputFlags(fs)
 
@@ -220,11 +220,11 @@ Examples:
 			trimmedID := strings.TrimSpace(*detailID)
 			if trimmedID == "" {
 				fmt.Fprintln(os.Stderr, "Error: --search-detail-id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--search-detail-id")
 			}
 			if !*confirm {
 				fmt.Fprintln(os.Stderr, "Error: --confirm is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--confirm")
 			}
 
 			client, err := shared.GetASCClient()

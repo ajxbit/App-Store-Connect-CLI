@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/peterbourgon/ff/v3/ffcli"
+	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/asc"
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/cli/shared"
 )
 
@@ -38,17 +39,17 @@ Examples:
 
 // IAPAvailabilityGetCommand returns the availability get subcommand.
 func IAPAvailabilityGetCommand() *ffcli.Command {
-	fs := flag.NewFlagSet("pricing availability get", flag.ExitOnError)
+	fs := flag.NewFlagSet("pricing availability view", flag.ExitOnError)
 
 	appID := addIAPLookupAppFlag(fs)
-	iapID := fs.String("iap-id", "", "In-app purchase ID, product ID, or exact current name")
+	iapID := shared.BindResourceIDFlag(fs, "iap-id", "inAppPurchases", "In-app purchase ID, product ID, or exact current name")
 	output := shared.BindOutputFlags(fs)
 
 	return &ffcli.Command{
-		Name:       "get",
+		Name:       "view",
 		ShortUsage: "asc iap pricing availability view --iap-id \"IAP_ID\"",
-		ShortHelp:  "Get in-app purchase availability.",
-		LongHelp: `Get in-app purchase availability.
+		ShortHelp:  "View in-app purchase availability.",
+		LongHelp: `View in-app purchase availability.
 
 Examples:
   asc iap pricing availability view --iap-id "IAP_ID"`,
@@ -58,12 +59,12 @@ Examples:
 			iapValue := strings.TrimSpace(*iapID)
 			if iapValue == "" {
 				fmt.Fprintln(os.Stderr, "Error: --iap-id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--iap-id")
 			}
 
 			client, err := shared.GetASCClient()
 			if err != nil {
-				return fmt.Errorf("iap availability get: %w", err)
+				return fmt.Errorf("iap pricing availability view: %w", err)
 			}
 
 			iapValue, err = resolveIAPLookupIDWithTimeout(ctx, client, *appID, iapValue)
@@ -76,7 +77,12 @@ Examples:
 
 			resp, err := client.GetInAppPurchaseAvailability(requestCtx, iapValue)
 			if err != nil {
-				return fmt.Errorf("iap availability get: failed to fetch: %w", err)
+				if asc.IsMissingResourceOfType(err, "inAppPurchaseAvailabilities") {
+					safeIAPID := asc.SanitizeTerminalText(iapValue)
+					fmt.Fprintf(os.Stderr, "In-app purchase %s has no availability configured yet; create it with: asc iap pricing availability set --iap-id %s --territories \"USA\"\n", safeIAPID, safeIAPID)
+					return shared.NewNotConfiguredReportedError(fmt.Errorf("iap pricing availability view: in-app purchase %q has no availability configured", iapValue))
+				}
+				return fmt.Errorf("iap pricing availability view: failed to fetch: %w", err)
 			}
 
 			return shared.PrintOutput(resp, *output.Output, *output.Pretty)
@@ -89,8 +95,8 @@ func IAPAvailabilitySetCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("pricing availability set", flag.ExitOnError)
 
 	appID := addIAPLookupAppFlag(fs)
-	iapID := fs.String("iap-id", "", "In-app purchase ID, product ID, or exact current name")
-	territories := fs.String("territories", "", "Territory inputs (comma-separated; accepts alpha-2, alpha-3, or exact English country names)")
+	iapID := shared.BindResourceIDFlag(fs, "iap-id", "inAppPurchases", "In-app purchase ID, product ID, or exact current name")
+	territories := shared.BindOnceCSVFlag(fs, "territories", "Territory inputs (comma-separated; accepts alpha-2, alpha-3, or exact English country names)")
 	availableInNew := fs.Bool("available-in-new-territories", false, "Include new territories automatically")
 	output := shared.BindOutputFlags(fs)
 
@@ -112,16 +118,16 @@ Examples:
 			iapValue := strings.TrimSpace(*iapID)
 			if iapValue == "" {
 				fmt.Fprintln(os.Stderr, "Error: --iap-id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--iap-id")
 			}
 
-			territoryIDs, err := shared.NormalizeASCTerritoryCSV(*territories)
+			territoryIDs, err := shared.NormalizeASCTerritoryCSV(territories.String())
 			if err != nil {
 				return shared.UsageError(err.Error())
 			}
 			if len(territoryIDs) == 0 {
 				fmt.Fprintln(os.Stderr, "Error: --territories is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--territories")
 			}
 
 			client, err := shared.GetASCClient()

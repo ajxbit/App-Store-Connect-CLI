@@ -40,7 +40,7 @@ Phased release gradually rolls out your app update over 7 days:
 You can pause, resume, or complete the rollout at any time.
 
 Examples:
-  asc versions phased-release get --version-id "VERSION_ID"
+  asc versions phased-release view --version-id "VERSION_ID"
   asc versions phased-release create --version-id "VERSION_ID"
   asc versions phased-release update --id "PHASED_ID" --state PAUSED
   asc versions phased-release delete --id "PHASED_ID" --confirm`,
@@ -59,31 +59,31 @@ Examples:
 
 // PhasedReleaseGetCommand returns the get subcommand.
 func PhasedReleaseGetCommand() *ffcli.Command {
-	fs := flag.NewFlagSet("phased-release get", flag.ExitOnError)
+	fs := flag.NewFlagSet("phased-release view", flag.ExitOnError)
 
-	versionID := fs.String("version-id", "", "App Store version ID (required)")
+	versionID := shared.BindResourceIDFlag(fs, "version-id", "appStoreVersions", "App Store version ID (required)")
 	output := shared.BindOutputFlags(fs)
 
 	return &ffcli.Command{
-		Name:       "get",
-		ShortUsage: "asc versions phased-release get [flags]",
-		ShortHelp:  "Get phased release status for an app store version.",
-		LongHelp: `Get phased release status for an app store version.
+		Name:       "view",
+		ShortUsage: "asc versions phased-release view [flags]",
+		ShortHelp:  "View phased release status for an app store version.",
+		LongHelp: `View phased release status for an app store version.
 
 Examples:
-  asc versions phased-release get --version-id "VERSION_ID"`,
+  asc versions phased-release view --version-id "VERSION_ID"`,
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
 			version := strings.TrimSpace(*versionID)
 			if version == "" {
 				fmt.Fprintln(os.Stderr, "Error: --version-id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--version-id")
 			}
 
 			client, err := shared.GetASCClient()
 			if err != nil {
-				return fmt.Errorf("phased-release get: %w", err)
+				return fmt.Errorf("phased-release view: %w", err)
 			}
 
 			requestCtx, cancel := shared.ContextWithTimeout(ctx)
@@ -91,7 +91,7 @@ Examples:
 
 			resp, err := client.GetAppStoreVersionPhasedRelease(requestCtx, version)
 			if err != nil {
-				return fmt.Errorf("phased-release get: %w", err)
+				return fmt.Errorf("phased-release view: %w", err)
 			}
 
 			return shared.PrintOutput(resp, *output.Output, *output.Pretty)
@@ -103,7 +103,7 @@ Examples:
 func PhasedReleaseCreateCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("phased-release create", flag.ExitOnError)
 
-	versionID := fs.String("version-id", "", "App Store version ID (required)")
+	versionID := shared.BindResourceIDFlag(fs, "version-id", "appStoreVersions", "App Store version ID (required)")
 	state := fs.String("state", "", "Initial state: INACTIVE, ACTIVE (optional, defaults to INACTIVE)")
 	output := shared.BindOutputFlags(fs)
 
@@ -125,7 +125,7 @@ Examples:
 			version := strings.TrimSpace(*versionID)
 			if version == "" {
 				fmt.Fprintln(os.Stderr, "Error: --version-id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--version-id")
 			}
 
 			var phasedState asc.PhasedReleaseState
@@ -161,8 +161,9 @@ Examples:
 func PhasedReleaseUpdateCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("phased-release update", flag.ExitOnError)
 
-	phasedID := fs.String("id", "", "Phased release ID (required)")
+	phasedID := shared.BindResourceIDFlag(fs, "id", "appStoreVersionPhasedReleases", "Phased release ID (required)")
 	state := fs.String("state", "", "New state: ACTIVE, PAUSED, COMPLETE (required)")
+	confirm := fs.Bool("confirm", false, "Confirm COMPLETE, which releases the update to all users immediately")
 	output := shared.BindOutputFlags(fs)
 
 	return &ffcli.Command{
@@ -174,31 +175,35 @@ func PhasedReleaseUpdateCommand() *ffcli.Command {
 States:
   ACTIVE   - Resume or continue the phased rollout
   PAUSED   - Pause the rollout (users who already have the update keep it)
-  COMPLETE - Release to all users immediately
+  COMPLETE - Release to all users immediately (requires --confirm)
 
 Examples:
   asc versions phased-release update --id "PHASED_ID" --state PAUSED
   asc versions phased-release update --id "PHASED_ID" --state ACTIVE
-  asc versions phased-release update --id "PHASED_ID" --state COMPLETE`,
+  asc versions phased-release update --id "PHASED_ID" --state COMPLETE --confirm`,
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
 			id := strings.TrimSpace(*phasedID)
 			if id == "" {
 				fmt.Fprintln(os.Stderr, "Error: --id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--id")
 			}
 
 			stateValue := strings.TrimSpace(strings.ToUpper(*state))
 			if stateValue == "" {
 				fmt.Fprintln(os.Stderr, "Error: --state is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--state")
 			}
 
 			phasedState, ok := validPhasedReleaseStates[stateValue]
 			if !ok || stateValue == "INACTIVE" {
 				fmt.Fprintf(os.Stderr, "Error: --state must be one of: %s\n", strings.Join(validUpdateStates, ", "))
 				return flag.ErrHelp
+			}
+			if stateValue == "COMPLETE" && !*confirm {
+				fmt.Fprintln(os.Stderr, "Error: --confirm is required to set phased release state COMPLETE")
+				return shared.MissingRequiredUsageError("--confirm")
 			}
 
 			client, err := shared.GetASCClient()
@@ -223,7 +228,7 @@ Examples:
 func PhasedReleaseDeleteCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("phased-release delete", flag.ExitOnError)
 
-	phasedID := fs.String("id", "", "Phased release ID (required)")
+	phasedID := shared.BindResourceIDFlag(fs, "id", "appStoreVersionPhasedReleases", "Phased release ID (required)")
 	confirm := fs.Bool("confirm", false, "Confirm deletion (required)")
 	output := shared.BindOutputFlags(fs)
 
@@ -244,12 +249,12 @@ Examples:
 			id := strings.TrimSpace(*phasedID)
 			if id == "" {
 				fmt.Fprintln(os.Stderr, "Error: --id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--id")
 			}
 
 			if !*confirm {
 				fmt.Fprintln(os.Stderr, "Error: --confirm is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--confirm")
 			}
 
 			client, err := shared.GetASCClient()

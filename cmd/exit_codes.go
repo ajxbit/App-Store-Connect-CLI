@@ -5,8 +5,12 @@ import (
 	"flag"
 	"net/http"
 
+	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/appleads"
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/asc"
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/cli/shared"
+	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/readonly"
+	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/storekit"
+	webcore "github.com/rudrankriyam/App-Store-Connect-CLI/internal/web"
 )
 
 // Exit codes following the CI/CD specification.
@@ -17,13 +21,15 @@ const (
 	ExitAuth     = 3 // Authentication failure (missing, unauthorized, forbidden)
 	ExitNotFound = 4 // Resource not found
 	ExitConflict = 5 // Conflict / resource already exists
+	ExitReadOnly = 6 // Read-only mode refused a mutating request
+	ExitPending  = 7 // An opted-in bounded wait ended before its target finished (builds wait --report-pending, status --until)
 
 	// HTTP 4xx range: 10 + (status - 400)
 	// Note: 404 and 409 are mapped to ExitNotFound and ExitConflict above.
-	ExitHTTPBadRequest    = 10 // 400
-	ExitHTTPUnauthorized  = 11 // 401
-	ExitHTTPForbidden     = 12 // 403
-	ExitHTTPUnprocessable = 22 // 422
+	ExitHTTPBadRequest    = 10       // 400
+	ExitHTTPUnauthorized  = ExitAuth // 401 (special case)
+	ExitHTTPForbidden     = ExitAuth // 403 (special case)
+	ExitHTTPUnprocessable = 32       // 422
 
 	// HTTP 5xx range: 60 + (status - 500)
 	ExitHTTPInternalServer     = 60 // 500
@@ -37,16 +43,34 @@ func ExitCodeFromError(err error) int {
 	if err == nil {
 		return ExitSuccess
 	}
+	if code, ok := shared.ProcessExitCode(err); ok {
+		return code
+	}
 
-	// Usage errors
-	if errors.Is(err, flag.ErrHelp) {
+	// Usage errors. A missing Apple web session is rendered without the usage
+	// page but keeps the usage exit code its callers rely on.
+	if errors.Is(err, flag.ErrHelp) || shared.IsReportedUsageError(err) || errors.Is(err, shared.ErrMissingWebSession) {
 		return ExitUsage
+	}
+
+	// Opted-in pending outcome of a bounded wait
+	if errors.Is(err, shared.ErrPending) {
+		return ExitPending
+	}
+
+	// Policy refusal from ASC_READ_ONLY / --read-only
+	if errors.Is(err, readonly.ErrRefused) {
+		return ExitReadOnly
 	}
 
 	// Well-known error types
 	if errors.Is(err, shared.ErrMissingAuth) ||
 		errors.Is(err, asc.ErrUnauthorized) ||
-		errors.Is(err, asc.ErrForbidden) {
+		errors.Is(err, asc.ErrForbidden) ||
+		errors.Is(err, webcore.ErrInvalidAppleAccountCredentials) {
+		return ExitAuth
+	}
+	if errors.Is(err, appleads.ErrOAuthCredentialsRejected) {
 		return ExitAuth
 	}
 	if errors.Is(err, asc.ErrNotFound) {
@@ -64,6 +88,13 @@ func ExitCodeFromError(err error) int {
 		}
 		// Fall back to API error code mapping
 		return APIErrorCodeToExitCode(apiErr.Code)
+	}
+	// StoreKit keeps the generic exit code it has always had. Public storefront
+	// endpoints take no credentials, so their 401 and 403 are not auth failures.
+	if _, ok := errors.AsType[*storekit.APIError](err); !ok && !isPublicStorefrontError(err) {
+		if status := httpStatusFromError(err); status > 0 {
+			return HTTPStatusToExitCode(status)
+		}
 	}
 
 	// Generic error
@@ -89,6 +120,8 @@ func APIErrorCodeToExitCode(code string) int {
 // HTTPStatusToExitCode maps an HTTP status code to the appropriate exit code.
 func HTTPStatusToExitCode(status int) int {
 	switch {
+	case status == http.StatusUnauthorized || status == http.StatusForbidden:
+		return ExitAuth
 	case status == http.StatusNotFound:
 		return ExitNotFound
 	case status == http.StatusConflict:

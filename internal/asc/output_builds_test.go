@@ -2,8 +2,36 @@ package asc
 
 import (
 	"encoding/json"
+	"slices"
 	"testing"
 )
+
+func TestBuildBetaGroupsUpdateResultDryRunOutputIsAdditive(t *testing.T) {
+	normal, err := json.Marshal(&BuildBetaGroupsUpdateResult{
+		BuildID:  "build-1",
+		GroupIDs: []string{"group-1"},
+		Action:   "added",
+	})
+	if err != nil {
+		t.Fatalf("marshal normal result: %v", err)
+	}
+	if got, want := string(normal), `{"buildId":"build-1","groupIds":["group-1"],"action":"added"}`; got != want {
+		t.Fatalf("normal result JSON = %s, want %s", got, want)
+	}
+
+	dryRun, err := json.Marshal(&BuildBetaGroupsUpdateResult{
+		BuildID:  "build-1",
+		GroupIDs: []string{"group-1"},
+		Action:   "would-add",
+		DryRun:   true,
+	})
+	if err != nil {
+		t.Fatalf("marshal dry-run result: %v", err)
+	}
+	if got, want := string(dryRun), `{"buildId":"build-1","groupIds":["group-1"],"action":"would-add","dryRun":true}`; got != want {
+		t.Fatalf("dry-run result JSON = %s, want %s", got, want)
+	}
+}
 
 func TestExtractPreReleaseVersionMap(t *testing.T) {
 	included := json.RawMessage(`[
@@ -78,6 +106,156 @@ func TestBuildsRowsWithPreReleaseVersion(t *testing.T) {
 	}
 	if row[3] != "TV_OS" {
 		t.Fatalf("expected platform TV_OS, got %q", row[3])
+	}
+}
+
+// TestDSYMDownloadResultJSONByteCompat pins the exported DSYMDownloadResult
+// JSON to the exact bytes previously produced by the struct declared in
+// internal/cli/builds/builds_dsyms.go, proving the move to internal/asc
+// changed code organization only, not output.
+func TestDSYMDownloadResultJSONByteCompat(t *testing.T) {
+	t.Run("all fields", func(t *testing.T) {
+		result := &DSYMDownloadResult{
+			BuildID:     "build-1",
+			Version:     "1.2.3",
+			BuildNumber: "42",
+			Dir:         "./dsyms",
+			Files: []DSYMDownloadFile{
+				{
+					BundleID: "com.example.app",
+					FileName: "com.example.app-1.2.3-42.dSYM.zip",
+					FilePath: "dsyms/com.example.app-1.2.3-42.dSYM.zip",
+					FileSize: 1024,
+				},
+			},
+		}
+		got, err := json.Marshal(result)
+		if err != nil {
+			t.Fatalf("marshal dSYM result: %v", err)
+		}
+		// Fixture: byte-for-byte JSON emitted by the pre-move struct.
+		want := `{"buildId":"build-1","version":"1.2.3","buildNumber":"42","dir":"./dsyms",` +
+			`"files":[{"bundleId":"com.example.app","fileName":"com.example.app-1.2.3-42.dSYM.zip",` +
+			`"filePath":"dsyms/com.example.app-1.2.3-42.dSYM.zip","fileSize":1024}]}`
+		if string(got) != want {
+			t.Fatalf("dSYM result JSON drifted:\n got: %s\nwant: %s", got, want)
+		}
+	})
+
+	t.Run("omitempty fields stay absent and files stay non-null", func(t *testing.T) {
+		result := &DSYMDownloadResult{
+			BuildID: "build-1",
+			Dir:     ".",
+			Files:   []DSYMDownloadFile{},
+		}
+		got, err := json.Marshal(result)
+		if err != nil {
+			t.Fatalf("marshal dSYM result: %v", err)
+		}
+		want := `{"buildId":"build-1","dir":".","files":[]}`
+		if string(got) != want {
+			t.Fatalf("dSYM result JSON drifted:\n got: %s\nwant: %s", got, want)
+		}
+	})
+}
+
+func TestDSYMDownloadResultRows(t *testing.T) {
+	result := &DSYMDownloadResult{
+		BuildID: "build-1",
+		Dir:     "./dsyms",
+		Files: []DSYMDownloadFile{
+			{BundleID: "com.example.app", FileName: "a.dSYM.zip", FilePath: "./dsyms/a.dSYM.zip", FileSize: 1024},
+			{FileName: "b.dSYM.zip", FilePath: "./dsyms/b.dSYM.zip", FileSize: 2048},
+		},
+	}
+
+	headers, rows := dsymDownloadResultRows(result)
+	wantHeaders := []string{"Build ID", "Bundle ID", "File Name", "File Size", "Dir"}
+	if len(headers) != len(wantHeaders) {
+		t.Fatalf("unexpected headers: %v", headers)
+	}
+	for i, want := range wantHeaders {
+		if headers[i] != want {
+			t.Fatalf("headers[%d] = %q, want %q", i, headers[i], want)
+		}
+	}
+	if len(rows) != 2 {
+		t.Fatalf("expected one row per file, got %d", len(rows))
+	}
+	if rows[0][0] != "build-1" || rows[0][1] != "com.example.app" || rows[0][3] != "1024" {
+		t.Fatalf("unexpected first row: %v", rows[0])
+	}
+	if rows[1][1] != "" || rows[1][2] != "b.dSYM.zip" || rows[1][4] != "./dsyms" {
+		t.Fatalf("unexpected second row: %v", rows[1])
+	}
+}
+
+func TestBuildWaitResultRows(t *testing.T) {
+	result := &BuildWaitResult{
+		BuildID:         "build-1",
+		Version:         "1.2.3",
+		BuildNumber:     "42",
+		ProcessingState: "VALID",
+		Elapsed:         "1m30s",
+	}
+
+	headers, rows := buildWaitResultRows(result)
+	if len(headers) != 5 {
+		t.Fatalf("unexpected headers: %v", headers)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("expected 1 row, got %d", len(rows))
+	}
+	want := []string{"build-1", "1.2.3", "42", "VALID", "1m30s"}
+	for i, cell := range want {
+		if rows[0][i] != cell {
+			t.Fatalf("rows[0][%d] = %q, want %q", i, rows[0][i], cell)
+		}
+	}
+}
+
+func TestBuildWaitPendingResultRows(t *testing.T) {
+	tests := []struct {
+		name   string
+		result *BuildWaitPendingResult
+		want   []string
+	}{
+		{
+			name: "discovery with upload",
+			result: &BuildWaitPendingResult{
+				Status:        "pending",
+				Phase:         "discovery",
+				Upload:        &BuildWaitPendingUpload{ID: "upload-78", State: "COMPLETE"},
+				Elapsed:       "50s",
+				ResumeCommand: "asc builds wait --app 123456789 --latest --report-pending",
+			},
+			want: []string{"pending", "discovery", "", "", "upload-78", "COMPLETE", "50s", "asc builds wait --app 123456789 --latest --report-pending"},
+		},
+		{
+			name: "processing",
+			result: &BuildWaitPendingResult{
+				Status:          "pending",
+				Phase:           "processing",
+				BuildID:         "build-99",
+				ProcessingState: "PROCESSING",
+				Elapsed:         "50s",
+				ResumeCommand:   "asc builds wait --build-id build-99 --report-pending",
+			},
+			want: []string{"pending", "processing", "build-99", "PROCESSING", "", "", "50s", "asc builds wait --build-id build-99 --report-pending"},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			headers, rows := buildWaitPendingResultRows(test.result)
+			wantHeaders := []string{"Status", "Phase", "Build ID", "Processing State", "Upload ID", "Upload State", "Elapsed", "Resume Command"}
+			if !slices.Equal(headers, wantHeaders) {
+				t.Fatalf("headers = %v, want %v", headers, wantHeaders)
+			}
+			if len(rows) != 1 || !slices.Equal(rows[0], test.want) {
+				t.Fatalf("rows = %v, want [%v]", rows, test.want)
+			}
+		})
 	}
 }
 

@@ -38,7 +38,7 @@ Examples:
 func CertificatesRelationshipsPassTypeIDCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("pass-type-id", flag.ExitOnError)
 
-	id := fs.String("id", "", "Certificate ID")
+	id := shared.BindResourceIDFlag(fs, "id", "certificates", "Certificate ID")
 	output := shared.BindOutputFlags(fs)
 
 	return &ffcli.Command{
@@ -55,7 +55,7 @@ Examples:
 			idValue := strings.TrimSpace(*id)
 			if idValue == "" {
 				fmt.Fprintln(os.Stderr, "Error: --id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--id")
 			}
 
 			client, err := shared.GetASCClient()
@@ -72,33 +72,6 @@ Examples:
 			}
 
 			return shared.PrintOutput(resp, *output.Output, *output.Pretty)
-		},
-	}
-}
-
-// DeprecatedCertificatesRelationshipsAliasCommand preserves the legacy
-// relationships surface as a hidden compatibility alias.
-func DeprecatedCertificatesRelationshipsAliasCommand() *ffcli.Command {
-	fs := flag.NewFlagSet("relationships", flag.ExitOnError)
-
-	return &ffcli.Command{
-		Name:       "relationships",
-		ShortUsage: "asc certificates links <subcommand> [flags]",
-		ShortHelp:  "DEPRECATED: use `asc certificates links ...`.",
-		LongHelp:   "Deprecated compatibility alias for `asc certificates links ...`.",
-		FlagSet:    fs,
-		UsageFunc:  shared.DeprecatedUsageFunc,
-		Subcommands: []*ffcli.Command{
-			shared.DeprecatedAliasLeafCommand(
-				CertificatesRelationshipsPassTypeIDCommand(),
-				"pass-type-id",
-				"asc certificates links pass-type-id --id \"CERT_ID\"",
-				"asc certificates links pass-type-id",
-				"Warning: `asc certificates relationships pass-type-id` is deprecated. Use `asc certificates links pass-type-id`.",
-			),
-		},
-		Exec: func(ctx context.Context, args []string) error {
-			return flag.ErrHelp
 		},
 	}
 }

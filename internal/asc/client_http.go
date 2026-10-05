@@ -8,19 +8,26 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
+	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/readonly"
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/urlsanitize"
 )
 
 // newRequest creates a new HTTP request with JWT authentication
 func (c *Client) newRequest(ctx context.Context, method, path string, body io.Reader) (*http.Request, error) {
 	if err := validateAPIPath(path); err != nil {
+		return nil, err
+	}
+	if err := readonly.Check(ctx, method, readonly.Target(path)); err != nil {
 		return nil, err
 	}
 
@@ -69,12 +76,22 @@ func (c *Client) generateJWT() (string, error) {
 
 // GenerateJWT generates a JWT for ASC API authentication.
 func GenerateJWT(keyID, issuerID string, privateKey *ecdsa.PrivateKey) (string, error) {
+	keyID = strings.TrimSpace(keyID)
+	if keyID == "" {
+		return "", ErrMissingKeyID
+	}
+	issuerID = strings.TrimSpace(issuerID)
+
 	now := time.Now()
 	claims := jwt.RegisteredClaims{
-		Issuer:    issuerID,
 		Audience:  jwt.ClaimStrings{"appstoreconnect-v1"},
-		IssuedAt:  jwt.NewNumericDate(now),
+		IssuedAt:  jwt.NewNumericDate(now.Add(-jwtIssuedAtSkew)),
 		ExpiresAt: jwt.NewNumericDate(now.Add(tokenLifetime)),
+	}
+	if issuerID == "" {
+		claims.Subject = "user"
+	} else {
+		claims.Issuer = issuerID
 	}
 
 	token := jwt.NewWithClaims(jwt.SigningMethodES256, claims)
@@ -90,23 +107,23 @@ func GenerateJWT(keyID, issuerID string, privateKey *ecdsa.PrivateKey) (string, 
 }
 
 // do performs an HTTP request and returns the response.
-// GET/HEAD requests use retry logic for rate limiting by default.
+// GET/HEAD requests use retry logic for transient failures by default.
+// Mutating requests are throttled and retried only when App Store Connect
+// rejects them with 429; see isRateLimitRejection.
 func (c *Client) do(ctx context.Context, method, path string, body io.Reader) ([]byte, error) {
-	var bodyBytes []byte
-	if body != nil {
-		var err error
-		bodyBytes, err = io.ReadAll(body)
-		if err != nil {
-			return nil, fmt.Errorf("failed to read request body: %w", err)
-		}
+	return c.doWithHTTPClient(ctx, method, path, body, c.httpClient)
+}
+
+// doWithHTTPClient preserves the shared request/retry behavior while allowing
+// narrowly scoped callers to override only the HTTP client's redirect policy.
+func (c *Client) doWithHTTPClient(ctx context.Context, method, path string, body io.Reader, httpClient *http.Client) ([]byte, error) {
+	if err := validateMutatingRequestTarget(method, path); err != nil {
+		return nil, err
 	}
 
-	request := func(requestCtx context.Context) ([]byte, error) {
-		var reader io.Reader
-		if bodyBytes != nil {
-			reader = bytes.NewReader(bodyBytes)
-		}
-		return c.doOnce(requestCtx, method, path, reader)
+	request, err := c.replayableRequestWithHTTPClient(method, path, body, httpClient)
+	if err != nil {
+		return nil, err
 	}
 
 	if shouldRetryMethod(method) {
@@ -116,10 +133,120 @@ func (c *Client) do(ctx context.Context, method, path string, body io.Reader) ([
 		}, retryOpts)
 	}
 	if shouldLimitMutatingMethod(method) {
-		return c.doWithMutatingRequestLimiter(ctx, request)
+		return c.doMutation(ctx, request, isRateLimitRejection)
 	}
 
 	return request(ctx)
+}
+
+// doAppBuildUploadsRead retries the app-scoped Build Upload API only after a
+// separate app read proves that the parent exists. Apple returns the same 404
+// shape for a transient build-upload propagation failure and a permanently
+// invalid app ID, so status and error detail alone cannot classify it safely.
+func (c *Client) doAppBuildUploadsRead(ctx context.Context, appID, path string) ([]byte, error) {
+	request, err := c.replayableRequest(http.MethodGet, path, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	// The request path, not the caller's original appID, determines whether
+	// this is an app-scoped endpoint. A top-level continuation URL must keep
+	// the normal detail-based classification for missing upload resources.
+	appID = appIDFromBuildUploadsPath(path)
+	retryOpts := ResolveRetryOptions()
+	appVerified := false
+	return withRetry(ctx, func() ([]byte, error) {
+		data, requestErr := request(ctx)
+		if requestErr == nil || !isAppBuildUploadsNotFound(requestErr) {
+			return data, requestErr
+		}
+		if appID == "" || retryOpts.MaxRetries == 0 {
+			return nil, requestErr
+		}
+		if !appVerified {
+			_, verifyErr := c.doOnce(ctx, http.MethodGet, fmt.Sprintf("/v1/apps/%s", appID), nil, c.httpClient)
+			if verifyErr != nil {
+				if IsNotFound(verifyErr) {
+					return nil, requestErr
+				}
+				return nil, appBuildUploadsVerificationError(appID, verifyErr)
+			}
+			appVerified = true
+		}
+		return nil, &RetryableError{Err: requestErr}
+	}, retryOpts, IsRetryable)
+}
+
+func appBuildUploadsVerificationError(appID string, err error) error {
+	return fmt.Errorf("verify app %q before retrying build uploads: %w", appID, err)
+}
+
+// doIdempotentMutation performs an explicitly idempotent mutating request with
+// the same transient-failure retry policy used by reads. Callers must only use
+// this for operations whose exact payload can be safely replayed.
+func (c *Client) doIdempotentMutation(ctx context.Context, method, path string, body io.Reader) ([]byte, error) {
+	if err := validateMutatingRequestTarget(method, path); err != nil {
+		return nil, err
+	}
+
+	request, err := c.replayableRequest(method, path, body)
+	if err != nil {
+		return nil, err
+	}
+
+	if !shouldLimitMutatingMethod(method) {
+		return WithRetry(ctx, func() ([]byte, error) {
+			return request(ctx)
+		}, ResolveRetryOptions())
+	}
+	return c.doMutation(ctx, request, IsRetryable)
+}
+
+// doMutation sends a mutating request under the write concurrency limiter,
+// replaying it while shouldRetry accepts the failure. Each attempt re-acquires
+// a limiter slot so backoff never holds write capacity.
+func (c *Client) doMutation(ctx context.Context, request func(context.Context) ([]byte, error), shouldRetry func(error) bool) ([]byte, error) {
+	return withRetry(ctx, func() ([]byte, error) {
+		return c.doWithMutatingRequestLimiter(ctx, request)
+	}, ResolveRetryOptions(), shouldRetry)
+}
+
+// replayableRequest buffers the request body so every attempt sends the
+// identical payload from a fresh reader.
+func (c *Client) replayableRequest(method, path string, body io.Reader) (func(context.Context) ([]byte, error), error) {
+	return c.replayableRequestWithHTTPClient(method, path, body, c.httpClient)
+}
+
+func (c *Client) replayableRequestWithHTTPClient(method, path string, body io.Reader, httpClient *http.Client) (func(context.Context) ([]byte, error), error) {
+	var bodyBytes []byte
+	if body != nil {
+		var err error
+		bodyBytes, err = io.ReadAll(body)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read request body: %w", err)
+		}
+	}
+
+	return func(requestCtx context.Context) ([]byte, error) {
+		var reader io.Reader
+		if bodyBytes != nil {
+			reader = bytes.NewReader(bodyBytes)
+		}
+		return c.doOnce(requestCtx, method, path, reader, httpClient)
+	}, nil
+}
+
+// isRateLimitRejection reports whether err is a 429 from App Store Connect.
+// A 429 rejects the request before it is processed, so replaying the identical
+// payload cannot apply a mutation twice. Every other retryable failure
+// (transport errors, 408, 5xx) leaves the outcome of a write unknown and must
+// not be replayed automatically.
+func isRateLimitRejection(err error) bool {
+	retryable, ok := errors.AsType[*RetryableError](err)
+	if !ok {
+		return false
+	}
+	return retryable.HTTPStatusCode() == http.StatusTooManyRequests
 }
 
 func (c *Client) doWithMutatingRequestLimiter(ctx context.Context, request func(context.Context) ([]byte, error)) ([]byte, error) {
@@ -128,21 +255,41 @@ func (c *Client) doWithMutatingRequestLimiter(ctx context.Context, request func(
 	}
 
 	requestTimeout, hasDeadline := requestTimeoutBudget(ctx)
-	limiter := c.getMutatingRequestLimiter()
 
-	select {
-	case limiter <- struct{}{}:
-		defer func() { <-limiter }()
-		if err := ctx.Err(); err != nil {
-			return nil, fmt.Errorf("wait for mutating request slot: %w", err)
+	// Ordinary writes take a default-limit slot first, then a slot under the
+	// client-wide ceiling; bulk writes take only the ceiling slot. Bulk writes
+	// never hold a default-limit slot, so the fixed acquisition order cannot
+	// deadlock.
+	if !usesBulkMutatingRequestLimit(ctx) {
+		release, err := acquireMutatingRequestSlot(ctx, c.getMutatingRequestLimiter())
+		if err != nil {
+			return nil, err
 		}
-	case <-ctx.Done():
-		return nil, fmt.Errorf("wait for mutating request slot: %w", ctx.Err())
+		defer release()
 	}
+	release, err := acquireMutatingRequestSlot(ctx, c.getBulkMutatingRequestLimiter())
+	if err != nil {
+		return nil, err
+	}
+	defer release()
 
 	requestCtx, cancel := deriveMutatingRequestContext(ctx, requestTimeout, hasDeadline)
 	defer cancel()
 	return request(requestCtx)
+}
+
+func acquireMutatingRequestSlot(ctx context.Context, limiter chan struct{}) (func(), error) {
+	select {
+	case limiter <- struct{}{}:
+		release := func() { <-limiter }
+		if err := ctx.Err(); err != nil {
+			release()
+			return nil, fmt.Errorf("wait for mutating request slot: %w", err)
+		}
+		return release, nil
+	case <-ctx.Done():
+		return nil, fmt.Errorf("wait for mutating request slot: %w", ctx.Err())
+	}
 }
 
 func requestTimeoutBudget(ctx context.Context) (time.Duration, bool) {
@@ -178,7 +325,7 @@ func deriveMutatingRequestContext(ctx context.Context, requestTimeout time.Durat
 	}
 }
 
-func (c *Client) doOnce(ctx context.Context, method, path string, body io.Reader) ([]byte, error) {
+func (c *Client) doOnce(ctx context.Context, method, path string, body io.Reader, httpClient *http.Client) ([]byte, error) {
 	start := time.Now()
 	debugSettings := resolveDebugSettings()
 
@@ -188,7 +335,8 @@ func (c *Client) doOnce(ctx context.Context, method, path string, body io.Reader
 	}
 
 	if debugSettings.verboseHTTP {
-		debugLogger.Info("→ HTTP Request",
+		debugLogger.Info(
+			"→ HTTP Request",
 			"method", method,
 			"url", sanitizeURLForLog(req.URL.String()),
 			"content-type", req.Header.Get("Content-Type"),
@@ -196,34 +344,40 @@ func (c *Client) doOnce(ctx context.Context, method, path string, body io.Reader
 		)
 	}
 
-	resp, err := c.httpClient.Do(req)
+	resp, err := httpClient.Do(req)
 	elapsed := time.Since(start)
 
 	if err != nil {
 		if debugSettings.verboseHTTP {
-			debugLogger.Info("← HTTP Error",
+			debugLogger.Info(
+				"← HTTP Error",
 				"error", err.Error(),
 				"elapsed", elapsed.String(),
 			)
 		}
-		return nil, fmt.Errorf("request failed: %w", err)
+		requestErr := fmt.Errorf("request failed: %w", err)
+		if isTransientTransportError(err) {
+			return nil, &RetryableError{Err: requestErr}
+		}
+		return nil, requestErr
 	}
 	defer resp.Body.Close()
 
 	if debugSettings.verboseHTTP {
-		debugLogger.Info("← HTTP Response",
+		debugLogger.Info(
+			"← HTTP Response",
 			"status", resp.StatusCode,
 			"elapsed", elapsed.String(),
 			"content-type", resp.Header.Get("Content-Type"),
 			"content-length", resp.Header.Get("Content-Length"),
+			"x-rate-limit", resp.Header.Get("X-Rate-Limit"),
 		)
 	}
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		respBody, _ := io.ReadAll(resp.Body)
 
-		// Check for rate limiting (429) or service unavailable (503)
-		if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusServiceUnavailable {
+		if isRetryableHTTPStatus(resp.StatusCode) {
 			retryAfter := parseRetryAfterHeader(resp.Header.Get("Retry-After"))
 			return nil, &RetryableError{
 				Err:        buildRetryableError(resp.StatusCode, retryAfter, respBody),
@@ -232,12 +386,133 @@ func (c *Client) doOnce(ctx context.Context, method, path string, body io.Reader
 		}
 
 		if err := ParseErrorWithStatus(respBody, resp.StatusCode); err != nil {
+			if isIntermittentBuildUploadsNotFound(method, path, err) {
+				// No Retry-After accompanies the flake; the shared exponential
+				// backoff (1s/2s/4s by default) and retry budget apply.
+				return nil, &RetryableError{Err: err}
+			}
 			return nil, err
 		}
 		return nil, fmt.Errorf("API request failed with status %d", resp.StatusCode)
 	}
 
-	return io.ReadAll(resp.Body)
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		readErr := &responseBodyReadError{err: err}
+		if isTransientTransportError(err) {
+			return nil, &RetryableError{Err: readErr}
+		}
+		return nil, readErr
+	}
+	return data, nil
+}
+
+func isTransientTransportError(err error) bool {
+	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		return true
+	}
+
+	return errors.Is(err, io.EOF) ||
+		errors.Is(err, io.ErrUnexpectedEOF) ||
+		errors.Is(err, net.ErrClosed) ||
+		errors.Is(err, syscall.ECONNRESET) ||
+		errors.Is(err, syscall.ECONNREFUSED) ||
+		errors.Is(err, syscall.EPIPE)
+}
+
+func isRetryableHTTPStatus(statusCode int) bool {
+	switch statusCode {
+	case http.StatusRequestTimeout,
+		http.StatusTooManyRequests,
+		http.StatusInternalServerError,
+		http.StatusBadGateway,
+		http.StatusServiceUnavailable,
+		http.StatusGatewayTimeout:
+		return true
+	default:
+		return false
+	}
+}
+
+// isBuildUploadsPath reports whether path targets the top-level Build Upload
+// API family (/v1/buildUploads and /v1/buildUploadFiles).
+// Apple intermittently answers reads on these endpoints with 404 NOT_FOUND for
+// resources that exist (fastlane/fastlane#29908), so reads there are allowed
+// a bounded retry that no other 404 receives. Full next-page URLs are matched
+// on their path component.
+func isBuildUploadsPath(path string) bool {
+	segments := apiPathSegments(path)
+	if len(segments) < 2 || segments[0] != "v1" {
+		return false
+	}
+	switch segments[1] {
+	case "buildUploads", "buildUploadFiles":
+		return true
+	}
+	return false
+}
+
+// isIntermittentBuildUploadsNotFound reports whether err is the 404 NOT_FOUND
+// flake Apple emits on Build Upload API reads: the app relationship is
+// reported missing for an app that exists. Only reads are eligible, and only
+// when the missing resource is the app. The detail on /v1/buildUploads* and
+// /v1/buildUploadFiles* must name resource type 'apps'; a genuinely missing
+// upload or file id ("no resource of type 'buildUploads'") and all app-scoped
+// 404s are surfaced unchanged without consuming the retry budget.
+func isIntermittentBuildUploadsNotFound(method, path string, err error) bool {
+	if !shouldRetryMethod(method) || !isBuildUploadsPath(path) {
+		return false
+	}
+	apiErr, ok := errors.AsType[*APIError](err)
+	if !ok || apiErr.StatusCode != http.StatusNotFound || !strings.EqualFold(apiErr.Code, "NOT_FOUND") {
+		return false
+	}
+	return notFoundNamesAppResource(apiErr)
+}
+
+func isAppBuildUploadsNotFound(err error) bool {
+	apiErr, ok := errors.AsType[*APIError](err)
+	return ok && apiErr.StatusCode == http.StatusNotFound && strings.EqualFold(apiErr.Code, "NOT_FOUND")
+}
+
+func appIDFromBuildUploadsPath(path string) string {
+	segments := apiPathSegments(path)
+	if len(segments) == 4 && segments[0] == "v1" && segments[1] == "apps" && segments[3] == "buildUploads" {
+		return strings.TrimSpace(segments[2])
+	}
+	if len(segments) == 5 && segments[0] == "v1" && segments[1] == "apps" && segments[3] == "relationships" && segments[4] == "buildUploads" {
+		return strings.TrimSpace(segments[2])
+	}
+	return ""
+}
+
+// notFoundNamesAppResource reports whether a NOT_FOUND detail names the apps
+// resource type, e.g. "There is no resource of type 'apps' with id '123'".
+func notFoundNamesAppResource(apiErr *APIError) bool {
+	return appResourceNotFoundDetail.MatchString(apiErr.Detail)
+}
+
+var appResourceNotFoundDetail = regexp.MustCompile(`(?i)resource of type ['"‘’“”]?apps['"‘’“”]?(?:\s|$)`)
+
+// apiPathSegments returns the path segments of an API path or absolute URL,
+// without the query string.
+func apiPathSegments(path string) []string {
+	if strings.HasPrefix(path, "http://") || strings.HasPrefix(path, "https://") {
+		parsed, err := url.Parse(path)
+		if err != nil {
+			return nil
+		}
+		path = parsed.Path
+	}
+	if idx := strings.IndexByte(path, '?'); idx >= 0 {
+		path = path[:idx]
+	}
+	return strings.Split(strings.Trim(path, "/"), "/")
 }
 
 // sanitizeAuthHeader redacts the JWT token from Authorization header for logging.
@@ -274,24 +549,62 @@ func shouldLimitMutatingMethod(method string) bool {
 }
 
 func buildRetryableError(statusCode int, retryAfter time.Duration, respBody []byte) error {
+	return buildRetryableErrorWithSource(statusCode, retryAfter, respBody, "App Store Connect")
+}
+
+func buildRetryableErrorWithSource(statusCode int, retryAfter time.Duration, respBody []byte, source string) error {
 	base := "API request failed"
 	switch statusCode {
+	case http.StatusRequestTimeout:
+		base = fmt.Sprintf("%s request timeout", source)
 	case http.StatusTooManyRequests:
-		base = "rate limited by App Store Connect"
+		base = fmt.Sprintf("rate limited by %s", source)
+	case http.StatusInternalServerError:
+		base = fmt.Sprintf("%s internal server error", source)
+	case http.StatusBadGateway:
+		base = fmt.Sprintf("%s bad gateway", source)
 	case http.StatusServiceUnavailable:
-		base = "App Store Connect service unavailable"
+		base = fmt.Sprintf("%s service unavailable", source)
+	case http.StatusGatewayTimeout:
+		base = fmt.Sprintf("%s gateway timeout", source)
 	}
 
 	message := fmt.Sprintf("%s (status %d)", base, statusCode)
+	var apiErr *APIError
 	if len(respBody) > 0 {
-		if err := ParseErrorWithStatus(respBody, statusCode); err != nil {
-			message = fmt.Sprintf("%s: %s", message, err)
+		if parsed, ok := errors.AsType[*APIError](ParseErrorWithStatus(respBody, statusCode)); ok {
+			apiErr = parsed
+			message = fmt.Sprintf("%s: %s", message, parsed)
+		}
+	}
+	if apiErr == nil {
+		apiErr = &APIError{
+			Code:       apiErrorCodeFromStatus(statusCode),
+			Title:      base,
+			StatusCode: statusCode,
 		}
 	}
 	if retryAfter > 0 {
 		message = fmt.Sprintf("%s (retry after %s)", message, retryAfter)
 	}
-	return errors.New(message)
+	return &retryableStatusError{message: message, apiErr: apiErr}
+}
+
+// retryableStatusError keeps the human-readable retry message while exposing
+// the parsed *APIError (and its HTTP status code) through Unwrap, so that
+// errors.Is/errors.As and exit-code mapping still observe the underlying
+// HTTP status after retries are exhausted.
+type retryableStatusError struct {
+	message string
+	apiErr  *APIError
+}
+
+func (e *retryableStatusError) Error() string {
+	return e.message
+}
+
+func (e *retryableStatusError) Unwrap() error {
+	return e.apiErr
 }
 
 // parseRetryAfterHeader parses the Retry-After header value.
@@ -302,8 +615,27 @@ func parseRetryAfterHeader(value string) time.Duration {
 	}
 
 	// Try to parse as seconds first
-	if seconds, err := strconv.Atoi(value); err == nil && seconds > 0 {
-		return time.Duration(seconds) * time.Second
+	const maxRetryAfterDuration = time.Duration(1<<63 - 1)
+	if seconds, err := strconv.ParseInt(value, 10, 64); err == nil {
+		if seconds > 0 {
+			if seconds > int64(maxRetryAfterDuration/time.Second) {
+				return maxRetryAfterDuration
+			}
+			return time.Duration(seconds) * time.Second
+		}
+	} else if isPositiveDecimal(value) {
+		// ParseInt reports ErrRange for values above MaxInt64. ParseUint still
+		// accepts the portion that fits in uint64; values beyond that range
+		// report ErrRange there as well. Both cases are an unambiguously huge
+		// positive delay and must saturate instead of falling back to backoff.
+		if _, unsignedErr := strconv.ParseUint(strings.TrimPrefix(value, "+"), 10, 64); unsignedErr == nil {
+			return maxRetryAfterDuration
+		} else {
+			var numberErr *strconv.NumError
+			if errors.As(unsignedErr, &numberErr) && errors.Is(numberErr.Err, strconv.ErrRange) {
+				return maxRetryAfterDuration
+			}
+		}
 	}
 
 	// Try to parse as HTTP-date (try multiple formats)
@@ -322,6 +654,21 @@ func parseRetryAfterHeader(value string) time.Duration {
 	}
 
 	return 0
+}
+
+func isPositiveDecimal(value string) bool {
+	value = strings.TrimPrefix(value, "+")
+	if value == "" {
+		return false
+	}
+	positive := false
+	for i := 0; i < len(value); i++ {
+		if value[i] < '0' || value[i] > '9' {
+			return false
+		}
+		positive = positive || value[i] != '0'
+	}
+	return positive
 }
 
 // validateNextURL validates that a pagination URL is safe to use.
@@ -459,7 +806,7 @@ func (c *Client) doStream(ctx context.Context, path string, accept string) (*htt
 		req.Header.Set("Accept", accept)
 	}
 
-	resp, err := c.httpClient.Do(req)
+	resp, err := doStreamingRequest(c.httpClient, req)
 	if err != nil {
 		return nil, fmt.Errorf("request failed: %w", err)
 	}
@@ -474,28 +821,34 @@ func (c *Client) doStream(ctx context.Context, path string, accept string) (*htt
 	return resp, nil
 }
 
-func (c *Client) doStreamNoAuth(ctx context.Context, method, rawURL, accept string) (*http.Response, error) {
-	req, err := http.NewRequestWithContext(ctx, method, rawURL, nil)
+func (c *Client) doStreamNoAuth(ctx context.Context, rawURL, accept string) (*http.Response, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create request: %w", err)
+		return nil, newSanitizedNoAuthStreamError("create download request", rawURL, err)
 	}
 	if strings.TrimSpace(accept) != "" {
 		req.Header.Set("Accept", accept)
 	}
 
-	resp, err := c.httpClient.Do(req)
+	resp, err := doStreamingRequest(clientWithoutRedirects(c.httpClient), req)
 	if err != nil {
-		return nil, fmt.Errorf("request failed: %w", err)
+		return nil, newSanitizedNoAuthStreamError("download request", rawURL, err)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		respBody, _ := io.ReadAll(resp.Body)
 		_ = resp.Body.Close()
-		if err := ParseErrorWithStatus(respBody, resp.StatusCode); err != nil {
-			return nil, err
+		// Presigned-CDN error bodies are untrusted and can echo the requested
+		// capability. The status code is sufficient diagnostic context here.
+		return nil, &APIError{
+			Code:       apiErrorCodeFromStatus(resp.StatusCode),
+			Title:      fmt.Sprintf("download request failed with status %d", resp.StatusCode),
+			StatusCode: resp.StatusCode,
 		}
-		return nil, fmt.Errorf("API request failed with status %d", resp.StatusCode)
 	}
 	return resp, nil
+}
+
+func newSanitizedNoAuthStreamError(operation, rawURL string, err error) error {
+	return urlsanitize.NewTransportError(operation, urlsanitize.RedactURLForError(rawURL), err)
 }
 
 // BuildRequestBody builds a JSON request body
@@ -526,12 +879,26 @@ func ParseErrorWithStatus(body []byte, statusCode int) error {
 
 	if err := json.Unmarshal(body, &errResp); err == nil && len(errResp.Errors) > 0 {
 		associatedErrors := parseAssociatedErrors(errResp.Errors[0].Meta)
+		allCodes := make([]string, 0, len(errResp.Errors))
+		allDetails := make([]string, 0, len(errResp.Errors))
+		entries := make([]APIErrorEntry, 0, len(errResp.Errors))
+		for _, entry := range errResp.Errors {
+			if code := strings.TrimSpace(entry.Code); code != "" {
+				allCodes = append(allCodes, code)
+			}
+			allDetails = append(allDetails, entry.Detail)
+			entries = append(entries, APIErrorEntry{Code: strings.TrimSpace(entry.Code), Detail: entry.Detail})
+		}
 		return &APIError{
 			Code:             errResp.Errors[0].Code,
 			Title:            errResp.Errors[0].Title,
 			Detail:           errResp.Errors[0].Detail,
 			StatusCode:       statusCode,
 			AssociatedErrors: associatedErrors,
+			AllCodes:         allCodes,
+			AllDetails:       allDetails,
+			Entries:          entries,
+			Remediation:      remediationForAPIError(errResp.Errors[0].Code),
 		}
 	}
 
@@ -638,23 +1005,6 @@ func sanitizeErrorBody(body []byte) string {
 		}
 	}
 	return string(result)
-}
-
-// sanitizeTerminal strips control characters to prevent terminal escape injection.
-// It removes ASCII control characters (0x00-0x1F) and DEL (0x7F).
-func sanitizeTerminal(input string) string {
-	if input == "" {
-		return ""
-	}
-	var b strings.Builder
-	b.Grow(len(input))
-	for _, r := range input {
-		if r < 0x20 || r == 0x7f {
-			continue
-		}
-		b.WriteRune(r)
-	}
-	return b.String()
 }
 
 // validateAPIPath checks a relative API path for dangerous characters that

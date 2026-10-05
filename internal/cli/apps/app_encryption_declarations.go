@@ -38,8 +38,8 @@ Examples:
 func AppEncryptionDeclarationsListCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("apps app-encryption-declarations list", flag.ExitOnError)
 
-	appID := fs.String("id", "", "App Store Connect app ID (or ASC_APP_ID)")
-	builds := fs.String("build", "", "Filter by build IDs (comma-separated)")
+	appID := shared.BindResourceIDFlag(fs, "id", "apps", "App Store Connect app ID (or ASC_APP_ID)")
+	builds := fs.String("build-id", "", "Filter by build IDs (comma-separated)")
 	fields := fs.String("fields", "", "Fields to include: "+strings.Join(appEncryptionDeclarationFieldsList(), ", "))
 	documentFields := fs.String("document-fields", "", "Document fields to include: "+strings.Join(appEncryptionDeclarationDocumentFieldsList(), ", "))
 	include := fs.String("include", "", "Include relationships: "+strings.Join(appEncryptionDeclarationIncludeList(), ", "))
@@ -63,13 +63,13 @@ Examples:
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
 			if *limit != 0 && (*limit < 1 || *limit > 200) {
-				return fmt.Errorf("apps app-encryption-declarations list: --limit must be between 1 and 200")
+				return shared.UsageError("apps app-encryption-declarations list: --limit must be between 1 and 200")
 			}
 			if *buildLimit != 0 && (*buildLimit < 1 || *buildLimit > 50) {
-				return fmt.Errorf("apps app-encryption-declarations list: --build-limit must be between 1 and 50")
+				return shared.UsageError("apps app-encryption-declarations list: --build-limit must be between 1 and 50")
 			}
 			if err := shared.ValidateNextURL(*next); err != nil {
-				return fmt.Errorf("apps app-encryption-declarations list: %w", err)
+				return shared.UsageErrorf("apps app-encryption-declarations list: %v", err)
 			}
 
 			fieldsValue, err := normalizeAppEncryptionDeclarationFields(*fields)
@@ -88,7 +88,7 @@ Examples:
 			resolvedAppID := shared.ResolveAppID(*appID)
 			if resolvedAppID == "" && strings.TrimSpace(*next) == "" {
 				fmt.Fprintln(os.Stderr, "Error: --id is required (or set ASC_APP_ID)")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--id")
 			}
 
 			buildIDs := shared.SplitCSV(*builds)

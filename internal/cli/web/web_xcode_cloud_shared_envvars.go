@@ -20,15 +20,15 @@ func webXcodeCloudEnvVarsSharedCommand() *ffcli.Command {
 	return &ffcli.Command{
 		Name:       "shared",
 		ShortUsage: "asc web xcode-cloud env-vars shared <subcommand> [flags]",
-		ShortHelp:  "[experimental] Manage shared (product-level) environment variables.",
-		LongHelp: `EXPERIMENTAL / UNOFFICIAL / DISCOURAGED
+		ShortHelp:  "Manage shared (product-level) environment variables.",
+		LongHelp: `WEB SESSION WORKFLOWS
 
 List, set, and delete shared (product-level) environment variables for
-Xcode Cloud products using Apple's private CI API. Requires a web session.
+Xcode Cloud products using Apple's CI API. Requires a web session.
 
 Shared env vars are scoped to a product and can be linked to specific workflows.
 
-` + webWarningText + `
+
 
 Examples:
   asc web xcode-cloud env-vars shared list --product-id "UUID" --apple-id "user@example.com"
@@ -79,13 +79,13 @@ func webXcodeCloudEnvVarsSharedListCommand() *ffcli.Command {
 	return &ffcli.Command{
 		Name:       "list",
 		ShortUsage: "asc web xcode-cloud env-vars shared list --product-id ID [flags]",
-		ShortHelp:  "[experimental] List shared (product-level) environment variables.",
-		LongHelp: `EXPERIMENTAL / UNOFFICIAL / DISCOURAGED
+		ShortHelp:  "List shared (product-level) environment variables.",
+		LongHelp: `WEB SESSION WORKFLOWS
 
 List shared environment variables for an Xcode Cloud product.
 Plaintext variables show their values; secret variables show "(redacted)".
 
-` + webWarningText + `
+
 
 Examples:
   asc web xcode-cloud env-vars shared list --product-id "UUID" --apple-id "user@example.com"
@@ -96,13 +96,11 @@ Examples:
 			pid := strings.TrimSpace(*productID)
 			if pid == "" {
 				fmt.Fprintln(os.Stderr, "Error: --product-id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--product-id")
 			}
 
-			requestCtx, cancel := shared.ContextWithTimeout(ctx)
+			session, requestCtx, cancel, err := resolveWebSessionForCommand(ctx, sessionFlags)
 			defer cancel()
-
-			session, err := resolveWebSessionForCommand(requestCtx, sessionFlags)
 			if err != nil {
 				return err
 			}
@@ -149,13 +147,13 @@ func webXcodeCloudEnvVarsSharedSetCommand() *ffcli.Command {
 	value := fs.String("value", "", "Environment variable value (required)")
 	secret := fs.Bool("secret", false, "Encrypt the value as a secret (keep value redacted)")
 	locked := fs.Bool("locked", false, "Restrict editing of this variable")
-	workflowIDs := fs.String("workflow-ids", "", "Comma-separated workflow IDs to link (optional)")
+	workflowIDs := shared.BindOnceCSVFlag(fs, "workflow-ids", "Comma-separated workflow IDs to link (optional)")
 
 	return &ffcli.Command{
 		Name:       "set",
 		ShortUsage: "asc web xcode-cloud env-vars shared set --product-id ID --name NAME --value VALUE [--secret] [--locked] [--workflow-ids IDS] [flags]",
-		ShortHelp:  "[experimental] Set a shared (product-level) environment variable.",
-		LongHelp: `EXPERIMENTAL / UNOFFICIAL / DISCOURAGED
+		ShortHelp:  "Set a shared (product-level) environment variable.",
+		LongHelp: `WEB SESSION WORKFLOWS
 
 Set (create or update) a shared environment variable on an Xcode Cloud product.
 Use --secret to encrypt the value (the same scheme as the ASC web UI).
@@ -163,7 +161,7 @@ Use --locked to restrict editing of this variable.
 Use --workflow-ids to link the variable to specific workflows.
 If a variable with the same name already exists, it will be updated.
 
-` + webWarningText + `
+
 
 Examples:
   asc web xcode-cloud env-vars shared set --product-id "UUID" --name MY_VAR --value hello --apple-id "user@example.com"
@@ -175,23 +173,21 @@ Examples:
 			pid := strings.TrimSpace(*productID)
 			if pid == "" {
 				fmt.Fprintln(os.Stderr, "Error: --product-id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--product-id")
 			}
 			varName := strings.TrimSpace(*name)
 			if varName == "" {
 				fmt.Fprintln(os.Stderr, "Error: --name is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--name")
 			}
 			varValue := *value
 			if varValue == "" {
 				fmt.Fprintln(os.Stderr, "Error: --value is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--value")
 			}
 
-			requestCtx, cancel := shared.ContextWithTimeout(ctx)
+			session, requestCtx, cancel, err := resolveWebSessionForCommand(ctx, sessionFlags)
 			defer cancel()
-
-			session, err := resolveWebSessionForCommand(requestCtx, sessionFlags)
 			if err != nil {
 				return err
 			}
@@ -218,7 +214,7 @@ Examples:
 					envValue = webcore.CIEnvironmentVariableValue{Plaintext: &varValue}
 				}
 
-				wfIDs := parseWorkflowIDs(*workflowIDs)
+				wfIDs := parseWorkflowIDs(workflowIDs.String())
 				if wfIDs == nil {
 					wfIDs = []string{}
 				}
@@ -295,12 +291,12 @@ func webXcodeCloudEnvVarsSharedDeleteCommand() *ffcli.Command {
 	return &ffcli.Command{
 		Name:       "delete",
 		ShortUsage: "asc web xcode-cloud env-vars shared delete --product-id ID --name NAME --confirm [flags]",
-		ShortHelp:  "[experimental] Delete a shared (product-level) environment variable.",
-		LongHelp: `EXPERIMENTAL / UNOFFICIAL / DISCOURAGED
+		ShortHelp:  "Delete a shared (product-level) environment variable.",
+		LongHelp: `WEB SESSION WORKFLOWS
 
 Delete a shared environment variable from an Xcode Cloud product by name.
 
-` + webWarningText + `
+
 
 Examples:
   asc web xcode-cloud env-vars shared delete --product-id "UUID" --name MY_VAR --confirm --apple-id "user@example.com"`,
@@ -310,22 +306,20 @@ Examples:
 			pid := strings.TrimSpace(*productID)
 			if pid == "" {
 				fmt.Fprintln(os.Stderr, "Error: --product-id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--product-id")
 			}
 			varName := strings.TrimSpace(*name)
 			if varName == "" {
 				fmt.Fprintln(os.Stderr, "Error: --name is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--name")
 			}
 			if !*confirm {
 				fmt.Fprintln(os.Stderr, "Error: --confirm is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--confirm")
 			}
 
-			requestCtx, cancel := shared.ContextWithTimeout(ctx)
+			session, requestCtx, cancel, err := resolveWebSessionForCommand(ctx, sessionFlags)
 			defer cancel()
-
-			session, err := resolveWebSessionForCommand(requestCtx, sessionFlags)
 			if err != nil {
 				return err
 			}

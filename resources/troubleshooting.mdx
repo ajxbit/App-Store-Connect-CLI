@@ -11,8 +11,10 @@
 **Solution**:
 
 ```bash  theme={null}
-# Bypass keychain and use environment variables
-export ASC_BYPASS_KEYCHAIN=1
+# A complete environment set skips keychain when no profile is selected
+unset ASC_PROFILE ASC_BYPASS_KEYCHAIN ASC_CONFIG_PATH
+unset ASC_PRIVATE_KEY ASC_PRIVATE_KEY_B64
+export ASC_KEY_TYPE="team"
 export ASC_KEY_ID="YOUR_KEY_ID"
 export ASC_ISSUER_ID="YOUR_ISSUER_ID"
 export ASC_PRIVATE_KEY_PATH="/path/to/AuthKey.p8"
@@ -21,21 +23,34 @@ export ASC_PRIVATE_KEY_PATH="/path/to/AuthKey.p8"
 Alternatively, use base64-encoded keys for headless environments:
 
 ```bash  theme={null}
+unset ASC_PROFILE ASC_BYPASS_KEYCHAIN ASC_CONFIG_PATH
+unset ASC_PRIVATE_KEY_PATH ASC_PRIVATE_KEY
 export ASC_PRIVATE_KEY_B64="BASE64_ENCODED_KEY"
 ```
+
+If you intentionally use config storage, set `ASC_BYPASS_KEYCHAIN=1`. In bypass mode, the active config is tried before environment fallback.
+
+### Keychain Prompts Again After Upgrading
+
+**Problem**: After upgrading `asc`, macOS asks again for access to the stored `ASC API Key` item, and "Always Allow" from the previous version does not carry over.
+
+**Cause**: macOS keychain access lists trust an application by its code-signing designated requirement. Releases before 5.3.1 were signed with a version-specific identifier (for example `asc_5.3.0_macOS_arm64`), so every upgrade looked like a new application to the keychain. Each stored profile also required its own prompt, because resolving one profile used to read every stored secret.
+
+**Solution**: Upgrade to 5.3.1 or later. Releases now share the identifier `com.rorkai.asc`, so "Always Allow" granted to one release covers later releases, and resolving a profile reads only that profile's secret. The first run of 5.3.1 still prompts once because the identifier changed; choose "Always Allow" for each stored profile you use.
+
+Builds that are not signed with the release Developer ID (for example a local `go build`) are identified by the hash of the binary, so each rebuild prompts again. Use `ASC_BYPASS_KEYCHAIN=1` with config-file credentials for those builds.
 
 ### Multiple Credential Sources Conflict
 
 **Problem**: Error message about credentials resolving from multiple sources.
 
-**Solution**: Enable strict auth mode to identify the conflict:
+**Solution**: Enable strict auth mode on an authenticated command to identify the conflict:
 
 ```bash  theme={null}
-export ASC_STRICT_AUTH=true
-asc auth status
+ASC_STRICT_AUTH=true asc apps list
 ```
 
-Then choose one credential source (keychain, config file, or environment variables) and remove the others.
+`asc auth doctor` can also report mixed-source conflicts, but an authenticated command exercises the exact runtime credential path. Make sure every required field comes from one source, or remove partial values that are being used as fallback. Values that are present but unused do not trigger strict mode. See the [credential resolution matrix](/authentication#credential-resolution).
 
 ### JWT Token Expiration
 
@@ -88,7 +103,7 @@ For analytics operations with large datasets:
 
 ```bash  theme={null}
 export ASC_TIMEOUT=5m
-asc analytics view --request-id "REQUEST_ID" --date "2024-01-01" --paginate
+asc analytics view --request-id "REQUEST_ID" --processing-date "2024-01-01" --paginate
 ```
 
 ## Permission Errors
@@ -140,7 +155,7 @@ If the build shows `PROCESSING` for more than 30 minutes, check App Store Connec
 **Solution**: Always use `--paginate` for complete results:
 
 ```bash  theme={null}
-asc analytics view --request-id "REQUEST_ID" --date "2024-01-01" --paginate
+asc analytics view --request-id "REQUEST_ID" --processing-date "2024-01-01" --paginate
 asc testflight feedback list --app "123456789" --paginate
 ```
 
@@ -162,10 +177,15 @@ Finance reports use Apple fiscal months, not calendar months.
 
 **Problem**: CLI can't find configuration file.
 
-**Solution**: Check config file locations (in priority order):
+**Solution**: Check config selection in this order:
 
-1. `./.asc/config.json` (repo-local)
-2. `~/.asc/config.json` (user home)
+1. `ASC_CONFIG_PATH` (absolute path, when set)
+2. Nearest `.asc/config.json` from the current directory upward
+3. `~/.asc/config.json` (user home)
+
+When `ASC_CONFIG_PATH` is unset, an empty local config can fall back to global credentials. A local config containing credential fields shadows the global store, and incomplete credential data can error instead of falling back. Setting `ASC_CONFIG_PATH` disables global fallback.
+
+Overriding `HOME` does not hide your account's `~/.asc/config.json` when you run `asc` from a directory inside your account home: the upward search in step 2 still finds it, and `asc` prints a warning. Set `ASC_CONFIG_PATH` to an absolute path to choose the config explicitly.
 
 Ensure file permissions are restrictive:
 
@@ -177,12 +197,14 @@ chmod 600 ~/.asc/config.json
 
 **Problem**: Settings not taking effect.
 
-**Solution**: Priority order (highest to lowest):
+**Solution**: For non-authentication settings, priority is generally:
 
 1. Command-line flags (e.g., `--output json`)
 2. Environment variables (e.g., `ASC_DEFAULT_OUTPUT`)
 3. Config file settings
 4. Default values (TTY-aware for output)
+
+Authentication credentials use conditional precedence. See the [credential resolution matrix](/authentication#credential-resolution).
 
 ## Debug Mode
 
@@ -221,12 +243,19 @@ ASC_BYPASS_KEYCHAIN=1 make test
 **Solution**: Integration tests are opt-in. Set credentials and use:
 
 ```bash  theme={null}
+unset ASC_PROFILE ASC_BYPASS_KEYCHAIN ASC_CONFIG_PATH
+unset ASC_PRIVATE_KEY ASC_PRIVATE_KEY_B64
+export ASC_KEY_TYPE="team"
 export ASC_KEY_ID="YOUR_KEY_ID"
 export ASC_ISSUER_ID="YOUR_ISSUER_ID"
 export ASC_PRIVATE_KEY_PATH="/path/to/AuthKey.p8"
 export ASC_APP_ID="YOUR_APP_ID"
 
-make test-integration
+(
+  ASC_TEST_CONFIG_DIR="$(mktemp -d)"
+  trap 'rm -rf "$ASC_TEST_CONFIG_DIR"' EXIT
+  ASC_BYPASS_KEYCHAIN=1 ASC_CONFIG_PATH="$ASC_TEST_CONFIG_DIR/config.json" make test-integration
+)
 ```
 
 ## Platform-Specific Issues
@@ -242,17 +271,17 @@ make test-integration
 3. Right-click → Get Info → Access Control
 4. Add your terminal app (Terminal.app, iTerm2, etc.)
 
-### Linux Missing Dependencies
+### Linux Source Build Dependencies
 
-**Problem**: Build or runtime errors on Linux.
+**Problem**: Building from source fails because the required Go toolchain is unavailable.
 
-**Solution**: Ensure Go 1.26+ is installed:
+**Solution**: Use the Go version declared by `go.mod`. The Go toolchain can download that version automatically when needed:
 
 ```bash  theme={null}
-go version  # Should show 1.26 or higher
+go version
 ```
 
-For keychain features, the CLI falls back to config files on Linux.
+Released `asc` binaries do not require Go. For keychain features, the CLI falls back to config files on Linux.
 
 ## Common Error Messages
 
@@ -304,13 +333,13 @@ asc <command> <subcommand> --help
 
 If you've found a bug:
 
-1. Check existing issues: [https://github.com/rudrankriyam/App-Store-Connect-CLI/issues](https://github.com/rudrankriyam/App-Store-Connect-CLI/issues)
+1. Check existing issues: [https://github.com/rorkai/App-Store-Connect-CLI/issues](https://github.com/rorkai/App-Store-Connect-CLI/issues)
 2. Include:
    * CLI version (`asc version`)
    * Platform (macOS/Linux, architecture)
    * Command run (sanitize sensitive data)
    * Full error output with `ASC_DEBUG=api`
-3. For security issues, use private reporting: [https://github.com/rudrankriyam/App-Store-Connect-CLI/security/advisories/new](https://github.com/rudrankriyam/App-Store-Connect-CLI/security/advisories/new)
+3. For security issues, use private reporting: [https://github.com/rorkai/App-Store-Connect-CLI/security/advisories/new](https://github.com/rorkai/App-Store-Connect-CLI/security/advisories/new)
 
 ## Performance Optimization
 

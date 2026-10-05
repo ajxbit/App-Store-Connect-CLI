@@ -30,39 +30,53 @@ func ReviewsSummarizationsCommand() *ffcli.Command {
 
 	return &ffcli.Command{
 		Name:       "summarizations",
-		ShortUsage: "asc reviews summarizations [flags]",
+		ShortUsage: "asc reviews summarizations (--app APP_ID --platform PLATFORM[,PLATFORM...] | --next URL) [flags]",
 		ShortHelp:  "List App Store review summarizations.",
 		LongHelp: `List App Store review summarizations for an app.
 
 Examples:
-  asc reviews summarizations --app "APP_ID"
+  asc reviews summarizations --app "APP_ID" --platform IOS
   asc reviews summarizations --app "APP_ID" --platform IOS --territory USA
-  asc reviews summarizations --app "APP_ID" --limit 50
+  asc reviews summarizations --app "APP_ID" --platform IOS --limit 50
   asc reviews summarizations --next "<links.next>"`,
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
-			if *limit != 0 && (*limit < 1 || *limit > 200) {
-				return fmt.Errorf("reviews summarizations: --limit must be between 1 and 200")
-			}
+			nextValue := strings.TrimSpace(*next)
 			if err := shared.ValidateNextURL(*next); err != nil {
-				return fmt.Errorf("reviews summarizations: %w", err)
+				return shared.WithDiagnostic(shared.NewValidationError(shared.UsageErrorf("reviews summarizations: %v", err)), shared.DiagnosticInvalidInput, "--next")
+			}
+			if err := rejectReviewNextFlagConflicts(
+				fs, *next, "reviews summarizations",
+				"app", "platform", "territory", "fields", "territory-fields", "include", "limit",
+			); err != nil {
+				return err
+			}
+			if *limit != 0 && (*limit < 1 || *limit > 200) {
+				return shared.WithDiagnostic(shared.NewValidationError(shared.UsageError("reviews summarizations: --limit must be between 1 and 200")), shared.DiagnosticInvalidInput, "--limit")
 			}
 
 			resolvedAppID := shared.ResolveAppID(*appID)
-			if resolvedAppID == "" && strings.TrimSpace(*next) == "" {
+			if resolvedAppID == "" && nextValue == "" {
 				fmt.Fprintln(os.Stderr, "Error: --app is required (or set ASC_APP_ID)")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--app")
+			}
+			if nextValue != "" {
+				resolvedAppID = ""
 			}
 
 			fieldsValue, err := normalizeReviewSummarizationFields(*fields)
 			if err != nil {
-				return fmt.Errorf("reviews summarizations: %w", err)
+				return shared.WithDiagnostic(shared.NewValidationError(fmt.Errorf("reviews summarizations: %w", err)), shared.DiagnosticInvalidInput, "--fields")
 			}
 
 			platformValues, err := shared.NormalizeAppStoreVersionPlatforms(shared.SplitCSVUpper(*platforms))
 			if err != nil {
-				return fmt.Errorf("reviews summarizations: %w", err)
+				return shared.WithDiagnostic(shared.NewValidationError(fmt.Errorf("reviews summarizations: %w", err)), shared.DiagnosticInvalidInput, "--platform")
+			}
+			if len(platformValues) == 0 && nextValue == "" {
+				fmt.Fprintln(os.Stderr, "Error: --platform is required")
+				return shared.MissingRequiredUsageError("--platform")
 			}
 
 			client, err := shared.GetASCClient()
@@ -84,13 +98,17 @@ Examples:
 			}
 
 			if *paginate {
-				paginateOpts := append(opts, asc.WithCustomerReviewSummarizationsLimit(200))
-				summaries, err := shared.PaginateWithSpinner(requestCtx,
+				paginateOpts := opts
+				if nextValue == "" {
+					paginateOpts = append(paginateOpts, asc.WithCustomerReviewSummarizationsLimit(200))
+				}
+				summaries, err := shared.PaginateWithSpinner(
+					requestCtx,
 					func(ctx context.Context) (asc.PaginatedResponse, error) {
 						return client.GetCustomerReviewSummarizations(ctx, resolvedAppID, paginateOpts...)
 					},
 					func(ctx context.Context, nextURL string) (asc.PaginatedResponse, error) {
-						return client.GetCustomerReviewSummarizations(ctx, resolvedAppID, asc.WithCustomerReviewSummarizationsNextURL(nextURL))
+						return client.GetCustomerReviewSummarizations(ctx, "", asc.WithCustomerReviewSummarizationsNextURL(nextURL))
 					},
 				)
 				if err != nil {

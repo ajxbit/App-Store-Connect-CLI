@@ -23,6 +23,8 @@ echo $?  # 0 = success
 | `3`  | Authentication failure | Missing credentials, invalid API key, or permission denied      |
 | `4`  | Resource not found     | App, build, or resource does not exist                          |
 | `5`  | Conflict               | Resource already exists or version conflict                     |
+| `6`  | Read-only refusal      | `ASC_READ_ONLY` or `--read-only` blocked a mutating request     |
+| `7`  | Still pending          | `asc builds wait --report-pending` timed out before processing  |
 
 ### HTTP Status Mapping
 
@@ -32,14 +34,14 @@ The CLI maps HTTP status codes to exit codes:
 
 **Formula:** `10 + (status - 400)`
 
-| HTTP Status       | Exit Code | Description                       |
-| ----------------- | --------- | --------------------------------- |
-| 400 Bad Request   | `10`      | Invalid request parameters        |
-| 401 Unauthorized  | `11`      | Authentication required           |
-| 403 Forbidden     | `12`      | Permission denied                 |
-| 404 Not Found     | `4`       | Resource not found (special case) |
-| 409 Conflict      | `5`       | Resource conflict (special case)  |
-| 422 Unprocessable | `22`      | Validation error                  |
+| HTTP Status       | Exit Code | Description                            |
+| ----------------- | --------- | -------------------------------------- |
+| 400 Bad Request   | `10`      | Invalid request parameters             |
+| 401 Unauthorized  | `3`       | Authentication failure (special case)  |
+| 403 Forbidden     | `3`       | Authentication failure (special case)  |
+| 404 Not Found     | `4`       | Resource not found (special case)      |
+| 409 Conflict      | `5`       | Resource conflict (special case)       |
+| 422 Unprocessable | `32`      | Validation error                       |
 
 #### 5xx Server Errors
 
@@ -140,6 +142,48 @@ asc apps list --output json | jq '.data[0].id'
 # Capture errors separately
 asc apps view --id APP_ID > output.json 2> errors.log
 ```
+
+### Unknown Flags
+
+An unknown flag is a usage error: exit code `2`, nothing on stdout, and a
+diagnostic on stderr that names up to three flags the command actually defines
+under `Try:`. Suggestions come from the command's own flag set, so a suggested
+flag is always accepted by the command that printed it:
+
+```
+$ asc submit status --app <APP_ID>
+Error: unknown flag `--app` for `asc submit status`
+Try:
+  --id
+For help:
+  asc submit status --help
+```
+
+The flag value is never echoed, and a flag removed in 5.0 names its
+replacement instead (see [Migrate to 5.0](/migrate-to-5-0)).
+
+### Credentials in Error Messages
+
+Errors never repeat the credential-bearing parts of a URL. Asset upload
+failures — Game Center images, App Clip assets, screenshots, previews — report
+the scheme, host, and path of the presigned URL but drop its userinfo, query
+values, and fragment, so an expired or refused upload cannot print the signature
+or token:
+
+```
+Error: upload operation 0: upload request failed for https://upload.example.com/v1/assets/chunk-1 (timeout)
+```
+
+`asc notify slack` reports only the scheme and host, because the webhook path is
+itself the secret:
+
+```
+Error: notify slack: failed to send: webhook POST failed for https://hooks.slack.com
+```
+
+The failure class (`timeout`, `canceled`) and the HTTP status of non-transport
+failures are preserved, and the underlying error stays wrapped so programmatic
+inspection keeps working.
 
 ## Handling Errors in Scripts
 
@@ -261,11 +305,11 @@ Common authentication failures and solutions:
 ```bash  theme={null}
 asc apps list
 # Error: missing authentication. Run 'asc auth login' or 'asc auth init'
-# Exit code: 1 (generic error, not 3)
+# Exit code: 3 (authentication failure)
 ```
 
 <Note>
-  Missing credentials return exit code `1`, not `3`. Exit code `3` is reserved for **failed authentication** (invalid credentials), not missing credentials.
+  Missing, invalid, unauthorized, and forbidden credentials all return exit code `3`, so scripts can handle authentication failures consistently.
 </Note>
 
 ### Invalid API Key
@@ -345,4 +389,4 @@ unset ASC_DEBUG
 
 * [Authentication](/authentication) - Set up API credentials
 * [Workflows](/concepts/workflows) - Error handling in multi-step workflows
-* [Exit Codes Reference](https://github.com/rudrankriyam/App-Store-Connect-CLI/blob/main/cmd/exit_codes.go) - Source code
+* [Exit Codes Reference](https://github.com/rorkai/App-Store-Connect-CLI/blob/main/cmd/exit_codes.go) - Source code

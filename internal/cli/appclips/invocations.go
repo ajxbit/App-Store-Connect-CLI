@@ -13,6 +13,8 @@ import (
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/cli/shared"
 )
 
+var appClipsClientFactory = shared.GetASCClient
+
 // AppClipInvocationsCommand returns the invocations command group.
 func AppClipInvocationsCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("invocations", flag.ExitOnError)
@@ -65,19 +67,19 @@ Examples:
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
 			if *limit != 0 && (*limit < 1 || *limit > 200) {
-				return fmt.Errorf("app-clips invocations list: --limit must be between 1 and 200")
+				return shared.UsageError("app-clips invocations list: --limit must be between 1 and 200")
 			}
 			if err := shared.ValidateNextURL(*next); err != nil {
-				return fmt.Errorf("app-clips invocations list: %w", err)
+				return shared.UsageErrorf("app-clips invocations list: %v", err)
 			}
 
 			buildBundleValue := strings.TrimSpace(*buildBundleID)
 			if buildBundleValue == "" {
 				fmt.Fprintln(os.Stderr, "Error: --build-bundle-id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--build-bundle-id")
 			}
 
-			client, err := shared.GetASCClient()
+			client, err := appClipsClientFactory()
 			if err != nil {
 				return fmt.Errorf("app-clips invocations list: %w", err)
 			}
@@ -129,31 +131,31 @@ Examples:
 
 // AppClipInvocationsGetCommand gets a beta App Clip invocation by ID.
 func AppClipInvocationsGetCommand() *ffcli.Command {
-	fs := flag.NewFlagSet("get", flag.ExitOnError)
+	fs := flag.NewFlagSet("view", flag.ExitOnError)
 
-	invocationID := fs.String("invocation-id", "", "Invocation ID")
+	invocationID := shared.BindResourceIDFlag(fs, "invocation-id", "betaAppClipInvocations", "Invocation ID")
 	output := shared.BindOutputFlags(fs)
 
 	return &ffcli.Command{
-		Name:       "get",
-		ShortUsage: "asc app-clips invocations get --invocation-id \"INVOCATION_ID\"",
-		ShortHelp:  "Get a beta App Clip invocation by ID.",
-		LongHelp: `Get a beta App Clip invocation by ID.
+		Name:       "view",
+		ShortUsage: "asc app-clips invocations view --invocation-id \"INVOCATION_ID\"",
+		ShortHelp:  "View a beta App Clip invocation by ID.",
+		LongHelp: `View a beta App Clip invocation by ID.
 
 Examples:
-  asc app-clips invocations get --invocation-id "INVOCATION_ID"`,
+  asc app-clips invocations view --invocation-id "INVOCATION_ID"`,
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
 			invocationValue := strings.TrimSpace(*invocationID)
 			if invocationValue == "" {
 				fmt.Fprintln(os.Stderr, "Error: --invocation-id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--invocation-id")
 			}
 
-			client, err := shared.GetASCClient()
+			client, err := appClipsClientFactory()
 			if err != nil {
-				return fmt.Errorf("app-clips invocations get: %w", err)
+				return fmt.Errorf("app-clips invocations view: %w", err)
 			}
 
 			requestCtx, cancel := shared.ContextWithTimeout(ctx)
@@ -161,7 +163,7 @@ Examples:
 
 			resp, err := client.GetBetaAppClipInvocation(requestCtx, invocationValue)
 			if err != nil {
-				return fmt.Errorf("app-clips invocations get: failed to fetch: %w", err)
+				return fmt.Errorf("app-clips invocations view: failed to fetch: %w", err)
 			}
 
 			return shared.PrintOutput(resp, *output.Output, *output.Pretty)
@@ -175,33 +177,62 @@ func AppClipInvocationsCreateCommand() *ffcli.Command {
 
 	buildBundleID := fs.String("build-bundle-id", "", "Build bundle ID")
 	url := fs.String("url", "", "Invocation URL")
-	localizationIDs := fs.String("localization-id", "", "Localization ID(s), comma-separated")
+	localizationIDs := shared.BindOnceCSVFlag(fs, "localization-id", "Existing localization ID(s), comma-separated")
+	locale := fs.String("locale", "", "Inline localization locale (use with --title)")
+	title := fs.String("title", "", "Inline localization title (use with --locale)")
 	output := shared.BindOutputFlags(fs)
 
 	return &ffcli.Command{
 		Name:       "create",
-		ShortUsage: "asc app-clips invocations create --build-bundle-id \"BUILD_BUNDLE_ID\" --url \"https://example.com/clip\" [flags]",
+		ShortUsage: "asc app-clips invocations create --build-bundle-id \"BUILD_BUNDLE_ID\" --url \"https://example.com/clip\" (--localization-id \"LOC_ID\" | --locale \"en-US\" --title \"Try it\") [flags]",
 		ShortHelp:  "Create a beta App Clip invocation.",
 		LongHelp: `Create a beta App Clip invocation.
 
+Provide either pre-existing localization IDs with ` + "`--localization-id`" + ` or an inline localization with ` + "`--locale`" + ` and ` + "`--title`" + `.
+
 Examples:
-  asc app-clips invocations create --build-bundle-id "BUILD_BUNDLE_ID" --url "https://example.com/clip"`,
+  asc app-clips invocations create --build-bundle-id "BUILD_BUNDLE_ID" --url "https://example.com/clip" --locale "en-US" --title "Try it"
+  asc app-clips invocations create --build-bundle-id "BUILD_BUNDLE_ID" --url "https://example.com/clip" --localization-id "LOC_ID"`,
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
 			buildBundleValue := strings.TrimSpace(*buildBundleID)
 			if buildBundleValue == "" {
 				fmt.Fprintln(os.Stderr, "Error: --build-bundle-id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--build-bundle-id")
 			}
 
 			urlValue := strings.TrimSpace(*url)
 			if urlValue == "" {
 				fmt.Fprintln(os.Stderr, "Error: --url is required")
+				return shared.MissingRequiredUsageError("--url")
+			}
+
+			localizationValues := shared.SplitCSV(localizationIDs.String())
+			localeValue := strings.TrimSpace(*locale)
+			titleValue := strings.TrimSpace(*title)
+			if titleValue != "" && localeValue == "" {
+				fmt.Fprintln(os.Stderr, "Error: --locale is required when --title is set")
+				return shared.MissingRequiredUsageError("--locale")
+			}
+			if localeValue != "" && titleValue == "" {
+				fmt.Fprintln(os.Stderr, "Error: --title is required when --locale is set")
+				return shared.MissingRequiredUsageError("--title")
+			}
+
+			inlineLocalizations := make([]asc.BetaAppClipInvocationLocalizationCreateAttributes, 0, 1)
+			if localeValue != "" && titleValue != "" {
+				inlineLocalizations = append(inlineLocalizations, asc.BetaAppClipInvocationLocalizationCreateAttributes{
+					Locale: localeValue,
+					Title:  titleValue,
+				})
+			}
+			if len(localizationValues) == 0 && len(inlineLocalizations) == 0 {
+				fmt.Fprintln(os.Stderr, "Error: provide --localization-id or both --locale and --title")
 				return flag.ErrHelp
 			}
 
-			client, err := shared.GetASCClient()
+			client, err := appClipsClientFactory()
 			if err != nil {
 				return fmt.Errorf("app-clips invocations create: %w", err)
 			}
@@ -210,7 +241,7 @@ Examples:
 			defer cancel()
 
 			attrs := asc.BetaAppClipInvocationCreateAttributes{URL: urlValue}
-			resp, err := client.CreateBetaAppClipInvocation(requestCtx, buildBundleValue, attrs, shared.SplitCSV(*localizationIDs))
+			resp, err := client.CreateBetaAppClipInvocation(requestCtx, buildBundleValue, attrs, localizationValues, inlineLocalizations)
 			if err != nil {
 				return fmt.Errorf("app-clips invocations create: failed to create: %w", err)
 			}
@@ -224,7 +255,7 @@ Examples:
 func AppClipInvocationsUpdateCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("update", flag.ExitOnError)
 
-	invocationID := fs.String("invocation-id", "", "Invocation ID")
+	invocationID := shared.BindResourceIDFlag(fs, "invocation-id", "betaAppClipInvocations", "Invocation ID")
 	url := fs.String("url", "", "Invocation URL")
 	output := shared.BindOutputFlags(fs)
 
@@ -242,7 +273,7 @@ Examples:
 			invocationValue := strings.TrimSpace(*invocationID)
 			if invocationValue == "" {
 				fmt.Fprintln(os.Stderr, "Error: --invocation-id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--invocation-id")
 			}
 
 			visited := map[string]bool{}
@@ -251,13 +282,13 @@ Examples:
 			})
 			if !visited["url"] {
 				fmt.Fprintln(os.Stderr, "Error: at least one update flag is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("")
 			}
 
 			urlValue := strings.TrimSpace(*url)
 			attrs := &asc.BetaAppClipInvocationUpdateAttributes{URL: &urlValue}
 
-			client, err := shared.GetASCClient()
+			client, err := appClipsClientFactory()
 			if err != nil {
 				return fmt.Errorf("app-clips invocations update: %w", err)
 			}
@@ -279,7 +310,7 @@ Examples:
 func AppClipInvocationsDeleteCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("delete", flag.ExitOnError)
 
-	invocationID := fs.String("invocation-id", "", "Invocation ID")
+	invocationID := shared.BindResourceIDFlag(fs, "invocation-id", "betaAppClipInvocations", "Invocation ID")
 	confirm := fs.Bool("confirm", false, "Confirm deletion")
 	output := shared.BindOutputFlags(fs)
 
@@ -297,14 +328,14 @@ Examples:
 			invocationValue := strings.TrimSpace(*invocationID)
 			if invocationValue == "" {
 				fmt.Fprintln(os.Stderr, "Error: --invocation-id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--invocation-id")
 			}
 			if !*confirm {
 				fmt.Fprintln(os.Stderr, "Error: --confirm is required to delete")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--confirm")
 			}
 
-			client, err := shared.GetASCClient()
+			client, err := appClipsClientFactory()
 			if err != nil {
 				return fmt.Errorf("app-clips invocations delete: %w", err)
 			}

@@ -1,6 +1,9 @@
 package asc
 
-import "fmt"
+import (
+	"encoding/json"
+	"fmt"
+)
 
 // AppStoreVersionSubmissionResult represents CLI output for submissions.
 type AppStoreVersionSubmissionResult struct {
@@ -34,14 +37,20 @@ type AppStoreVersionSubmissionCancelResult struct {
 
 // AppStoreVersionDetailResult represents CLI output for version details.
 type AppStoreVersionDetailResult struct {
-	ID            string                              `json:"id"`
-	VersionString string                              `json:"versionString,omitempty"`
-	Platform      string                              `json:"platform,omitempty"`
-	State         string                              `json:"state,omitempty"`
-	BuildID       string                              `json:"buildId,omitempty"`
-	BuildVersion  string                              `json:"buildVersion,omitempty"`
-	SubmissionID  string                              `json:"submissionId,omitempty"`
-	MetadataCopy  *AppStoreVersionMetadataCopySummary `json:"metadataCopy,omitempty"`
+	ID            string `json:"id"`
+	VersionString string `json:"versionString,omitempty"`
+	Platform      string `json:"platform,omitempty"`
+	State         string `json:"state,omitempty"`
+	// Downloadable mirrors Apple's nullable appStoreVersions attribute. The
+	// pointer keeps false distinct from an attribute Apple did not return.
+	Downloadable *bool                               `json:"downloadable,omitempty"`
+	BuildID      string                              `json:"buildId,omitempty"`
+	BuildVersion string                              `json:"buildVersion,omitempty"`
+	SubmissionID string                              `json:"submissionId,omitempty"`
+	MetadataCopy *AppStoreVersionMetadataCopySummary `json:"metadataCopy,omitempty"`
+	// IdempotentWriteReceipt is populated by versions create; view and
+	// update leave it empty so their output is unchanged.
+	IdempotentWriteReceipt
 }
 
 // AppStoreVersionMetadataCopySummary represents metadata carry-forward details during version creation.
@@ -67,6 +76,29 @@ type AppStoreVersionReleaseRequestResult struct {
 	VersionID        string `json:"versionId"`
 }
 
+// AppStoreVersionRatingResetCreateResult represents CLI output for scheduling a rating reset.
+type AppStoreVersionRatingResetCreateResult struct {
+	RatingResetRequestID string `json:"ratingResetRequestId"`
+	VersionID            string `json:"versionId"`
+	Scheduled            bool   `json:"scheduled"`
+}
+
+// AppStoreVersionRatingResetDeleteResult represents CLI output for cancelling a rating reset.
+type AppStoreVersionRatingResetDeleteResult struct {
+	RatingResetRequestID string `json:"ratingResetRequestId"`
+	Cancelled            bool   `json:"cancelled"`
+}
+
+// AppStoreVersionsLatestResult represents a computed latest-version list.
+// Unlike a raw API response, its pagination fields describe only the selected
+// items and cannot retain stale metadata from the aggregated source pages.
+type AppStoreVersionsLatestResult struct {
+	Items      []Resource[AppStoreVersionAttributes] `json:"items"`
+	Included   json.RawMessage                       `json:"included,omitempty"`
+	TotalCount int                                   `json:"totalCount"`
+	HasMore    bool                                  `json:"hasMore"`
+}
+
 func appStoreVersionsRows(resp *AppStoreVersionsResponse) ([]string, [][]string) {
 	headers := []string{"ID", "Version", "Platform", "State", "Created"}
 	rows := make([][]string, 0, len(resp.Data))
@@ -84,6 +116,10 @@ func appStoreVersionsRows(resp *AppStoreVersionsResponse) ([]string, [][]string)
 		})
 	}
 	return headers, rows
+}
+
+func appStoreVersionsLatestRows(result *AppStoreVersionsLatestResult) ([]string, [][]string) {
+	return appStoreVersionsRows(&AppStoreVersionsResponse{Data: result.Items})
 }
 
 func preReleaseVersionsRows(resp *PreReleaseVersionsResponse) ([]string, [][]string) {
@@ -137,7 +173,12 @@ func appStoreVersionSubmissionCancelRows(result *AppStoreVersionSubmissionCancel
 
 func appStoreVersionDetailRows(result *AppStoreVersionDetailResult) ([]string, [][]string) {
 	headers := []string{"Version ID", "Version", "Platform", "State", "Build ID", "Build Version", "Submission ID"}
-	rows := [][]string{{result.ID, result.VersionString, displayPlatform(result.Platform), result.State, result.BuildID, result.BuildVersion, result.SubmissionID}}
+	row := []string{result.ID, result.VersionString, displayPlatform(result.Platform), result.State, result.BuildID, result.BuildVersion, result.SubmissionID}
+	if result.Action != "" {
+		headers = append(headers, "Already Exists", "Action")
+		row = append(row, fmt.Sprintf("%t", result.AlreadyExists), result.Action)
+	}
+	rows := [][]string{row}
 	return headers, rows
 }
 
@@ -170,5 +211,17 @@ func appStoreVersionAttachBuildRows(result *AppStoreVersionAttachBuildResult) ([
 func appStoreVersionReleaseRequestRows(result *AppStoreVersionReleaseRequestResult) ([]string, [][]string) {
 	headers := []string{"Release Request ID", "Version ID"}
 	rows := [][]string{{result.ReleaseRequestID, result.VersionID}}
+	return headers, rows
+}
+
+func appStoreVersionRatingResetCreateRows(result *AppStoreVersionRatingResetCreateResult) ([]string, [][]string) {
+	headers := []string{"Rating Reset Request ID", "Version ID", "Scheduled"}
+	rows := [][]string{{result.RatingResetRequestID, result.VersionID, fmt.Sprintf("%t", result.Scheduled)}}
+	return headers, rows
+}
+
+func appStoreVersionRatingResetDeleteRows(result *AppStoreVersionRatingResetDeleteResult) ([]string, [][]string) {
+	headers := []string{"Rating Reset Request ID", "Cancelled"}
+	rows := [][]string{{result.RatingResetRequestID, fmt.Sprintf("%t", result.Cancelled)}}
 	return headers, rows
 }

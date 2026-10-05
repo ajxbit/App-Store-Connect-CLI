@@ -46,9 +46,9 @@ func DiffLocalizationsCommand() *ffcli.Command {
 
 	appID := fs.String("app", "", "App Store Connect app ID (required, or ASC_APP_ID env)")
 	path := fs.String("path", "", "Local .strings directory or file (source)")
-	fromVersion := fs.String("from-version", "", "Remote source app store version ID")
-	version := fs.String("version", "", "Remote target app store version ID (when using --path)")
-	toVersion := fs.String("to-version", "", "Remote target app store version ID (when using --from-version)")
+	fromVersion := shared.BindResourceIDFlag(fs, "from-version", "appStoreVersions", "Remote source app store version ID")
+	version := shared.BindResourceIDFlag(fs, "version", "appStoreVersions", "Remote target app store version ID (when using --path)")
+	toVersion := shared.BindResourceIDFlag(fs, "to-version", "appStoreVersions", "Remote target app store version ID (when using --from-version)")
 	output := shared.BindOutputFlags(fs)
 
 	return &ffcli.Command{
@@ -433,11 +433,14 @@ func renderLocalizationDiffMarkdown(plan localizationDiffPlan) {
 func buildLocalizationDiffRows(plan localizationDiffPlan) [][]string {
 	rows := make([][]string, 0, len(plan.Adds)+len(plan.Updates)+len(plan.Deletes))
 
+	// Key and Locale can come from repository-controlled local files or remote
+	// data, so they get the same cell sanitization as the values. Field and
+	// Reason are internal constants.
 	for _, item := range plan.Adds {
 		rows = append(rows, []string{
 			"add",
-			item.Key,
-			item.Locale,
+			sanitizeDiffCell(item.Key),
+			sanitizeDiffCell(item.Locale),
 			item.Field,
 			item.Reason,
 			"",
@@ -447,8 +450,8 @@ func buildLocalizationDiffRows(plan localizationDiffPlan) [][]string {
 	for _, item := range plan.Updates {
 		rows = append(rows, []string{
 			"update",
-			item.Key,
-			item.Locale,
+			sanitizeDiffCell(item.Key),
+			sanitizeDiffCell(item.Locale),
 			item.Field,
 			item.Reason,
 			sanitizeDiffCell(item.From),
@@ -458,8 +461,8 @@ func buildLocalizationDiffRows(plan localizationDiffPlan) [][]string {
 	for _, item := range plan.Deletes {
 		rows = append(rows, []string{
 			"delete",
-			item.Key,
-			item.Locale,
+			sanitizeDiffCell(item.Key),
+			sanitizeDiffCell(item.Locale),
 			item.Field,
 			item.Reason,
 			sanitizeDiffCell(item.From),
@@ -473,8 +476,12 @@ func buildLocalizationDiffRows(plan localizationDiffPlan) [][]string {
 	return rows
 }
 
+// sanitizeDiffCell prepares a localization value for human table or Markdown
+// output. Newlines become a visible escape, terminal control and bidi sequences
+// are removed before truncation so a clipped cell cannot leave a partial escape
+// behind, and long values are shortened on a rune boundary.
 func sanitizeDiffCell(value string) string {
-	normalized := strings.ReplaceAll(value, "\n", "\\n")
+	normalized := asc.SanitizeTerminalText(strings.ReplaceAll(value, "\n", "\\n"))
 	const maxLen = 80
 	const suffix = "..."
 	runes := []rune(normalized)

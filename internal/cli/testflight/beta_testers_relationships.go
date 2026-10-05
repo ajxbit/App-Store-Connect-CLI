@@ -13,6 +13,10 @@ import (
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/cli/shared"
 )
 
+// betaTesterIDNotFoundHint tells an operator which ID --tester-id expects
+// when App Store Connect does not know the beta tester the flag named.
+const betaTesterIDNotFoundHint = `--tester-id expects a beta tester ID (list them with: asc testflight testers list --app "APP_ID")`
+
 var betaTesterRelationshipKinds = map[string]relationshipKind{
 	"apps":       relationshipList,
 	"betaGroups": relationshipList,
@@ -30,8 +34,8 @@ func BetaTestersRelationshipsCommand() *ffcli.Command {
 		LongHelp: `View beta tester relationship linkages.
 
 Examples:
-  asc testflight beta-testers relationships get --tester-id "TESTER_ID" --type "apps"
-  asc testflight beta-testers relationships get --tester-id "TESTER_ID" --type "betaGroups" --paginate`,
+  asc testflight beta-testers relationships view --tester-id "TESTER_ID" --type "apps"
+  asc testflight beta-testers relationships view --tester-id "TESTER_ID" --type "betaGroups" --paginate`,
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
 		Subcommands: []*ffcli.Command{
@@ -45,45 +49,48 @@ Examples:
 
 // BetaTestersRelationshipsGetCommand returns the beta-testers relationships get subcommand.
 func BetaTestersRelationshipsGetCommand() *ffcli.Command {
-	fs := flag.NewFlagSet("relationships get", flag.ExitOnError)
+	fs := flag.NewFlagSet("relationships view", flag.ExitOnError)
 
-	testerID := fs.String("tester-id", "", "Beta tester ID")
-	aliasID := fs.String("id", "", "Beta tester ID (alias of --tester-id)")
-	relType := fs.String("type", "", "Relationship type: "+strings.Join(relationshipTypeList(betaTesterRelationshipKinds), ", "))
+	testerID := shared.BindResourceIDFlag(fs, "tester-id", "betaTesters", "Beta tester ID")
+	aliasID := shared.BindResourceIDFlag(fs, "id", "betaTesters", "Beta tester ID (alias of --tester-id)")
+	relType := fs.String("type", "", shared.RelationshipTypeFlagUsage(relationshipTypeList(betaTesterRelationshipKinds)))
 	limit := fs.Int("limit", 0, "Maximum results per page (1-200)")
 	next := fs.String("next", "", "Fetch next page using a links.next URL")
 	paginate := fs.Bool("paginate", false, "Automatically fetch all pages (aggregate results)")
 	output := shared.BindOutputFlags(fs)
 
 	return &ffcli.Command{
-		Name:       "get",
-		ShortUsage: "asc testflight beta-testers relationships get --tester-id \"TESTER_ID\" --type \"RELATIONSHIP\" [flags]",
-		ShortHelp:  "Get beta tester relationship linkages.",
-		LongHelp: `Get beta tester relationship linkages.
+		Name:       "view",
+		ShortUsage: "asc testflight beta-testers relationships view --tester-id \"TESTER_ID\" --type \"RELATIONSHIP\" [flags]",
+		ShortHelp:  "View beta tester relationship linkages.",
+		LongHelp: `View beta tester relationship linkages.
 
 Examples:
-  asc testflight beta-testers relationships get --tester-id "TESTER_ID" --type "apps"
-  asc testflight beta-testers relationships get --tester-id "TESTER_ID" --type "builds" --paginate`,
+  asc testflight beta-testers relationships view --tester-id "TESTER_ID" --type "apps"
+  asc testflight beta-testers relationships view --tester-id "TESTER_ID" --type "builds" --paginate`,
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
 			if *limit != 0 && (*limit < 1 || *limit > 200) {
-				return fmt.Errorf("testflight beta-testers relationships get: --limit must be between 1 and 200")
+				return shared.WithDiagnostic(
+					shared.UsageErrorCtx(ctx, "testflight beta-testers relationships view: --limit must be between 1 and 200"),
+					shared.DiagnosticInvalidInput,
+					"--limit",
+				)
 			}
 			if err := shared.ValidateNextURL(*next); err != nil {
-				return fmt.Errorf("testflight beta-testers relationships get: %w", err)
+				return shared.UsageErrorfCtx(ctx, "testflight beta-testers relationships view: %v", err)
 			}
 
 			relationshipType := strings.TrimSpace(*relType)
 			if relationshipType == "" {
-				fmt.Fprintln(os.Stderr, "Error: --type is required")
-				return flag.ErrHelp
+				return shared.MissingRelationshipTypeUsageError(relationshipTypeList(betaTesterRelationshipKinds))
 			}
 
 			kind, ok := betaTesterRelationshipKinds[relationshipType]
 			if !ok {
-				fmt.Fprintf(os.Stderr, "Error: --type must be one of: %s\n", strings.Join(relationshipTypeList(betaTesterRelationshipKinds), ", "))
-				return flag.ErrHelp
+				shared.PrintInvalidRelationshipTypeError(relationshipType, relationshipTypeList(betaTesterRelationshipKinds))
+				return shared.WithDiagnostic(flag.ErrHelp, shared.DiagnosticInvalidInput, "--type")
 			}
 
 			testerValue := strings.TrimSpace(*testerID)
@@ -91,23 +98,27 @@ Examples:
 			if testerValue == "" {
 				testerValue = aliasValue
 			} else if aliasValue != "" && aliasValue != testerValue {
-				return fmt.Errorf("testflight beta-testers relationships get: --tester-id and --id must match")
+				return shared.WithDiagnostic(
+					shared.NewValidationError(fmt.Errorf("testflight beta-testers relationships view: --tester-id and --id must match")),
+					shared.DiagnosticConflictingInput,
+					"",
+				)
 			}
 
 			nextValue := strings.TrimSpace(*next)
 			if testerValue == "" && nextValue == "" {
 				fmt.Fprintln(os.Stderr, "Error: --tester-id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--tester-id")
 			}
 
 			if kind == relationshipSingle && (nextValue != "" || *paginate || *limit != 0) {
 				fmt.Fprintln(os.Stderr, "Error: --limit, --next, and --paginate are only valid for to-many relationships")
-				return flag.ErrHelp
+				return shared.WithDiagnostic(flag.ErrHelp, shared.DiagnosticConflictingInput, "")
 			}
 
 			client, err := shared.GetASCClient()
 			if err != nil {
-				return fmt.Errorf("testflight beta-testers relationships get: %w", err)
+				return fmt.Errorf("testflight beta-testers relationships view: %w", err)
 			}
 
 			requestCtx, cancel := shared.ContextWithTimeout(ctx)
@@ -118,18 +129,43 @@ Examples:
 				asc.WithLinkagesNextURL(*next),
 			}
 
+			// A next-page URL replaces the tester path in the request, so a
+			// 404 belongs to that URL rather than to --tester-id.
+			parent := shared.RelationshipParent{
+				ResourceType: "betaTesters",
+				Label:        "beta tester",
+				ID:           testerValue,
+				Hint:         betaTesterIDNotFoundHint,
+			}
+			if nextValue != "" {
+				parent.ID = ""
+			}
+			// Every page after the first is addressed by the previous
+			// response's next URL, so a 404 there belongs to that URL.
+			pageParent := parent
+			pageParent.ID = ""
+
 			if *paginate {
 				paginateOpts := append(opts, asc.WithLinkagesLimit(200))
-				resp, err := shared.PaginateWithSpinner(requestCtx,
+				resp, err := shared.PaginateWithSpinner(
+					requestCtx,
 					func(ctx context.Context) (asc.PaginatedResponse, error) {
-						return getBetaTesterRelationshipList(ctx, client, relationshipType, testerValue, paginateOpts...)
+						page, err := getBetaTesterRelationshipList(ctx, client, relationshipType, testerValue, paginateOpts...)
+						if err != nil {
+							return nil, shared.DescribeRelationshipLookupFailure(err, relationshipType, parent)
+						}
+						return page, nil
 					},
 					func(ctx context.Context, nextURL string) (asc.PaginatedResponse, error) {
-						return getBetaTesterRelationshipList(ctx, client, relationshipType, testerValue, asc.WithLinkagesNextURL(nextURL))
+						page, err := getBetaTesterRelationshipList(ctx, client, relationshipType, testerValue, asc.WithLinkagesNextURL(nextURL))
+						if err != nil {
+							return nil, shared.DescribeRelationshipLookupFailure(err, relationshipType, pageParent)
+						}
+						return page, nil
 					},
 				)
 				if err != nil {
-					return fmt.Errorf("testflight beta-testers relationships get: %w", err)
+					return fmt.Errorf("testflight beta-testers relationships view: %w", err)
 				}
 
 				return shared.PrintOutput(resp, *output.Output, *output.Pretty)
@@ -137,7 +173,7 @@ Examples:
 
 			resp, err := getBetaTesterRelationshipList(requestCtx, client, relationshipType, testerValue, opts...)
 			if err != nil {
-				return fmt.Errorf("testflight beta-testers relationships get: %w", err)
+				return fmt.Errorf("testflight beta-testers relationships view: %w", shared.DescribeRelationshipLookupFailure(err, relationshipType, parent))
 			}
 			return shared.PrintOutput(resp, *output.Output, *output.Pretty)
 		},
@@ -153,6 +189,10 @@ func getBetaTesterRelationshipList(ctx context.Context, client *asc.Client, rela
 	case "builds":
 		return client.GetBetaTesterBuildsRelationships(ctx, testerID, opts...)
 	default:
-		return nil, fmt.Errorf("unsupported relationship type %q", relationshipType)
+		return nil, shared.WithDiagnostic(
+			shared.NewValidationError(fmt.Errorf("unsupported relationship type %q", relationshipType)),
+			shared.DiagnosticInvalidInput,
+			"--type",
+		)
 	}
 }

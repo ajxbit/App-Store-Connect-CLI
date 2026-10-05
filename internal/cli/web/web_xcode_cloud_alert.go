@@ -19,6 +19,8 @@ import (
 
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/asc"
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/cli/shared"
+	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/readonly"
+	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/urlsanitize"
 	webcore "github.com/rudrankriyam/App-Store-Connect-CLI/internal/web"
 )
 
@@ -151,8 +153,8 @@ func webXcodeCloudUsageAlertCommand() *ffcli.Command {
 	return &ffcli.Command{
 		Name:       "alert",
 		ShortUsage: "asc web xcode-cloud usage alert [flags]",
-		ShortHelp:  "[experimental] Evaluate usage thresholds and send alerts.",
-		LongHelp: `EXPERIMENTAL / UNOFFICIAL / DISCOURAGED
+		ShortHelp:  "Evaluate usage thresholds and send alerts.",
+		LongHelp: `WEB SESSION WORKFLOWS
 
 Evaluate Xcode Cloud usage thresholds from plan quota, optionally include monthly trend context,
 and optionally notify Slack/webhook endpoints.
@@ -162,7 +164,7 @@ Exit behavior:
   - Exit 1 when severity meets --fail-on level (warning/critical)
   - Exit 2 for invalid flag usage
 
-` + webWarningText + `
+
 
 Examples:
   asc web xcode-cloud usage alert --apple-id "user@example.com"
@@ -208,10 +210,8 @@ Examples:
 				return flag.ErrHelp
 			}
 
-			requestCtx, cancel := shared.ContextWithTimeout(ctx)
+			session, requestCtx, cancel, err := resolveWebSessionForCommand(ctx, sessionFlags)
 			defer cancel()
-
-			session, err := resolveWebSessionForCommand(requestCtx, sessionFlags)
 			if err != nil {
 				return err
 			}
@@ -643,6 +643,10 @@ func postUsageAlertJSON(
 		return 0, fmt.Errorf("failed to marshal notification payload: %w", err)
 	}
 
+	// Name only the host: webhook paths commonly carry the secret.
+	if err := readonly.Check(ctx, http.MethodPost, urlsanitize.RedactURLHostForError(endpoint)); err != nil {
+		return 0, err
+	}
 	req, err := http.NewRequestWithContext(ctx, "POST", endpoint, bytes.NewReader(body))
 	if err != nil {
 		return 0, fmt.Errorf("failed to build notification request: %w", err)

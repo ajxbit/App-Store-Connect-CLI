@@ -47,7 +47,7 @@ Examples:
 			resolvedAppID := shared.ResolveAppID(*appID)
 			if resolvedAppID == "" {
 				fmt.Fprintln(os.Stderr, "Error: --app is required (or set ASC_APP_ID)")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--app")
 			}
 
 			return runValidateIAP(ctx, validateIAPOptions{
@@ -110,7 +110,7 @@ func runValidateIAP(ctx context.Context, opts validateIAPOptions) error {
 	}
 
 	if report.Summary.Blocking > 0 {
-		return shared.NewReportedError(fmt.Errorf("validate iap: found %d blocking issue(s)", report.Summary.Blocking))
+		return shared.NewValidationReportedError(fmt.Errorf("validate iap: found %d blocking issue(s)", report.Summary.Blocking))
 	}
 
 	return nil

@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/cli/shared"
 )
 
 func TestTestFlightHelpShowsCanonicalSubcommands(t *testing.T) {
@@ -202,7 +204,8 @@ func TestRemovedTestFlightAliasPathsPreferCanonicalParentHelp(t *testing.T) {
 		{
 			name:               "beta app localizations leaf removed",
 			args:               []string{"testflight", "app-localizations", "get"},
-			wantRemovedMessage: "Error: `asc testflight app-localizations get` was removed. Use `asc testflight app-localizations view` instead.",
+			wantCanonicalUsage: "asc testflight app-localizations <subcommand> [flags]",
+			wantCanonicalHint:  "view",
 			wantNotShown: []string{
 				"asc beta-app-localizations get --id \"LOCALIZATION_ID\"",
 			},
@@ -340,76 +343,6 @@ func TestUnknownCommandDoesNotSuggestDeprecatedRootCommands(t *testing.T) {
 	}
 	if strings.Contains(stderr, "Did you mean: feedback") || strings.Contains(stderr, "Did you mean: crashes") {
 		t.Fatalf("expected no deprecated root suggestion, got %q", stderr)
-	}
-}
-
-func TestTestFlightAppsShowsRemovedGuidance(t *testing.T) {
-	root := RootCommand("1.2.3")
-	root.FlagSet.SetOutput(io.Discard)
-
-	var runErr error
-	stdout, stderr := captureOutput(t, func() {
-		if err := root.Parse([]string{"testflight", "apps", "list"}); err != nil {
-			t.Fatalf("parse error: %v", err)
-		}
-		runErr = root.Run(context.Background())
-	})
-
-	if !errors.Is(runErr, flag.ErrHelp) {
-		t.Fatalf("expected ErrHelp, got %v", runErr)
-	}
-	if stdout != "" {
-		t.Fatalf("expected empty stdout, got %q", stdout)
-	}
-	if !strings.Contains(stderr, "Error: `asc testflight apps` was removed. Use `asc apps list` instead.") {
-		t.Fatalf("expected removed guidance, got %q", stderr)
-	}
-	if !strings.Contains(stderr, "asc apps <subcommand> [flags]") {
-		t.Fatalf("expected deprecated usage redirect, got %q", stderr)
-	}
-}
-
-func TestTestFlightAppsSingleAppGuidanceUsesView(t *testing.T) {
-	tests := []struct {
-		name string
-		args []string
-	}{
-		{
-			name: "legacy get path",
-			args: []string{"testflight", "apps", "get"},
-		},
-		{
-			name: "canonical view path",
-			args: []string{"testflight", "apps", "view"},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			root := RootCommand("1.2.3")
-			root.FlagSet.SetOutput(io.Discard)
-
-			var runErr error
-			stdout, stderr := captureOutput(t, func() {
-				if err := root.Parse(tt.args); err != nil {
-					t.Fatalf("parse error: %v", err)
-				}
-				runErr = root.Run(context.Background())
-			})
-
-			if !errors.Is(runErr, flag.ErrHelp) {
-				t.Fatalf("expected ErrHelp, got %v", runErr)
-			}
-			if stdout != "" {
-				t.Fatalf("expected empty stdout, got %q", stdout)
-			}
-			if !strings.Contains(stderr, "Error: `asc testflight apps` was removed. Use `asc apps view --id APP_ID` instead.") {
-				t.Fatalf("expected removed single-app guidance to use view, got %q", stderr)
-			}
-			if strings.Contains(stderr, "asc apps get --id APP_ID") {
-				t.Fatalf("expected removed single-app guidance to drop get, got %q", stderr)
-			}
-		})
 	}
 }
 
@@ -1079,19 +1012,22 @@ func TestTestFlightCrashesLogOutputByCrashLogID(t *testing.T) {
 
 func TestTestFlightCrashesLogRequiresExactlyOneLookupFlag(t *testing.T) {
 	tests := []struct {
-		name    string
-		args    []string
-		wantErr string
+		name     string
+		args     []string
+		wantErr  string
+		wantCode shared.DiagnosticCode
 	}{
 		{
-			name:    "missing all lookup flags",
-			args:    []string{"testflight", "crashes", "log"},
-			wantErr: "exactly one of --submission-id or --crash-log-id is required",
+			name:     "missing all lookup flags",
+			args:     []string{"testflight", "crashes", "log"},
+			wantErr:  "exactly one of --submission-id or --crash-log-id is required",
+			wantCode: shared.DiagnosticRequiredInputMissing,
 		},
 		{
-			name:    "both lookup flags",
-			args:    []string{"testflight", "crashes", "log", "--submission-id", "sub-1", "--crash-log-id", "log-1"},
-			wantErr: "exactly one of --submission-id or --crash-log-id is required",
+			name:     "both lookup flags",
+			args:     []string{"testflight", "crashes", "log", "--submission-id", "sub-1", "--crash-log-id", "log-1"},
+			wantErr:  "exactly one of --submission-id or --crash-log-id is required",
+			wantCode: shared.DiagnosticConflictingInput,
 		},
 	}
 
@@ -1110,6 +1046,13 @@ func TestTestFlightCrashesLogRequiresExactlyOneLookupFlag(t *testing.T) {
 
 			if !errors.Is(runErr, flag.ErrHelp) {
 				t.Fatalf("expected ErrHelp, got %v", runErr)
+			}
+			diagnostic, ok := shared.DiagnosticFromError(runErr)
+			if !ok {
+				t.Fatalf("expected structured diagnostic, got %v", runErr)
+			}
+			if diagnostic.Code != test.wantCode || diagnostic.Parameter != "" {
+				t.Fatalf("diagnostic = %+v, want code %q with empty parameter", diagnostic, test.wantCode)
 			}
 			if stdout != "" {
 				t.Fatalf("expected empty stdout, got %q", stdout)
@@ -1290,7 +1233,7 @@ func TestTopLevelPreReleaseVersionsRemoved(t *testing.T) {
 	}
 }
 
-func TestRemovedPreReleaseVersionsCommandsShowMigrationGuidance(t *testing.T) {
+func TestRemovedPreReleaseVersionsSubcommandsAreUnknownCommands(t *testing.T) {
 	tests := []struct {
 		name    string
 		args    []string

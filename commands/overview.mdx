@@ -4,11 +4,6 @@
 
 The App Store Connect CLI (`asc`) provides a comprehensive set of commands for automating iOS, macOS, tvOS, and visionOS workflows. This page explains how to discover and use commands effectively.
 
-<Note>
-  Upgrading older scripts to 1.0? Start with
-  [Migrate to 1.0](/migrate-to-1-0) before updating command examples or CI jobs.
-</Note>
-
 ## Command Discovery
 
 The CLI is self-documenting. Before implementing or testing any command, use `--help` to confirm the exact interface:
@@ -44,17 +39,18 @@ Commands are organized into logical families based on functionality:
 
 * `auth` - Manage authentication for the App Store Connect API
 * `doctor` - Diagnose authentication configuration issues
-* `install-skills` - Install the asc skill pack for App Store Connect workflows
+* `install-skills` - Install the asc skill pack globally for App Store Connect workflows
 * `init` - Initialize asc helper docs in the current repo
 * `docs` - Access embedded documentation guides and reference helpers
 
-### Experimental and Unofficial
+### Web Session
 
-* `web` - Unofficial Apple web-session workflows. Experimental, unofficial, and discouraged.
+* `web` - Apple web-session workflows.
 
 ### Analytics and Finance
 
 * `analytics` - Request and download analytics and sales reports
+* `ads` - Manage Apple Ads campaigns, ad groups, keywords, creatives, and reports
 * `insights` - Generate weekly and daily insights from App Store data sources
 * `finance` - Download payments and financial reports
 * `performance` - Access performance metrics and diagnostic logs
@@ -142,10 +138,13 @@ Commands are organized into logical families based on functionality:
 
 ### Utility
 
+* `system-status` - Check Apple Developer service health without authentication
 * `version` - Print version information and exit
 * `completion` - Print shell completion scripts
 * `diff` - Generate deterministic non-mutating diff plans
 * `schema` - Inspect App Store Connect API endpoint schemas at runtime
+* `api` - Send an authenticated raw request to the App Store Connect API
+* `telemetry` - Manage CLI telemetry settings
 
 ## TTY-Aware Output Defaults
 

@@ -90,6 +90,51 @@ Example output:
   The `--pretty` flag only works with `--output json`. Using `--pretty` with `table` or `markdown` returns an error.
 </Warning>
 
+## Sensitive Values
+
+Secrets are withheld from output by default. Commands that read or write App
+Store or TestFlight review information replace a non-empty
+`demoAccountPassword` with `(redacted)` before rendering, in every format:
+
+```bash  theme={null}
+asc review details-get --id "DETAIL_ID" --output json
+```
+
+```json  theme={null}
+{"data":{"type":"appStoreReviewDetails","id":"DETAIL_ID","attributes":{"demoAccountName":"reviewer@example.com","demoAccountPassword":"(redacted)","demoAccountRequired":true}}}
+```
+
+This applies to `asc review details-get`, `asc review details-for-version`,
+`asc review details-create`, `asc review details-update`,
+`asc testflight review view`, `asc testflight review edit`, and
+`asc migrate import` (including `--dry-run`).
+
+Redaction affects only what is printed. Passwords you pass with
+`--demo-account-password` are still sent to App Store Connect, and
+`asc migrate import` still uploads and compares the real value read from
+`review_information/demo_password.txt`.
+
+### Opting in with `--include-sensitive`
+
+When you genuinely need the returned password — for example to verify a
+rotation — add `--include-sensitive`:
+
+```bash  theme={null}
+asc review details-get --id "DETAIL_ID" --output json --include-sensitive
+```
+
+The flag applies to that one invocation only, defaults to `false`, and has no
+environment-variable equivalent, so a secret can never become visible because
+of ambient configuration. Each use writes a warning to stderr because printed
+secrets persist in shell history, CI logs, and terminal scrollback.
+
+<Warning>
+  Before this change, `demoAccountPassword` was emitted verbatim in JSON output,
+  and `asc migrate import` also printed it in table and Markdown output. If a
+  script depended on reading the password back, add `--include-sensitive`
+  explicitly and make sure the surrounding logs are not retained.
+</Warning>
+
 ## Format Examples
 
 ### Table Format
@@ -153,6 +198,61 @@ The CLI uses a type-safe output registry system (`internal/asc/output_registry.g
 * Automatic handling of single vs. list responses
 
 Most commands automatically support all three formats without additional code.
+
+## Piping Resource Links Back In
+
+JSON reads print Apple's envelope unmodified, so every resource carries a
+`links.self` URL. Webhook deliveries and other tooling hand the same URLs
+around. The resource ID flags on the most-used commands accept that URL in
+place of the bare ID, so a `links.self` value can be passed straight back:
+
+```bash
+# Extract the self-link of the latest build and pass it to builds info
+LINK=$(asc builds list --app 123456789 --limit 1 --output json | jq -r '.data[0].links.self')
+asc builds info --build-id "$LINK"
+
+# Equivalent to
+asc builds info --build-id 2f1a3c4d-...
+```
+
+Rules:
+
+* Only `https://api.appstoreconnect.apple.com/v<n>/<type>/<id>` URLs are
+  accepted. Relationship and related-resource paths
+  (`/v1/builds/<id>/relationships/betaGroups`) are rejected so the intent
+  stays explicit.
+* A flag that names one resource type rejects a link of another type
+  (`--build-id` with an `appStoreVersions` link) with a usage error, exit code
+  `2`, before authentication or any request.
+* Bare IDs, bundle identifiers, product IDs, and names keep working
+  unchanged.
+
+Flags covered today: every single-value flag that names one App Store Connect
+API resource. That includes the bare `--id` flags (for example `--id` on
+the `localizations preview-sets view`, `users view`, and
+`xcode-cloud products view` commands), every `--<resource>-id` flag such as
+`--build-id`, `--version-id`, `--localization-id`, `--webhook-id`,
+`--tester-id`, and the Game Center ID flags, and resource flags without an
+`-id` suffix: `--app` (including `ASC_APP_ID`), `--version-localization` on
+`screenshots` and `video-previews`, `--version` on the `localizations`
+commands that take an App Store version ID, `--app-info`, `--group` where it
+names one beta group, `--bundle`, `--submission`, `--review-detail`,
+`--schedule`, `--availability`, and `--price-point`.
+
+Still bare-ID only, on purpose: comma-separated ID filters (they take a list,
+not one URL), `asc web` flags (Developer Portal and Iris IDs have no API
+self-link) and the web-session `asc versions rating-reset` commands, flags
+that take an identifier rather than a resource ID (bundle identifiers,
+product IDs, Game Center vendor identifiers), credentials and local
+identifiers (the `--key-id` and `--issuer-id` flags on `asc auth`, the
+`--device-id` flag on `asc xcode install`, and the `asc storekit` flags),
+resources Apple serves only under a parent path (build bundles, diagnostic
+signatures, in-app purchase price points, Game Center enabled versions, and
+webhook deliveries), and the few flags whose resource type depends on another
+flag (`--id` on `asc localizations update`, which follows `--type`,
+`--item-id` on `asc review items add`, which follows `--item-type`, and
+`--product-id` on `asc iap promoted-purchases create`, which follows
+`--product-type`).
 
 ## Best Practices
 

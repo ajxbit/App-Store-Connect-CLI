@@ -3,8 +3,11 @@ package asc
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
+	"net/url"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -86,6 +89,147 @@ func TestCreateReviewSubmission(t *testing.T) {
 	}
 }
 
+func TestCreateReviewSubmissionPreservesPartialCreateID(t *testing.T) {
+	for _, errorsMember := range []string{
+		`[]`,
+		`[{"status":"500","detail":"partial response"}]`,
+	} {
+		response := reviewSubmissionsJSONResponse(http.StatusCreated, `{
+			"errors": `+errorsMember+`,
+			"data": {"type": "reviewSubmissions", "id": "submission-created"}
+		}`)
+		client := newTestClient(t, nil, response)
+
+		receipt, err := client.CreateReviewSubmission(context.Background(), "app-123", PlatformIOS)
+		if err == nil || !strings.Contains(err.Error(), "top-level errors") {
+			t.Fatalf("CreateReviewSubmission() error = %v, want top-level errors rejection", err)
+		}
+		if receipt != nil {
+			t.Fatalf("CreateReviewSubmission() receipt = %+v, want nil on response validation error", receipt)
+		}
+		var partialErr *ReviewSubmissionCreatePartialError
+		if !errors.As(err, &partialErr) {
+			t.Fatalf("CreateReviewSubmission() error = %T, want ReviewSubmissionCreatePartialError", err)
+		}
+		if partialErr.Response == nil || partialErr.Response.Data.ID != "submission-created" {
+			t.Fatalf("partial create response = %+v, want submission-created", partialErr.Response)
+		}
+		if partialErr.Unwrap() == nil {
+			t.Fatal("partial create error did not retain its validation cause")
+		}
+	}
+}
+
+func TestCreateReviewSubmissionDoesNotClassifyFailedRequestAsPartialCreate(t *testing.T) {
+	response := reviewSubmissionsJSONResponse(http.StatusBadRequest, `{
+		"errors": [{"status": "400", "detail": "request failed"}],
+		"data": {"type": "reviewSubmissions", "id": "untrusted-id"}
+	}`)
+	client := newTestClient(t, nil, response)
+
+	receipt, err := client.CreateReviewSubmission(context.Background(), "app-123", PlatformIOS)
+	if err == nil {
+		t.Fatal("CreateReviewSubmission() error = nil, want API failure")
+	}
+	if receipt != nil {
+		t.Fatalf("CreateReviewSubmission() receipt = %+v, want nil", receipt)
+	}
+	var partialErr *ReviewSubmissionCreatePartialError
+	if errors.As(err, &partialErr) {
+		t.Fatalf("CreateReviewSubmission() error = %+v, must not trust an ID from a failed request", partialErr)
+	}
+}
+
+func TestCreateReviewSubmissionDoesNotInventPartialCreateID(t *testing.T) {
+	tests := []string{
+		`{"errors":[],"data":{"type":"reviewSubmissions","id":""}}`,
+		`{"errors":[],"data":{"type":"apps","id":"app-123"}}`,
+	}
+	for _, body := range tests {
+		client := newTestClient(t, nil, reviewSubmissionsJSONResponse(http.StatusCreated, body))
+		_, err := client.CreateReviewSubmission(context.Background(), "app-123", PlatformIOS)
+		if err == nil || !strings.Contains(err.Error(), "top-level errors") {
+			t.Fatalf("CreateReviewSubmission() error = %v, want top-level errors rejection", err)
+		}
+		var partialErr *ReviewSubmissionCreatePartialError
+		if errors.As(err, &partialErr) {
+			t.Fatalf("CreateReviewSubmission() error = %+v, must not expose an untrusted create ID", partialErr)
+		}
+	}
+}
+
+func TestReviewSubmissionsResponsePreservesSchemaMetadata(t *testing.T) {
+	response := reviewSubmissionsJSONResponse(http.StatusOK, `{
+		"data": [{
+			"type": "reviewSubmissions",
+			"id": "submission-123",
+			"relationships": {
+				"items": {
+					"links": {"self": "https://api.appstoreconnect.apple.com/v1/reviewSubmissions/submission-123/relationships/items", "related": "https://api.appstoreconnect.apple.com/v1/reviewSubmissions/submission-123/items"},
+					"meta": {"paging": {"total": 1, "limit": 50, "nextCursor": "item-next"}},
+					"data": [{"type": "reviewSubmissionItems", "id": "item-123"}]
+				}
+			},
+			"links": {"self": "https://api.appstoreconnect.apple.com/v1/reviewSubmissions/submission-123"}
+		}],
+		"links": {"self": "https://api.appstoreconnect.apple.com/v1/apps/app-123/reviewSubmissions", "first": "https://api.appstoreconnect.apple.com/v1/apps/app-123/reviewSubmissions?cursor=first", "next": "https://api.appstoreconnect.apple.com/v1/apps/app-123/reviewSubmissions?cursor=next"},
+		"meta": {"paging": {"total": 1, "limit": 50}}
+	}`)
+	client := newTestClient(t, func(req *http.Request) {}, response)
+
+	resp, err := client.GetReviewSubmissions(context.Background(), "app-123")
+	if err != nil {
+		t.Fatalf("GetReviewSubmissions() error: %v", err)
+	}
+	if len(resp.Data) != 1 || !strings.Contains(string(resp.Data[0].Links), `"self"`) {
+		t.Fatalf("resource links were not preserved: %+v", resp.Data)
+	}
+	if !strings.Contains(string(resp.Meta), `"paging"`) {
+		t.Fatalf("response meta was not preserved: %s", resp.Meta)
+	}
+	if !strings.Contains(resp.Links.First, "cursor=first") {
+		t.Fatalf("paged document first link was not preserved: %+v", resp.Links)
+	}
+	items := resp.Data[0].Relationships.Items
+	if items == nil || !strings.Contains(string(items.Links), `"related"`) || !strings.Contains(string(items.Meta), `"nextCursor"`) {
+		t.Fatalf("items relationship links/meta were not preserved: %+v", items)
+	}
+	encoded, err := json.Marshal(resp)
+	if err != nil {
+		t.Fatalf("marshal response: %v", err)
+	}
+	for _, want := range []string{`"first"`, `"related"`, `"nextCursor"`} {
+		if !strings.Contains(string(encoded), want) {
+			t.Fatalf("re-encoded response omitted %s: %s", want, encoded)
+		}
+	}
+}
+
+func TestReviewSubmissionCollectionAllowsSparseToManyItemsRelationship(t *testing.T) {
+	tests := []struct {
+		name         string
+		relationship string
+	}{
+		{
+			name:         "links only",
+			relationship: `{"links":{"related":"/v1/reviewSubmissions/submission-1/items"}}`,
+		},
+		{
+			name:         "meta only",
+			relationship: `{"meta":{"paging":{"limit":50}}}`,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			body := `{"data":[{"type":"reviewSubmissions","id":"submission-1","relationships":{"items":` + test.relationship + `}}],"links":{"self":"/v1/apps/app-1/reviewSubmissions"}}`
+			if err := validateReviewSubmissionCollectionEnvelope([]byte(body), "review submissions", reviewSubmissionCollectionResourceSpec); err != nil {
+				t.Fatalf("validateReviewSubmissionCollectionEnvelope() error = %v, want sparse to-many relationship accepted", err)
+			}
+		})
+	}
+}
+
 func TestSubmitReviewSubmission(t *testing.T) {
 	response := reviewSubmissionsJSONResponse(http.StatusOK, `{
 		"data": {
@@ -123,7 +267,7 @@ func TestSubmitReviewSubmission(t *testing.T) {
 		if payload.Data.ID != "submission-123" {
 			t.Fatalf("expected submission ID submission-123, got %s", payload.Data.ID)
 		}
-		if payload.Data.Attributes.Submitted == nil || !*payload.Data.Attributes.Submitted {
+		if payload.Data.Attributes.Submitted == nil || payload.Data.Attributes.Submitted.Value == nil || !*payload.Data.Attributes.Submitted.Value {
 			t.Fatalf("expected submitted true, got %v", payload.Data.Attributes.Submitted)
 		}
 	}, response)
@@ -138,36 +282,41 @@ func TestSubmitReviewSubmission(t *testing.T) {
 	}
 }
 
-func TestGetReviewSubmissionItem(t *testing.T) {
-	response := reviewSubmissionsJSONResponse(http.StatusOK, `{
-		"data": {
-			"type": "reviewSubmissionItems",
-			"id": "item-123",
-			"attributes": {
-				"state": "READY_FOR_REVIEW"
-			}
-		}
-	}`)
-
+func TestUpdateReviewSubmissionUsesExactNullableSchema(t *testing.T) {
+	response := reviewSubmissionsJSONResponse(http.StatusOK, `{"data":{"type":"reviewSubmissions","id":"submission-123"}}`)
 	client := newTestClient(t, func(req *http.Request) {
-		if req.Method != http.MethodGet {
-			t.Fatalf("expected GET, got %s", req.Method)
+		body, err := io.ReadAll(req.Body)
+		if err != nil {
+			t.Fatalf("read body: %v", err)
 		}
-		if req.URL.Path != "/v1/reviewSubmissionItems/item-123" {
-			t.Fatalf("expected path /v1/reviewSubmissionItems/item-123, got %s", req.URL.Path)
+		var payload struct {
+			Data struct {
+				Attributes map[string]json.RawMessage `json:"attributes"`
+			} `json:"data"`
+		}
+		if err := json.Unmarshal(body, &payload); err != nil {
+			t.Fatalf("decode body: %v", err)
+		}
+		if got := string(payload.Data.Attributes["platform"]); got != `"MAC_OS"` {
+			t.Fatalf("platform = %s, want MAC_OS", got)
+		}
+		if got := string(payload.Data.Attributes["submitted"]); got != "false" {
+			t.Fatalf("submitted = %s, want false", got)
+		}
+		if got := string(payload.Data.Attributes["canceled"]); got != "null" {
+			t.Fatalf("canceled = %s, want null", got)
 		}
 	}, response)
 
-	resp, err := client.GetReviewSubmissionItem(context.Background(), "item-123")
+	platform := PlatformMacOS
+	submitted := false
+	_, err := client.UpdateReviewSubmission(context.Background(), "submission-123", ReviewSubmissionUpdateAttributes{
+		Platform:  &NullablePlatform{Value: &platform},
+		Submitted: &NullableBool{Value: &submitted},
+		Canceled:  &NullableBool{},
+	})
 	if err != nil {
-		t.Fatalf("GetReviewSubmissionItem() error: %v", err)
-	}
-
-	if resp.Data.ID != "item-123" {
-		t.Fatalf("expected ID item-123, got %s", resp.Data.ID)
-	}
-	if resp.Data.Attributes.State != "READY_FOR_REVIEW" {
-		t.Fatalf("expected state READY_FOR_REVIEW, got %s", resp.Data.Attributes.State)
+		t.Fatalf("UpdateReviewSubmission() error: %v", err)
 	}
 }
 
@@ -253,6 +402,33 @@ func TestCreateReviewSubmissionItem_SupportedItemTypes(t *testing.T) {
 		getRelationship func(ReviewSubmissionItemCreateRelationships) *Relationship
 	}{
 		{
+			name:     "in-app purchase version",
+			itemType: ReviewSubmissionItemTypeInAppPurchaseVersion,
+			itemID:   "iap-version-123",
+			wantType: ResourceTypeInAppPurchaseVersions,
+			getRelationship: func(relationships ReviewSubmissionItemCreateRelationships) *Relationship {
+				return relationships.InAppPurchaseVersion
+			},
+		},
+		{
+			name:     "subscription version",
+			itemType: ReviewSubmissionItemTypeSubscriptionVersion,
+			itemID:   "subscription-version-123",
+			wantType: ResourceTypeSubscriptionVersions,
+			getRelationship: func(relationships ReviewSubmissionItemCreateRelationships) *Relationship {
+				return relationships.SubscriptionVersion
+			},
+		},
+		{
+			name:     "subscription group version",
+			itemType: ReviewSubmissionItemTypeSubscriptionGroupVersion,
+			itemID:   "subscription-group-version-123",
+			wantType: ResourceTypeSubscriptionGroupVersions,
+			getRelationship: func(relationships ReviewSubmissionItemCreateRelationships) *Relationship {
+				return relationships.SubscriptionGroupVersion
+			},
+		},
+		{
 			name:     "app store version",
 			itemType: ReviewSubmissionItemTypeAppStoreVersion,
 			itemID:   "version-123",
@@ -265,15 +441,6 @@ func TestCreateReviewSubmissionItem_SupportedItemTypes(t *testing.T) {
 			name:     "app custom product page version",
 			itemType: ReviewSubmissionItemTypeAppCustomProductPageVersion,
 			itemID:   "cppv-123",
-			wantType: ResourceTypeAppCustomProductPageVersions,
-			getRelationship: func(relationships ReviewSubmissionItemCreateRelationships) *Relationship {
-				return relationships.AppCustomProductPageVersion
-			},
-		},
-		{
-			name:     "legacy app custom product page alias",
-			itemType: ReviewSubmissionItemTypeAppCustomProductPage,
-			itemID:   "cppv-legacy-123",
 			wantType: ResourceTypeAppCustomProductPageVersions,
 			getRelationship: func(relationships ReviewSubmissionItemCreateRelationships) *Relationship {
 				return relationships.AppCustomProductPageVersion
@@ -298,12 +465,12 @@ func TestCreateReviewSubmissionItem_SupportedItemTypes(t *testing.T) {
 			},
 		},
 		{
-			name:     "app store version experiment treatment",
-			itemType: ReviewSubmissionItemTypeAppStoreVersionExperimentTreatment,
-			itemID:   "treatment-123",
-			wantType: ResourceTypeAppStoreVersionExperimentTreatments,
+			name:     "app store version experiment v2",
+			itemType: ReviewSubmissionItemTypeAppStoreVersionExperimentV2,
+			itemID:   "experiment-v2-123",
+			wantType: ResourceTypeAppStoreVersionExperiments,
 			getRelationship: func(relationships ReviewSubmissionItemCreateRelationships) *Relationship {
-				return relationships.AppStoreVersionExperimentTreatment
+				return relationships.AppStoreVersionExperimentV2
 			},
 		},
 		{
@@ -405,6 +572,7 @@ func TestCreateReviewSubmissionItem_SupportedItemTypes(t *testing.T) {
 				relationship := test.getRelationship(payload.Data.Relationships)
 				if relationship == nil {
 					t.Fatalf("expected relationship for item type %q", test.itemType)
+					return
 				}
 				if relationship.Data.Type != test.wantType {
 					t.Fatalf("expected relationship type %q, got %q", test.wantType, relationship.Data.Type)
@@ -453,7 +621,13 @@ func TestUpdateReviewSubmissionItem(t *testing.T) {
 			t.Fatalf("failed to read request body: %v", err)
 		}
 
-		var payload ReviewSubmissionItemUpdateRequest
+		var payload struct {
+			Data struct {
+				Type       ResourceType               `json:"type"`
+				ID         string                     `json:"id"`
+				Attributes map[string]json.RawMessage `json:"attributes"`
+			} `json:"data"`
+		}
 		if err := json.Unmarshal(body, &payload); err != nil {
 			t.Fatalf("failed to unmarshal request body: %v", err)
 		}
@@ -464,19 +638,91 @@ func TestUpdateReviewSubmissionItem(t *testing.T) {
 		if payload.Data.ID != "item-123" {
 			t.Fatalf("expected item ID item-123, got %s", payload.Data.ID)
 		}
-		if payload.Data.Attributes.State == nil || *payload.Data.Attributes.State != "READY_FOR_REVIEW" {
-			t.Fatalf("expected state READY_FOR_REVIEW, got %v", payload.Data.Attributes.State)
+		if got := string(payload.Data.Attributes["resolved"]); got != "false" {
+			t.Fatalf("resolved = %s, want false", got)
+		}
+		if got := string(payload.Data.Attributes["removed"]); got != "null" {
+			t.Fatalf("removed = %s, want null", got)
+		}
+		if _, ok := payload.Data.Attributes["state"]; ok {
+			t.Fatalf("unsupported state attribute was sent: %s", body)
 		}
 	}, response)
 
-	state := "READY_FOR_REVIEW"
-	resp, err := client.UpdateReviewSubmissionItem(context.Background(), "item-123", ReviewSubmissionItemUpdateAttributes{State: &state})
+	resolved := false
+	resp, err := client.UpdateReviewSubmissionItem(context.Background(), "item-123", ReviewSubmissionItemUpdateAttributes{
+		Resolved: &NullableBool{Value: &resolved},
+		Removed:  &NullableBool{},
+	})
 	if err != nil {
 		t.Fatalf("UpdateReviewSubmissionItem() error: %v", err)
 	}
 
 	if resp.Data.ID != "item-123" {
 		t.Fatalf("expected ID item-123, got %s", resp.Data.ID)
+	}
+}
+
+func TestReviewSubmissionItemMutationsDecode441VersionRelationships(t *testing.T) {
+	body := `{
+		"data":{
+			"type":"reviewSubmissionItems",
+			"id":"item-441",
+			"relationships":{
+				"inAppPurchaseVersion":{"data":{"type":"inAppPurchaseVersions","id":"iapv-1"}},
+				"subscriptionVersion":{"data":{"type":"subscriptionVersions","id":"subv-1"}},
+				"subscriptionGroupVersion":{"data":{"type":"subscriptionGroupVersions","id":"sgv-1"}}
+			}
+		},
+		"included":[
+			{"type":"inAppPurchaseVersions","id":"iapv-1"},
+			{"type":"subscriptionVersions","id":"subv-1"},
+			{"type":"subscriptionGroupVersions","id":"sgv-1"}
+		]
+	}`
+	tests := []struct {
+		name   string
+		method string
+		call   func(*Client) (*ReviewSubmissionItemResponse, error)
+	}{
+		{
+			name:   "create",
+			method: http.MethodPost,
+			call: func(client *Client) (*ReviewSubmissionItemResponse, error) {
+				return client.CreateReviewSubmissionItem(context.Background(), "submission-1", ReviewSubmissionItemTypeSubscriptionVersion, "subv-1")
+			},
+		},
+		{
+			name:   "update",
+			method: http.MethodPatch,
+			call: func(client *Client) (*ReviewSubmissionItemResponse, error) {
+				resolved := true
+				return client.UpdateReviewSubmissionItem(context.Background(), "item-441", ReviewSubmissionItemUpdateAttributes{Resolved: &NullableBool{Value: &resolved}})
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			client := newTestClient(t, func(req *http.Request) {
+				if req.Method != test.method {
+					t.Fatalf("method = %q, want %q", req.Method, test.method)
+				}
+			}, reviewSubmissionsJSONResponse(http.StatusOK, body))
+
+			response, err := test.call(client)
+			if err != nil {
+				t.Fatalf("call error: %v", err)
+			}
+			relationships := response.Data.Relationships
+			if relationships == nil || relationships.InAppPurchaseVersion == nil || relationships.SubscriptionVersion == nil || relationships.SubscriptionGroupVersion == nil {
+				t.Fatalf("relationships = %#v, want all 4.4.1 version targets", relationships)
+			}
+			var included []ResourceData
+			if err := json.Unmarshal(response.Included, &included); err != nil || len(included) != 3 {
+				t.Fatalf("included = %s, err = %v; want three 4.4.1 version resources", response.Included, err)
+			}
+		})
 	}
 }
 
@@ -508,7 +754,9 @@ func TestGetReviewSubmissionItemsRelationships(t *testing.T) {
 				"type": "reviewSubmissionItems",
 				"id": "item-123"
 			}
-		]
+		],
+		"links": {"self": "https://api.appstoreconnect.apple.com/v1/reviewSubmissions/submission-123/relationships/items", "first": "https://api.appstoreconnect.apple.com/v1/reviewSubmissions/submission-123/relationships/items?cursor=first"},
+		"meta": {"paging": {"total": 1, "limit": 50}}
 	}`)
 
 	client := newTestClient(t, func(req *http.Request) {
@@ -531,6 +779,12 @@ func TestGetReviewSubmissionItemsRelationships(t *testing.T) {
 	if resp.Data[0].ID != "item-123" {
 		t.Fatalf("expected item ID item-123, got %s", resp.Data[0].ID)
 	}
+	if !strings.Contains(resp.Links.First, "cursor=first") {
+		t.Fatalf("linkage first link was not preserved: %+v", resp.Links)
+	}
+	if !strings.Contains(string(resp.Meta), `"paging"`) {
+		t.Fatalf("linkage meta was not preserved: %s", resp.Meta)
+	}
 }
 
 func TestGetReviewSubmissionItems(t *testing.T) {
@@ -540,7 +794,9 @@ func TestGetReviewSubmissionItems(t *testing.T) {
 				"type": "reviewSubmissionItems",
 				"id": "item-456"
 			}
-		]
+		],
+		"links": {"self": "https://api.appstoreconnect.apple.com/v1/reviewSubmissions/submission-456/items", "first": "https://api.appstoreconnect.apple.com/v1/reviewSubmissions/submission-456/items?cursor=first"},
+		"meta": {"paging": {"total": 1, "limit": 50}}
 	}`)
 
 	client := newTestClient(t, func(req *http.Request) {
@@ -560,8 +816,57 @@ func TestGetReviewSubmissionItems(t *testing.T) {
 	if len(resp.Data) != 1 {
 		t.Fatalf("expected 1 item, got %d", len(resp.Data))
 	}
+	if !strings.Contains(resp.Links.First, "cursor=first") {
+		t.Fatalf("items first link was not preserved: %+v", resp.Links)
+	}
+	if !strings.Contains(string(resp.Meta), `"paging"`) {
+		t.Fatalf("items meta was not preserved: %s", resp.Meta)
+	}
 	if resp.Data[0].ID != "item-456" {
 		t.Fatalf("expected item ID item-456, got %s", resp.Data[0].ID)
+	}
+}
+
+func TestReviewSubmissionItemResponsesRejectTopLevelErrors(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+		call func(*Client) error
+	}{
+		{
+			name: "relationships",
+			body: `{"errors":[],"data":[]}`,
+			call: func(client *Client) error {
+				_, err := client.GetReviewSubmissionItemsRelationships(context.Background(), "submission-1")
+				return err
+			},
+		},
+		{
+			name: "create",
+			body: `{"errors":[],"data":{}}`,
+			call: func(client *Client) error {
+				_, err := client.CreateReviewSubmissionItem(context.Background(), "submission-1", ReviewSubmissionItemTypeAppStoreVersion, "version-1")
+				return err
+			},
+		},
+		{
+			name: "update",
+			body: `{"errors":[],"data":{}}`,
+			call: func(client *Client) error {
+				resolved := true
+				_, err := client.UpdateReviewSubmissionItem(context.Background(), "item-1", ReviewSubmissionItemUpdateAttributes{Resolved: &NullableBool{Value: &resolved}})
+				return err
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			client := newTestClient(t, nil, reviewSubmissionsJSONResponse(http.StatusOK, test.body))
+			if err := test.call(client); err == nil || !strings.Contains(err.Error(), "top-level errors") {
+				t.Fatalf("call error = %v, want top-level errors rejection", err)
+			}
+		})
 	}
 }
 
@@ -572,7 +877,8 @@ func TestGetReviewSubmissionItems_WithIncludeAndFields(t *testing.T) {
 				"type": "reviewSubmissionItems",
 				"id": "item-456"
 			}
-		]
+		],
+		"links": {"self": "https://api.appstoreconnect.apple.com/v1/reviewSubmissions/submission-456/items"}
 	}`)
 
 	client := newTestClient(t, func(req *http.Request) {
@@ -601,6 +907,72 @@ func TestGetReviewSubmissionItems_WithIncludeAndFields(t *testing.T) {
 	}
 }
 
+func TestGetReviewSubmissionItems_With441VersionSparseFields(t *testing.T) {
+	response := reviewSubmissionsJSONResponse(http.StatusOK, `{
+		"data":[{
+			"type":"reviewSubmissionItems",
+			"id":"item-441",
+			"relationships":{
+				"inAppPurchaseVersion":{"data":{"type":"inAppPurchaseVersions","id":"iapv-1"}},
+				"subscriptionVersion":{"data":{"type":"subscriptionVersions","id":"subv-1"}},
+				"subscriptionGroupVersion":{"data":{"type":"subscriptionGroupVersions","id":"sgv-1"}}
+			},
+			"links":{"self":"https://api.appstoreconnect.apple.com/v1/reviewSubmissionItems/item-441"}
+		}],
+		"included":[
+			{"type":"inAppPurchaseVersions","id":"iapv-1"},
+			{"type":"subscriptionVersions","id":"subv-1"},
+			{"type":"subscriptionGroupVersions","id":"sgv-1"}
+		],
+		"links":{"self":"https://api.appstoreconnect.apple.com/v1/reviewSubmissions/submission-456/items"},
+		"meta":{"paging":{"total":1,"limit":200}}
+	}`)
+
+	client := newTestClient(t, func(req *http.Request) {
+		want := url.Values{
+			"fields[inAppPurchaseVersions]":     {"version,state,inAppPurchase,image,images,localizations"},
+			"fields[subscriptionVersions]":      {"version,state,subscription,image,images,localizations"},
+			"fields[subscriptionGroupVersions]": {"version,state,subscriptionGroup,localizations"},
+		}
+		if got := req.URL.Query(); !reflect.DeepEqual(got, want) {
+			t.Fatalf("query = %#v, want %#v", got, want)
+		}
+	}, response)
+
+	result, err := client.GetReviewSubmissionItems(
+		context.Background(),
+		"submission-456",
+		WithReviewSubmissionItemsInAppPurchaseVersionFields([]string{" version ", "state", "inAppPurchase", "image", "images", "localizations"}),
+		WithReviewSubmissionItemsSubscriptionVersionFields([]string{"version", "state", "subscription", "image", "images", "localizations"}),
+		WithReviewSubmissionItemsSubscriptionGroupVersionFields([]string{"version", "state", "subscriptionGroup", "localizations"}),
+	)
+	if err != nil {
+		t.Fatalf("GetReviewSubmissionItems() error: %v", err)
+	}
+	if len(result.Data) != 1 || result.Data[0].Relationships == nil {
+		t.Fatalf("response = %#v, want one item with relationships", result)
+	}
+	relationships := result.Data[0].Relationships
+	if relationships.InAppPurchaseVersion == nil || relationships.InAppPurchaseVersion.Data.ID != "iapv-1" ||
+		relationships.SubscriptionVersion == nil || relationships.SubscriptionVersion.Data.ID != "subv-1" ||
+		relationships.SubscriptionGroupVersion == nil || relationships.SubscriptionGroupVersion.Data.ID != "sgv-1" {
+		t.Fatalf("relationships = %#v, want all 4.4.1 version targets", relationships)
+	}
+	var included []ResourceData
+	if err := json.Unmarshal(result.Included, &included); err != nil {
+		t.Fatalf("decode included: %v", err)
+	}
+	if len(included) != 3 || included[0].Type != ResourceTypeInAppPurchaseVersions || included[1].Type != ResourceTypeSubscriptionVersions || included[2].Type != ResourceTypeSubscriptionGroupVersions {
+		t.Fatalf("included = %#v, want all 4.4.1 version resources", included)
+	}
+	if !strings.Contains(string(result.Meta), `"total":1`) {
+		t.Fatalf("meta = %s, want paging metadata", result.Meta)
+	}
+	if !strings.Contains(string(result.Data[0].Links), `"self"`) {
+		t.Fatalf("resource links = %s, want self link", result.Data[0].Links)
+	}
+}
+
 func TestGetReviewSubmissions_WithInclude(t *testing.T) {
 	response := reviewSubmissionsJSONResponse(http.StatusOK, `{
 		"data": [
@@ -617,6 +989,7 @@ func TestGetReviewSubmissions_WithInclude(t *testing.T) {
 				}
 			}
 		],
+		"links": {"self": "https://api.appstoreconnect.apple.com/v1/apps/app-123/reviewSubmissions"},
 		"included": [
 			{
 				"type": "appStoreVersions",
@@ -660,6 +1033,64 @@ func TestGetReviewSubmissions_WithInclude(t *testing.T) {
 	}
 }
 
+func TestReviewSubmissionGetOperationsSend441ItemFieldsAndIncludeItems(t *testing.T) {
+	wantFields := "state,inAppPurchaseVersion,subscriptionVersion,subscriptionGroupVersion"
+	tests := []struct {
+		name string
+		path string
+		body string
+		call func(*Client) error
+	}{
+		{
+			name: "app related list",
+			path: "/v1/apps/app-1/reviewSubmissions",
+			body: `{"data":[],"links":{"self":"https://api.appstoreconnect.apple.com/v1/apps/app-1/reviewSubmissions"}}`,
+			call: func(client *Client) error {
+				_, err := client.GetReviewSubmissions(context.Background(), "app-1", WithReviewSubmissionsItemFields(strings.Split(wantFields, ",")), WithReviewSubmissionsInclude([]string{"items"}))
+				return err
+			},
+		},
+		{
+			name: "top-level list",
+			path: "/v1/reviewSubmissions",
+			body: `{"data":[],"links":{"self":"https://api.appstoreconnect.apple.com/v1/reviewSubmissions"}}`,
+			call: func(client *Client) error {
+				_, err := client.ListReviewSubmissions(context.Background(), WithReviewSubmissionsItemFields(strings.Split(wantFields, ",")), WithReviewSubmissionsInclude([]string{"items"}))
+				return err
+			},
+		},
+		{
+			name: "detail",
+			path: "/v1/reviewSubmissions/submission-1",
+			body: `{"data":{"type":"reviewSubmissions","id":"submission-1"}}`,
+			call: func(client *Client) error {
+				_, err := client.GetReviewSubmission(context.Background(), "submission-1", WithReviewSubmissionItemFields(strings.Split(wantFields, ",")), WithReviewSubmissionInclude([]string{"items"}))
+				return err
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			client := newTestClient(t, func(req *http.Request) {
+				if req.URL.Path != test.path {
+					t.Fatalf("path = %q, want %q", req.URL.Path, test.path)
+				}
+				if got := req.URL.Query().Get("fields[reviewSubmissionItems]"); got != wantFields {
+					t.Fatalf("fields[reviewSubmissionItems] = %q, want %q", got, wantFields)
+				}
+				if got := req.URL.Query().Get("include"); got != "items" {
+					t.Fatalf("include = %q, want items", got)
+				}
+			}, reviewSubmissionsJSONResponse(http.StatusOK, test.body))
+
+			if err := test.call(client); err != nil {
+				t.Fatalf("call error: %v", err)
+			}
+		})
+	}
+}
+
 func TestReviewSubmissionValidationErrors(t *testing.T) {
 	client := newTestClient(t, nil, nil)
 
@@ -677,10 +1108,6 @@ func TestReviewSubmissionValidationErrors(t *testing.T) {
 
 	if _, err := client.GetReviewSubmissionItems(context.Background(), ""); err == nil {
 		t.Fatalf("expected submissionID required error, got nil")
-	}
-
-	if _, err := client.GetReviewSubmissionItem(context.Background(), ""); err == nil {
-		t.Fatalf("expected itemID required error, got nil")
 	}
 
 	if _, err := client.CreateReviewSubmissionItem(context.Background(), "", ReviewSubmissionItemTypeAppStoreVersion, "item-1"); err == nil {
@@ -715,11 +1142,14 @@ func TestReviewSubmissionValidationErrors(t *testing.T) {
 func countReviewSubmissionItemCreateRelationships(relationships ReviewSubmissionItemCreateRelationships) int {
 	count := 0
 	for _, relationship := range []*Relationship{
+		relationships.InAppPurchaseVersion,
+		relationships.SubscriptionVersion,
+		relationships.SubscriptionGroupVersion,
 		relationships.AppStoreVersion,
 		relationships.AppCustomProductPageVersion,
 		relationships.AppEvent,
 		relationships.AppStoreVersionExperiment,
-		relationships.AppStoreVersionExperimentTreatment,
+		relationships.AppStoreVersionExperimentV2,
 		relationships.BackgroundAssetVersion,
 		relationships.GameCenterAchievementVersion,
 		relationships.GameCenterActivityVersion,

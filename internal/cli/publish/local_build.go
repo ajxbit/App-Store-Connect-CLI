@@ -18,8 +18,12 @@ import (
 const defaultPublishExportOptionsPath = ".asc/export-options-app-store.plist"
 
 var (
-	runPublishArchiveFn   = localxcode.Archive
-	runPublishExportFn    = localxcode.Export
+	runPublishArchiveFn            = localxcode.Archive
+	runPublishExportFn             = localxcode.Export
+	preflightPublishXcodeFn        = localxcode.PreflightExport
+	generatePublishExportOptionsFn = func(ctx context.Context, opts localxcode.ExportOptionsGenerateOptions) (*localxcode.ExportOptionsGenerateResult, error) {
+		return localxcode.GenerateExportOptions(ctx, opts)
+	}
 	getPublishASCClientFn = func(timeout time.Duration) (*asc.Client, error) {
 		if timeout > 0 {
 			return shared.GetASCClientWithTimeout(timeout)
@@ -27,16 +31,19 @@ var (
 		return shared.GetASCClient()
 	}
 	validatePublishIPAPathFn        = shared.ValidateIPAPath
+	validatePublishPKGPathFn        = shared.ValidatePKGPath
 	resolvePublishNextBuildNumberFn = func(ctx context.Context, client *asc.Client, opts shared.NextBuildNumberOptions) (*asc.BuildsNextBuildNumberResult, error) {
 		return shared.ResolveNextBuildNumber(ctx, client, opts)
 	}
 	uploadBuildAndWaitForIDFn       = uploadBuildAndWaitForID
+	uploadPKGBuildAndWaitForIDFn    = uploadPKGBuildAndWaitForID
 	resolvePublishAppIDWithLookupFn = func(ctx context.Context, client *asc.Client, appID string) (string, error) {
 		return shared.ResolveAppIDWithLookup(ctx, client, appID)
 	}
 	waitForPublishBuildProcessingFn = func(ctx context.Context, client *asc.Client, buildID string, pollInterval time.Duration) (*asc.BuildResponse, error) {
-		return client.WaitForBuildProcessing(ctx, buildID, pollInterval)
+		return shared.WaitForBuildProcessingWithDetails(ctx, client, "", buildID, pollInterval)
 	}
+	applyPublishVersionMetadataFn = applyPublishVersionMetadata
 )
 
 type publishLocalBuildFlagValues struct {
@@ -45,12 +52,16 @@ type publishLocalBuildFlagValues struct {
 	scheme               *string
 	configuration        *string
 	exportOptionsPath    *string
+	signingStyle         *string
+	teamID               *string
 	archivePath          *string
 	ipaPath              *string
+	pkgPath              *string
 	clean                *bool
 	initialBuildNumber   *int
 	archiveXcodebuildArg shared.MultiStringFlag
 	exportXcodebuildArg  shared.MultiStringFlag
+	generationFlagsSet   bool
 }
 
 type publishLocalBuildConfig struct {
@@ -59,8 +70,11 @@ type publishLocalBuildConfig struct {
 	Scheme                string
 	Configuration         string
 	ExportOptionsPath     string
+	SigningStyle          string
+	TeamID                string
 	ArchivePath           string
 	IPAPath               string
+	PKGPath               string
 	Clean                 bool
 	ArchiveXcodebuildArgs []string
 	ExportXcodebuildArgs  []string
@@ -82,8 +96,11 @@ func bindPublishLocalBuildFlags(fs *flag.FlagSet) *publishLocalBuildFlagValues {
 	values.scheme = fs.String("scheme", "", "Xcode scheme name for local-build mode")
 	values.configuration = fs.String("configuration", "", "Build configuration for local-build mode (defaults to Release)")
 	values.exportOptionsPath = fs.String("export-options", "", "Path to ExportOptions.plist for local-build mode")
+	values.signingStyle = fs.String("signing-style", "automatic", "Signing style for generated local-build options: automatic or manual")
+	values.teamID = fs.String("team-id", "", "Apple Developer team ID for generated local-build options (overrides archive metadata)")
 	values.archivePath = fs.String("archive-path", "", "Destination path for the .xcarchive output in local-build mode")
 	values.ipaPath = fs.String("ipa-path", "", "Destination path for the .ipa output in local-build mode")
+	values.pkgPath = fs.String("pkg-path", "", "Destination path for the macOS .pkg output in local-build mode")
 	values.clean = fs.Bool("clean", false, "Run clean before local-build archive")
 	values.initialBuildNumber = fs.Int("initial-build-number", 1, "Initial build number when local-build mode auto-resolves a build number")
 	fs.Var(&values.archiveXcodebuildArg, "archive-xcodebuild-flag", "Pass a raw argument through to xcodebuild during local-build archive (repeatable)")
@@ -123,7 +140,10 @@ func validateLocalBuildFlagUsage(localBuildMode bool, setFlags map[string]bool) 
 	for _, flagName := range []string{
 		"archive-path",
 		"ipa-path",
+		"pkg-path",
 		"export-options",
+		"signing-style",
+		"team-id",
 		"configuration",
 		"clean",
 		"initial-build-number",
@@ -134,6 +154,60 @@ func validateLocalBuildFlagUsage(localBuildMode bool, setFlags map[string]bool) 
 		if setFlags[flagName] {
 			return shared.UsageErrorf("--%s requires --workspace or --project", flagName)
 		}
+	}
+	return nil
+}
+
+func validateLocalBuildArtifactFlags(values *publishLocalBuildFlagValues, setFlags map[string]bool, platform string) error {
+	if values == nil {
+		return nil
+	}
+	if setFlags["pkg-path"] && strings.TrimSpace(*values.pkgPath) == "" {
+		return shared.UsageError("--pkg-path must not be empty")
+	}
+	hasIPAPath := setFlags["ipa-path"] || strings.TrimSpace(*values.ipaPath) != ""
+	hasPKGPath := setFlags["pkg-path"] || strings.TrimSpace(*values.pkgPath) != ""
+	if hasIPAPath && hasPKGPath {
+		return shared.UsageError("--ipa-path and --pkg-path are mutually exclusive")
+	}
+	if strings.EqualFold(strings.TrimSpace(platform), "MAC_OS") {
+		if hasIPAPath {
+			return shared.UsageError("--ipa-path is not supported with --platform MAC_OS; use --pkg-path")
+		}
+		return nil
+	}
+	if hasPKGPath {
+		return shared.UsageError("--pkg-path is only supported with --platform MAC_OS")
+	}
+	return nil
+}
+
+func validatePublishExportOptionsFlags(values *publishLocalBuildFlagValues, setFlags map[string]bool) error {
+	signingStyleSet := setFlags["signing-style"]
+	teamIDSet := setFlags["team-id"]
+	values.generationFlagsSet = signingStyleSet || teamIDSet
+	if signingStyleSet && strings.TrimSpace(*values.signingStyle) == "" {
+		return shared.UsageError("--signing-style must be one of: automatic, manual")
+	}
+	if teamIDSet && strings.TrimSpace(*values.teamID) == "" {
+		return shared.UsageError("--team-id must not be empty")
+	}
+	if strings.TrimSpace(*values.exportOptionsPath) != "" && values.generationFlagsSet {
+		return shared.UsageError("--export-options cannot be combined with --signing-style or --team-id")
+	}
+	style, err := localxcode.NormalizeExportOptionsSigningStyle(*values.signingStyle)
+	if err != nil {
+		return shared.UsageError(err.Error())
+	}
+	*values.signingStyle = style
+	*values.teamID = strings.TrimSpace(*values.teamID)
+	return nil
+}
+
+func validatePublishExportXcodebuildArgs(args []string) error {
+	if err := localxcode.ValidateExportXcodebuildArgs(args); err != nil {
+		message := strings.Replace(err.Error(), "--xcodebuild-flag", "--export-xcodebuild-flag", 1)
+		return shared.UsageError(message)
 	}
 	return nil
 }
@@ -165,28 +239,53 @@ func resolveLocalBuildConfig(values *publishLocalBuildFlagValues, platform, vers
 		Clean:                 values.clean != nil && *values.clean,
 		ArchiveXcodebuildArgs: append([]string(nil), values.archiveXcodebuildArg...),
 		ExportXcodebuildArgs:  append([]string(nil), values.exportXcodebuildArg...),
+		SigningStyle:          strings.TrimSpace(*values.signingStyle),
+		TeamID:                strings.TrimSpace(*values.teamID),
 	}
 	if trimmedConfiguration := strings.TrimSpace(*values.configuration); trimmedConfiguration != "" {
 		config.Configuration = trimmedConfiguration
 	}
 
-	exportOptionsPath, err := resolvePublishExportOptionsPath(strings.TrimSpace(*values.exportOptionsPath))
+	explicitExportOptionsPath := strings.TrimSpace(*values.exportOptionsPath)
+	exportOptionsPath := ""
+	var err error
+	if !values.generationFlagsSet {
+		exportOptionsPath, err = resolvePublishExportOptionsPath(explicitExportOptionsPath)
+	} else {
+		exportOptionsPath = explicitExportOptionsPath
+	}
 	if err != nil {
 		return publishLocalBuildConfig{}, err
 	}
-	if localxcode.IsDirectUploadMode(exportOptionsPath) {
-		return publishLocalBuildConfig{}, shared.UsageError("--export-options with destination=upload is not supported by publish; use export options that produce a local IPA")
+	if exportOptionsPath != "" && localxcode.IsDirectUploadMode(exportOptionsPath) {
+		return publishLocalBuildConfig{}, shared.UsageError("--export-options with destination=upload is not supported by publish; use export options that produce a local artifact")
 	}
 	config.ExportOptionsPath = exportOptionsPath
+	if strings.EqualFold(strings.TrimSpace(platform), "MAC_OS") && exportOptionsPath == "" && config.SigningStyle == "manual" {
+		return publishLocalBuildConfig{}, shared.UsageError("manual signing for a macOS local build requires an explicit --export-options plist")
+	}
 
 	config.ArchivePath = strings.TrimSpace(*values.archivePath)
 	if config.ArchivePath == "" {
 		config.ArchivePath = defaultPublishArchivePath(config.Scheme, platform, version, buildNumber)
 	}
 
-	config.IPAPath = strings.TrimSpace(*values.ipaPath)
-	if config.IPAPath == "" {
-		config.IPAPath = defaultPublishIPAPath(config.Scheme, platform, version, buildNumber)
+	if strings.EqualFold(strings.TrimSpace(platform), "MAC_OS") {
+		config.PKGPath = strings.TrimSpace(*values.pkgPath)
+		if config.PKGPath == "" {
+			config.PKGPath = defaultPublishPKGPath(config.Scheme, platform, version, buildNumber)
+		}
+		if err := localxcode.ValidateExportPKGDestination(config.PKGPath, true, false); err != nil {
+			if localxcode.IsExportDestinationUsageError(err) {
+				return publishLocalBuildConfig{}, shared.UsageError(err.Error())
+			}
+			return publishLocalBuildConfig{}, fmt.Errorf("validate local-build PKG destination: %w", err)
+		}
+	} else {
+		config.IPAPath = strings.TrimSpace(*values.ipaPath)
+		if config.IPAPath == "" {
+			config.IPAPath = defaultPublishIPAPath(config.Scheme, platform, version, buildNumber)
+		}
 	}
 
 	return config, nil
@@ -214,6 +313,41 @@ func resolvePublishBuildNumber(ctx context.Context, client *asc.Client, appID, v
 }
 
 func runPublishLocalBuild(ctx context.Context, client *asc.Client, appID, platform, version, buildNumber string, pollInterval, timeout time.Duration, timeoutOverride bool, config publishLocalBuildConfig) (*publishLocalBuildExecutionResult, error) {
+	if err := validatePublishExportXcodebuildArgs(config.ExportXcodebuildArgs); err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(config.SigningStyle) == "" {
+		config.SigningStyle = "automatic"
+	}
+	signingStyle, err := localxcode.NormalizeExportOptionsSigningStyle(config.SigningStyle)
+	if err != nil {
+		return nil, shared.UsageError(err.Error())
+	}
+	config.SigningStyle = signingStyle
+	isPKG := strings.EqualFold(strings.TrimSpace(platform), "MAC_OS")
+	artifactPath := config.IPAPath
+	validateExportDestination := localxcode.ValidateExportDestination
+	preflightExportDestination := localxcode.PreflightExportDestination
+	if isPKG {
+		artifactPath = config.PKGPath
+		validateExportDestination = localxcode.ValidateExportPKGDestination
+		preflightExportDestination = localxcode.PreflightExportPKGDestination
+	}
+	if err := validateExportDestination(artifactPath, true, false); err != nil {
+		if localxcode.IsExportDestinationUsageError(err) {
+			return nil, shared.UsageError(err.Error())
+		}
+		return nil, fmt.Errorf("validate local-build export destination: %w", err)
+	}
+	if err := preflightPublishXcodeFn(ctx); err != nil {
+		return nil, fmt.Errorf("preflight local-build Xcode: %w", err)
+	}
+	if err := preflightExportDestination(artifactPath, true, false); err != nil {
+		if localxcode.IsExportDestinationUsageError(err) {
+			return nil, shared.UsageError(err.Error())
+		}
+		return nil, fmt.Errorf("preflight local-build export destination: %w", err)
+	}
 	archiveResult, err := runPublishArchiveFn(ctx, localxcode.ArchiveOptions{
 		WorkspacePath:  config.WorkspacePath,
 		ProjectPath:    config.ProjectPath,
@@ -229,10 +363,34 @@ func runPublishLocalBuild(ctx context.Context, client *asc.Client, appID, platfo
 		return nil, fmt.Errorf("archive local build: %w", err)
 	}
 
+	exportOptionsPath := strings.TrimSpace(config.ExportOptionsPath)
+	if exportOptionsPath == "" {
+		generatedPath, err := localxcode.UniqueExportOptionsPathForArchive(archiveResult.ArchivePath)
+		if err != nil {
+			return nil, fmt.Errorf("select export options path for local build: %w", err)
+		}
+		generated, err := generatePublishExportOptionsFn(ctx, localxcode.ExportOptionsGenerateOptions{
+			ArchivePath:  archiveResult.ArchivePath,
+			OutputPath:   generatedPath,
+			Destination:  "export",
+			SigningStyle: config.SigningStyle,
+			TeamID:       config.TeamID,
+			Overwrite:    false,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("generate export options for local build: %w", err)
+		}
+		if generated == nil || strings.TrimSpace(generated.Path) == "" {
+			return nil, fmt.Errorf("generate export options for local build: generator returned an empty path")
+		}
+		exportOptionsPath = strings.TrimSpace(generated.Path)
+	}
+
 	exportResult, err := runPublishExportFn(ctx, localxcode.ExportOptions{
 		ArchivePath:    archiveResult.ArchivePath,
-		ExportOptions:  config.ExportOptionsPath,
+		ExportOptions:  exportOptionsPath,
 		IPAPath:        config.IPAPath,
+		PKGPath:        config.PKGPath,
 		Overwrite:      true,
 		XcodebuildArgs: publishExportXcodebuildArgs(config.ExportXcodebuildArgs),
 		LogWriter:      os.Stderr,
@@ -252,31 +410,42 @@ func runPublishLocalBuild(ctx context.Context, client *asc.Client, appID, platfo
 		Export: &asc.PublishExportStageResult{
 			ArchivePath:       strings.TrimSpace(exportResult.ArchivePath),
 			IPAPath:           strings.TrimSpace(exportResult.IPAPath),
+			PKGPath:           strings.TrimSpace(exportResult.PKGPath),
 			BundleID:          firstNonEmpty(strings.TrimSpace(exportResult.BundleID), strings.TrimSpace(archiveResult.BundleID)),
 			Version:           firstNonEmpty(strings.TrimSpace(exportResult.Version), strings.TrimSpace(archiveResult.Version), strings.TrimSpace(version)),
 			BuildNumber:       firstNonEmpty(strings.TrimSpace(exportResult.BuildNumber), strings.TrimSpace(archiveResult.BuildNumber), strings.TrimSpace(buildNumber)),
-			ExportOptionsPath: config.ExportOptionsPath,
-			DirectUpload:      strings.TrimSpace(exportResult.IPAPath) == "",
+			ExportOptionsPath: exportOptionsPath,
+			DirectUpload:      strings.TrimSpace(exportResult.IPAPath) == "" && strings.TrimSpace(exportResult.PKGPath) == "",
 		},
 		Version:     firstNonEmpty(strings.TrimSpace(exportResult.Version), strings.TrimSpace(archiveResult.Version), strings.TrimSpace(version)),
 		BuildNumber: firstNonEmpty(strings.TrimSpace(exportResult.BuildNumber), strings.TrimSpace(archiveResult.BuildNumber), strings.TrimSpace(buildNumber)),
 	}
 
-	if strings.TrimSpace(exportResult.IPAPath) == "" {
-		return nil, fmt.Errorf("export local build: expected a local IPA artifact for publish upload")
+	exportedArtifactPath := strings.TrimSpace(exportResult.IPAPath)
+	validateArtifactPath := validatePublishIPAPathFn
+	uploadArtifact := uploadBuildAndWaitForIDFn
+	artifactName := "IPA"
+	if isPKG {
+		exportedArtifactPath = strings.TrimSpace(exportResult.PKGPath)
+		validateArtifactPath = validatePublishPKGPathFn
+		uploadArtifact = uploadPKGBuildAndWaitForIDFn
+		artifactName = "PKG"
+	}
+	if exportedArtifactPath == "" {
+		return nil, fmt.Errorf("export local build: expected a local %s artifact for publish upload", artifactName)
 	}
 
-	fileInfo, err := validatePublishIPAPathFn(exportResult.IPAPath)
+	fileInfo, err := validateArtifactPath(exportedArtifactPath)
 	if err != nil {
-		return nil, fmt.Errorf("validate exported IPA: %w", err)
+		return nil, fmt.Errorf("validate exported %s: %w", artifactName, err)
 	}
 	uploadRequestCtx, cancel := shared.ContextWithTimeoutDuration(ctx, timeout)
 	defer cancel()
-	uploadResult, err := uploadBuildAndWaitForIDFn(
+	uploadResult, err := uploadArtifact(
 		uploadRequestCtx,
 		client,
 		appID,
-		exportResult.IPAPath,
+		exportedArtifactPath,
 		fileInfo,
 		result.Version,
 		result.BuildNumber,
@@ -325,11 +494,12 @@ func resolvePublishExportOptionsPath(explicit string) (string, error) {
 	if err != nil && !os.IsNotExist(err) {
 		return "", fmt.Errorf("stat %s: %w", defaultPublishExportOptionsPath, err)
 	}
-	return "", shared.UsageError(fmt.Sprintf("--export-options is required in local-build mode when %s is missing", defaultPublishExportOptionsPath))
+	return "", nil
 }
 
 func defaultPublishArchivePath(scheme, platform, version, buildNumber string) string {
-	fileName := fmt.Sprintf("%s-%s-%s-%s.xcarchive",
+	fileName := fmt.Sprintf(
+		"%s-%s-%s-%s.xcarchive",
 		sanitizePublishArtifactToken(scheme),
 		sanitizePublishArtifactToken(platform),
 		sanitizePublishArtifactToken(version),
@@ -339,7 +509,19 @@ func defaultPublishArchivePath(scheme, platform, version, buildNumber string) st
 }
 
 func defaultPublishIPAPath(scheme, platform, version, buildNumber string) string {
-	fileName := fmt.Sprintf("%s-%s-%s-%s.ipa",
+	fileName := fmt.Sprintf(
+		"%s-%s-%s-%s.ipa",
+		sanitizePublishArtifactToken(scheme),
+		sanitizePublishArtifactToken(platform),
+		sanitizePublishArtifactToken(version),
+		sanitizePublishArtifactToken(buildNumber),
+	)
+	return filepath.Join(".asc", "artifacts", fileName)
+}
+
+func defaultPublishPKGPath(scheme, platform, version, buildNumber string) string {
+	fileName := fmt.Sprintf(
+		"%s-%s-%s-%s.pkg",
 		sanitizePublishArtifactToken(scheme),
 		sanitizePublishArtifactToken(platform),
 		sanitizePublishArtifactToken(version),

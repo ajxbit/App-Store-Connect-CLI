@@ -40,8 +40,8 @@ Examples:
 func VersionsPromotionsCreateCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("versions promotions create", flag.ExitOnError)
 
-	versionID := fs.String("version-id", "", "App Store version ID (required)")
-	treatmentID := fs.String("treatment-id", "", "App Store version experiment treatment ID (required)")
+	versionID := shared.BindResourceIDFlag(fs, "version-id", "appStoreVersions", "App Store version ID (required)")
+	treatmentID := shared.BindResourceIDFlag(fs, "treatment-id", "appStoreVersionExperimentTreatments", "App Store version experiment treatment ID (required)")
 	output := shared.BindOutputFlags(fs)
 
 	return &ffcli.Command{
@@ -58,12 +58,12 @@ Examples:
 			version := strings.TrimSpace(*versionID)
 			if version == "" {
 				fmt.Fprintln(os.Stderr, "Error: --version-id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--version-id")
 			}
 			treatment := strings.TrimSpace(*treatmentID)
 			if treatment == "" {
 				fmt.Fprintln(os.Stderr, "Error: --treatment-id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--treatment-id")
 			}
 
 			client, err := shared.GetASCClient()

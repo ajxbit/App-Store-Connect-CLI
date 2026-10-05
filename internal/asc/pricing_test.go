@@ -3,9 +3,12 @@ package asc
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 )
 
@@ -64,7 +67,8 @@ func TestGetAppPricePoints_WithTerritory(t *testing.T) {
 		}
 	}, jsonResponse(http.StatusOK, string(body)))
 
-	result, err := client.GetAppPricePoints(context.Background(), "app-1",
+	result, err := client.GetAppPricePoints(
+		context.Background(), "app-1",
 		WithPricePointsTerritory("usa"),
 		WithPricePointsLimit(10),
 	)
@@ -77,17 +81,7 @@ func TestGetAppPricePoints_WithTerritory(t *testing.T) {
 }
 
 func TestGetAppPricePoint(t *testing.T) {
-	single := SingleResponse[AppPricePointV3Attributes]{
-		Data: Resource[AppPricePointV3Attributes]{
-			Type: ResourceTypeAppPricePoints,
-			ID:   "pp-1",
-			Attributes: AppPricePointV3Attributes{
-				CustomerPrice: "0.99",
-				Proceeds:      "0.70",
-			},
-		},
-	}
-	body, _ := json.Marshal(single)
+	body := `{"data":{"type":"appPricePoints","id":"pp-1","attributes":{"customerPrice":"0.99","proceeds":"0.70"}},"included":[{"type":"territories","id":"USA","attributes":{"currency":"USD"}}],"links":{"self":"https://api.appstoreconnect.apple.com/v3/appPricePoints/pp-1"}}`
 
 	client := newTestClient(t, func(req *http.Request) {
 		assertAuthorized(t, req)
@@ -97,17 +91,36 @@ func TestGetAppPricePoint(t *testing.T) {
 		if req.URL.Path != "/v3/appPricePoints/pp-1" {
 			t.Fatalf("expected path /v3/appPricePoints/pp-1, got %s", req.URL.Path)
 		}
-	}, jsonResponse(http.StatusOK, string(body)))
+	}, jsonResponse(http.StatusOK, body))
 
 	result, err := client.GetAppPricePoint(context.Background(), "pp-1")
 	if err != nil {
 		t.Fatalf("GetAppPricePoint() error: %v", err)
 	}
-	if len(result.Data) != 1 {
-		t.Fatalf("expected 1 price point, got %d", len(result.Data))
+	encoded, err := json.Marshal(result)
+	if err != nil {
+		t.Fatalf("marshal app price point response: %v", err)
 	}
-	if result.Data[0].ID != "pp-1" {
-		t.Fatalf("expected price point pp-1, got %q", result.Data[0].ID)
+	var envelope map[string]json.RawMessage
+	if err := json.Unmarshal(encoded, &envelope); err != nil {
+		t.Fatalf("unmarshal app price point envelope: %v", err)
+	}
+	var data []map[string]any
+	if err := json.Unmarshal(envelope["data"], &data); err != nil {
+		t.Fatalf("expected one-element data array, got %s: %v", envelope["data"], err)
+	}
+	if len(data) != 1 || data[0]["id"] != "pp-1" {
+		t.Fatalf("expected price point pp-1, got %#v", data)
+	}
+	if len(envelope["included"]) == 0 {
+		t.Fatal("expected included resources to be preserved")
+	}
+	var links Links
+	if err := json.Unmarshal(envelope["links"], &links); err != nil {
+		t.Fatalf("decode links: %v", err)
+	}
+	if links.Self != "https://api.appstoreconnect.apple.com/v3/appPricePoints/pp-1" {
+		t.Fatalf("unexpected self link: %q", links.Self)
 	}
 }
 
@@ -544,7 +557,13 @@ func TestGetAppAvailabilityV2ByID_RequiresID(t *testing.T) {
 func TestGetTerritoryAvailabilities(t *testing.T) {
 	resp := TerritoryAvailabilitiesResponse{
 		Data: []Resource[TerritoryAvailabilityAttributes]{
-			{Type: ResourceTypeTerritoryAvailabilities, ID: "ta-1"},
+			{
+				Type: ResourceTypeTerritoryAvailabilities,
+				ID:   "ta-1",
+				Attributes: TerritoryAvailabilityAttributes{
+					ContentStatuses: []string{"BRAZIL_GAMBLING_NOT_VERIFIED"},
+				},
+			},
 		},
 	}
 	body, _ := json.Marshal(resp)
@@ -558,13 +577,17 @@ func TestGetTerritoryAvailabilities(t *testing.T) {
 		if query.Get("include") != "territory" {
 			t.Fatalf("expected include=territory, got %q", query.Get("include"))
 		}
-		if query.Get("fields[territoryAvailabilities]") != "available,releaseDate,preOrderEnabled,territory" {
+		if query.Get("fields[territoryAvailabilities]") != "available,releaseDate,preOrderEnabled,contentStatuses,territory" {
 			t.Fatalf("expected territory availability fields, got %q", query.Get("fields[territoryAvailabilities]"))
 		}
 	}, jsonResponse(http.StatusOK, string(body)))
 
-	if _, err := client.GetTerritoryAvailabilities(context.Background(), "availability-1"); err != nil {
+	got, err := client.GetTerritoryAvailabilities(context.Background(), "availability-1")
+	if err != nil {
 		t.Fatalf("GetTerritoryAvailabilities() error: %v", err)
+	}
+	if len(got.Data) != 1 || !slices.Contains(got.Data[0].Attributes.ContentStatuses, "BRAZIL_GAMBLING_NOT_VERIFIED") {
+		t.Fatalf("expected Brazil gambling status in response, got %#v", got.Data)
 	}
 }
 
@@ -650,6 +673,30 @@ func TestCreateAppAvailabilityV2(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("CreateAppAvailabilityV2() error: %v", err)
+	}
+}
+
+func TestCreateAppAvailabilityV2_APIError(t *testing.T) {
+	client := newTestClient(t, func(req *http.Request) {
+		assertAuthorized(t, req)
+		if req.Method != http.MethodPost || req.URL.Path != "/v2/appAvailabilities" {
+			t.Fatalf("unexpected request: %s %s", req.Method, req.URL.Path)
+		}
+	}, jsonResponse(http.StatusConflict, `{"errors":[{"status":"409","code":"ENTITY_ERROR.RELATIONSHIP.INVALID","title":"invalid relationship","detail":"availability already exists"}]}`))
+
+	availableInNewTerritories := true
+	_, err := client.CreateAppAvailabilityV2(context.Background(), "app-1", AppAvailabilityV2CreateAttributes{
+		AvailableInNewTerritories: &availableInNewTerritories,
+		TerritoryAvailabilities: []TerritoryAvailabilityCreate{
+			{TerritoryID: "USA", Available: true},
+		},
+	})
+	if err == nil {
+		t.Fatal("expected API error")
+	}
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusConflict {
+		t.Fatalf("expected wrapped 409 API error, got %v", err)
 	}
 }
 
@@ -760,6 +807,49 @@ func TestUpdateTerritoryAvailability(t *testing.T) {
 		PreOrderEnabled: &preOrderEnabled,
 	}); err != nil {
 		t.Fatalf("UpdateTerritoryAvailability() error: %v", err)
+	}
+}
+
+func TestUpdateTerritoryAvailability_RetriesTransientFailure(t *testing.T) {
+	t.Setenv("ASC_MAX_RETRIES", "1")
+	t.Setenv("ASC_BASE_DELAY", "1ns")
+	t.Setenv("ASC_MAX_DELAY", "1ns")
+
+	resp := TerritoryAvailabilityResponse{
+		Data: Resource[TerritoryAvailabilityAttributes]{
+			Type: ResourceTypeTerritoryAvailabilities,
+			ID:   "ta-1",
+		},
+	}
+	body, _ := json.Marshal(resp)
+
+	var requests atomic.Int32
+	client := newTestClient(
+		t, func(req *http.Request) {
+			requests.Add(1)
+			if req.Method != http.MethodPatch {
+				t.Fatalf("expected PATCH, got %s", req.Method)
+			}
+			var updateReq TerritoryAvailabilityUpdateRequest
+			if err := json.NewDecoder(req.Body).Decode(&updateReq); err != nil {
+				t.Fatalf("failed to decode retry request: %v", err)
+			}
+			if updateReq.Data.Attributes == nil || updateReq.Data.Attributes.Available == nil || !*updateReq.Data.Attributes.Available {
+				t.Fatalf("expected available=true on every attempt, got %#v", updateReq.Data.Attributes)
+			}
+		},
+		jsonResponse(http.StatusInternalServerError, `{"errors":[{"status":"500","code":"INTERNAL_ERROR","title":"Internal Error"}]}`),
+		jsonResponse(http.StatusOK, string(body)),
+	)
+
+	available := true
+	if _, err := client.UpdateTerritoryAvailability(context.Background(), "ta-1", TerritoryAvailabilityUpdateAttributes{
+		Available: &available,
+	}); err != nil {
+		t.Fatalf("UpdateTerritoryAvailability() error: %v", err)
+	}
+	if got := requests.Load(); got != 2 {
+		t.Fatalf("expected transient PATCH to be retried once, got %d requests", got)
 	}
 }
 

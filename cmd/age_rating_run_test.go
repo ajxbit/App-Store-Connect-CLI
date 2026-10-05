@@ -8,7 +8,8 @@ import (
 func TestRun_AgeRatingSetInvalidAllNoneReturnsUsage(t *testing.T) {
 	resetReportFlags(t)
 
-	stdout, stderr, exitCode := runHelpSubprocess(t, t.TempDir(),
+	stdout, stderr, exitCode := runHelpSubprocess(
+		t, t.TempDir(),
 		"age-rating", "edit",
 		"--id", "age-1",
 		"--all-none=maybe",
@@ -27,7 +28,8 @@ func TestRun_AgeRatingSetInvalidAllNoneReturnsUsage(t *testing.T) {
 func TestRun_AgeRatingSetAllNoneFalseReturnsUsage(t *testing.T) {
 	resetReportFlags(t)
 
-	stdout, stderr, exitCode := runHelpSubprocess(t, t.TempDir(),
+	stdout, stderr, exitCode := runHelpSubprocess(
+		t, t.TempDir(),
 		"age-rating", "edit",
 		"--id", "age-1",
 		"--all-none", "false",
@@ -38,7 +40,7 @@ func TestRun_AgeRatingSetAllNoneFalseReturnsUsage(t *testing.T) {
 	if stdout != "" {
 		t.Fatalf("expected empty stdout, got %q", stdout)
 	}
-	if !strings.Contains(stderr, "unexpected argument(s): false") {
-		t.Fatalf("expected unexpected argument error, got %q", stderr)
+	if !strings.Contains(stderr, "at least one update flag is required") {
+		t.Fatalf("expected no-update usage error, got %q", stderr)
 	}
 }

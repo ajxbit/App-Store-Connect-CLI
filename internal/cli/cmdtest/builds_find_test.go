@@ -11,7 +11,46 @@ import (
 	"testing"
 )
 
-const deprecatedImplicitIOSBuildNumberPlatformWarning = "Warning: omitting --platform with app-scoped --build-number selection is deprecated. Defaulting to IOS; pass --platform IOS explicitly."
+const buildNumberRequiresPlatformError = "Error: --platform is required with --build-number"
+
+func TestBuildsInfoByBuildNumberRequiresPlatform(t *testing.T) {
+	setupAuth(t)
+	t.Setenv("ASC_CONFIG_PATH", filepath.Join(t.TempDir(), "nonexistent.json"))
+	t.Setenv("ASC_APP_ID", "")
+
+	originalTransport := http.DefaultTransport
+	t.Cleanup(func() {
+		http.DefaultTransport = originalTransport
+	})
+	http.DefaultTransport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		t.Fatalf("unexpected request %s %s", req.Method, req.URL.String())
+		return nil, nil
+	})
+
+	root := RootCommand("1.2.3")
+	root.FlagSet.SetOutput(io.Discard)
+
+	var runErr error
+	stdout, stderr := captureOutput(t, func() {
+		if err := root.Parse([]string{"builds", "info", "--app", "123456789", "--build-number", "42", "--output", "json"}); err != nil {
+			t.Fatalf("parse error: %v", err)
+		}
+		runErr = root.Run(context.Background())
+	})
+
+	if !errors.Is(runErr, flag.ErrHelp) {
+		t.Fatalf("expected usage error, got %v", runErr)
+	}
+	if stdout != "" {
+		t.Fatalf("expected empty stdout, got %q", stdout)
+	}
+	if !strings.Contains(stderr, buildNumberRequiresPlatformError) {
+		t.Fatalf("expected stderr to require --platform, got %q", stderr)
+	}
+	if strings.Contains(stderr, "Defaulting to IOS") {
+		t.Fatalf("expected no implicit IOS default, got %q", stderr)
+	}
+}
 
 func TestBuildsInfoByBuildNumberSuccess(t *testing.T) {
 	setupAuth(t)
@@ -37,7 +76,7 @@ func TestBuildsInfoByBuildNumberSuccess(t *testing.T) {
 				t.Fatalf("expected filter[version]=42, got %q", query.Get("filter[version]"))
 			}
 			if query.Get("filter[preReleaseVersion.platform]") != "IOS" {
-				t.Fatalf("expected implicit IOS platform filter, got %q", query.Get("filter[preReleaseVersion.platform]"))
+				t.Fatalf("expected IOS platform filter, got %q", query.Get("filter[preReleaseVersion.platform]"))
 			}
 			if query.Get("sort") != "-uploadedDate" {
 				t.Fatalf("expected sort=-uploadedDate, got %q", query.Get("sort"))
@@ -68,7 +107,7 @@ func TestBuildsInfoByBuildNumberSuccess(t *testing.T) {
 	root.FlagSet.SetOutput(io.Discard)
 
 	stdout, stderr := captureOutput(t, func() {
-		if err := root.Parse([]string{"builds", "info", "--app", "123456789", "--build-number", "42", "--output", "json"}); err != nil {
+		if err := root.Parse([]string{"builds", "info", "--app", "123456789", "--build-number", "42", "--platform", "IOS", "--output", "json"}); err != nil {
 			t.Fatalf("parse error: %v", err)
 		}
 		if err := root.Run(context.Background()); err != nil {
@@ -76,8 +115,8 @@ func TestBuildsInfoByBuildNumberSuccess(t *testing.T) {
 		}
 	})
 
-	if !strings.Contains(stderr, deprecatedImplicitIOSBuildNumberPlatformWarning) {
-		t.Fatalf("expected implicit IOS deprecation warning, got %q", stderr)
+	if stderr != "" {
+		t.Fatalf("expected empty stderr, got %q", stderr)
 	}
 	if !strings.Contains(stdout, `"id":"build-42"`) {
 		t.Fatalf("expected build output, got %q", stdout)
@@ -182,7 +221,7 @@ func TestBuildsInfoByBuildNumberNotFound(t *testing.T) {
 
 	var runErr error
 	stdout, _ := captureOutput(t, func() {
-		if err := root.Parse([]string{"builds", "info", "--app", "123456789", "--build-number", "42"}); err != nil {
+		if err := root.Parse([]string{"builds", "info", "--app", "123456789", "--build-number", "42", "--platform", "IOS"}); err != nil {
 			t.Fatalf("parse error: %v", err)
 		}
 		runErr = root.Run(context.Background())
@@ -423,7 +462,7 @@ func TestBuildsInfoByLatestVersionWithoutPlatformSelectsNewestAcrossPlatforms(t 
 	}
 }
 
-func TestBuildsInfoByLatestVersionIgnoresNearMatchPreReleaseVersions(t *testing.T) {
+func TestBuildsInfoByLatestVersionCollectsEquivalentPlatformVersions(t *testing.T) {
 	setupAuth(t)
 	t.Setenv("ASC_CONFIG_PATH", filepath.Join(t.TempDir(), "nonexistent.json"))
 	t.Setenv("ASC_APP_ID", "")
@@ -433,6 +472,7 @@ func TestBuildsInfoByLatestVersionIgnoresNearMatchPreReleaseVersions(t *testing.
 		http.DefaultTransport = originalTransport
 	})
 
+	var buildFilters []string
 	http.DefaultTransport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
 		switch req.URL.Path {
 		case "/v1/preReleaseVersions":
@@ -440,8 +480,8 @@ func TestBuildsInfoByLatestVersionIgnoresNearMatchPreReleaseVersions(t *testing.
 			if query.Get("filter[app]") != "123456789" {
 				t.Fatalf("expected filter[app]=123456789, got %q", query.Get("filter[app]"))
 			}
-			if query.Get("filter[version]") != "1.1" {
-				t.Fatalf("expected filter[version]=1.1, got %q", query.Get("filter[version]"))
+			if query.Get("filter[version]") != "1.1,1.1.0" {
+				t.Fatalf("expected filter[version]=1.1,1.1.0, got %q", query.Get("filter[version]"))
 			}
 			if query.Get("limit") != "200" {
 				t.Fatalf("expected limit=200 for version-only latest lookup, got %q", query.Get("limit"))
@@ -454,8 +494,17 @@ func TestBuildsInfoByLatestVersionIgnoresNearMatchPreReleaseVersions(t *testing.
 			}, nil
 		case "/v1/builds":
 			query := req.URL.Query()
-			if query.Get("filter[preReleaseVersion]") != "prv-exact" {
-				t.Fatalf("expected exact pre-release version match only, got %q", query.Get("filter[preReleaseVersion]"))
+			filter := query.Get("filter[preReleaseVersion]")
+			buildFilters = append(buildFilters, filter)
+			if filter == "prv-near" {
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Body:       io.NopCloser(strings.NewReader(`{"data":[]}`)),
+					Header:     http.Header{"Content-Type": []string{"application/json"}},
+				}, nil
+			}
+			if filter != "prv-exact" {
+				t.Fatalf("unexpected pre-release version filter %q", filter)
 			}
 			body := `{"data":[{"type":"builds","id":"build-exact","attributes":{"version":"101","uploadedDate":"2026-03-03T10:00:00Z"}}]}`
 			return &http.Response{
@@ -494,6 +543,9 @@ func TestBuildsInfoByLatestVersionIgnoresNearMatchPreReleaseVersions(t *testing.
 	if !strings.Contains(stdout, `"id":"build-exact"`) {
 		t.Fatalf("expected exact-version latest build output, got %q", stdout)
 	}
+	if len(buildFilters) != 2 || buildFilters[0] != "prv-exact" || buildFilters[1] != "prv-near" {
+		t.Fatalf("expected both equivalent platform trains to be inspected, got %v", buildFilters)
+	}
 }
 
 func TestBuildsInfoByLatestVersionKeepsServerMatchedPreReleaseVersionsWithoutAttributes(t *testing.T) {
@@ -513,8 +565,8 @@ func TestBuildsInfoByLatestVersionKeepsServerMatchedPreReleaseVersionsWithoutAtt
 			if query.Get("filter[app]") != "123456789" {
 				t.Fatalf("expected filter[app]=123456789, got %q", query.Get("filter[app]"))
 			}
-			if query.Get("filter[version]") != "1.1" {
-				t.Fatalf("expected filter[version]=1.1, got %q", query.Get("filter[version]"))
+			if query.Get("filter[version]") != "1.1,1.1.0" {
+				t.Fatalf("expected filter[version]=1.1,1.1.0, got %q", query.Get("filter[version]"))
 			}
 			if query.Get("limit") != "200" {
 				t.Fatalf("expected limit=200 for version-only latest lookup, got %q", query.Get("limit"))
@@ -675,11 +727,11 @@ func TestBuildsFindAliasIsRemoved(t *testing.T) {
 	if stdout != "" {
 		t.Fatalf("expected empty stdout, got %q", stdout)
 	}
-	if !strings.Contains(stderr, "Error: `asc builds find` was removed. Use `asc builds info` instead.") {
-		t.Fatalf("expected removed builds find path to point to builds info, got %q", stderr)
+	if !strings.Contains(stderr, "Manage builds in App Store Connect.") {
+		t.Fatalf("expected builds help after deprecated command removal, got %q", stderr)
 	}
 	if strings.Contains(stderr, "\n  find\t") || strings.Contains(stderr, "\n  find ") {
-		t.Fatalf("expected removed builds find alias to stay hidden, got %q", stderr)
+		t.Fatalf("expected builds find to stay omitted from help, got %q", stderr)
 	}
 }
 

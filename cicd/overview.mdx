@@ -28,8 +28,14 @@ All CI platforms follow the same basic pattern:
 
   - run: asc apps list
     env:
+      ASC_PROFILE: ""
+      ASC_BYPASS_KEYCHAIN: ""
+      ASC_CONFIG_PATH: ""
+      ASC_KEY_TYPE: team
       ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
       ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+      ASC_PRIVATE_KEY_PATH: ""
+      ASC_PRIVATE_KEY: ""
       ASC_PRIVATE_KEY_B64: ${{ secrets.ASC_PRIVATE_KEY_B64 }}
   ```
 
@@ -72,22 +78,25 @@ All CI platforms follow the same basic pattern:
 
 All CI platforms use the same authentication environment variables:
 
-| Variable               | Description                             | Required |
-| ---------------------- | --------------------------------------- | -------- |
-| `ASC_KEY_ID`           | App Store Connect API Key ID            | Yes      |
-| `ASC_ISSUER_ID`        | App Store Connect Issuer ID             | Yes      |
-| `ASC_PRIVATE_KEY_B64`  | Base64-encoded private key (`.p8` file) | Yes\*    |
-| `ASC_PRIVATE_KEY_PATH` | Path to `.p8` file (alternative)        | Yes\*    |
-| `ASC_PRIVATE_KEY`      | Raw private key content (alternative)   | Yes\*    |
+| Variable               | Description                             | Required       |
+| ---------------------- | --------------------------------------- | -------------- |
+| `ASC_KEY_TYPE`         | `team` (default) or `individual`        | For individual |
+| `ASC_KEY_ID`           | App Store Connect API Key ID            | Yes            |
+| `ASC_ISSUER_ID`        | App Store Connect Issuer ID             | Team keys only |
+| `ASC_PRIVATE_KEY_B64`  | Base64-encoded private key (`.p8` file) | Yes\*          |
+| `ASC_PRIVATE_KEY_PATH` | Path to `.p8` file (alternative)        | Yes\*          |
+| `ASC_PRIVATE_KEY`      | Raw private key content (alternative)   | Yes\*          |
 
 \*One of these three private key options is required.
+
+The examples below use team keys and pin `ASC_KEY_TYPE=team`. For an individual key, set `ASC_KEY_TYPE=individual` and omit `ASC_ISSUER_ID`; issuer values are ignored for individual keys.
 
 ### Generating API Keys
 
 1. Visit [App Store Connect API Keys](https://appstoreconnect.apple.com/access/integrations/api)
 2. Create a new API key with appropriate permissions
 3. Download the `.p8` private key file (only available once!)
-4. Note the Key ID and Issuer ID
+4. Note the Key ID. Team keys also use the Issuer ID; individual keys use `ASC_KEY_TYPE=individual` without an issuer.
 
 ### Storing Credentials
 
@@ -100,6 +109,7 @@ All CI platforms use the same authentication environment variables:
     Store credentials in **Settings > Secrets and variables > Actions**:
 
     * `ASC_KEY_ID`
+    * `ASC_KEY_TYPE` (`team` for this example)
     * `ASC_ISSUER_ID`
     * `ASC_PRIVATE_KEY_B64`
 
@@ -114,6 +124,7 @@ All CI platforms use the same authentication environment variables:
     Store credentials in **Settings > CI/CD > Variables**:
 
     * `ASC_KEY_ID`
+    * `ASC_KEY_TYPE` (`team` for this example)
     * `ASC_ISSUER_ID`
     * `ASC_PRIVATE_KEY_B64`
 
@@ -124,6 +135,7 @@ All CI platforms use the same authentication environment variables:
     Store credentials in **Workflow > Secrets**:
 
     * `ASC_KEY_ID`
+    * `ASC_KEY_TYPE` (`team` for this example)
     * `ASC_ISSUER_ID`
     * `ASC_PRIVATE_KEY_B64`
 
@@ -134,6 +146,7 @@ All CI platforms use the same authentication environment variables:
     Store credentials in **Project Settings > Environment Variables**:
 
     * `ASC_KEY_ID`
+    * `ASC_KEY_TYPE` (`team` for this example)
     * `ASC_ISSUER_ID`
     * `ASC_PRIVATE_KEY_B64`
   </Tab>
@@ -146,10 +159,10 @@ Customize `asc` behavior in CI:
 | Variable             | Purpose                                     | Default      |
 | -------------------- | ------------------------------------------- | ------------ |
 | `ASC_DEFAULT_OUTPUT` | Output format (`json`, `table`, `markdown`) | `json` in CI |
-| `ASC_TIMEOUT`        | Request timeout (e.g., `90s`, `2m`)         | `60s`        |
+| `ASC_TIMEOUT`        | Per-request timeout (e.g., `90s`, `2m`)     | `30s`        |
 | `ASC_UPLOAD_TIMEOUT` | Upload timeout (e.g., `5m`, `10m`)          | `5m`         |
 | `ASC_DEBUG`          | Enable debug logging (`true`, `api`)        | -            |
-| `ASC_STRICT_AUTH`    | Fail on multiple credential sources         | `false`      |
+| `ASC_STRICT_AUTH`    | Fail when resolved credential fields mix sources | `false` |
 | `ASC_APP_ID`         | Default app ID for commands                 | -            |
 
 ## Common CI/CD Workflows
@@ -201,6 +214,31 @@ asc screenshots upload \
   --path "screenshot.png"
 ```
 
+### Code Signing on a Fresh Runner
+
+A macOS runner can create or pull its signing identity, install it in a
+dedicated keychain, point the Xcode project at the downloaded profiles, and
+produce a signed archive with `asc` alone:
+
+```bash  theme={null}
+asc signing sync pull \
+  --repo git@github.com:team/signing.git \
+  --password-file "$password_file" \
+  --output-dir .asc/signing/pulled \
+  --output json > .asc/signing/pull-result.json
+
+asc xcode signing plan \
+  --project Example.xcodeproj \
+  --profile ".asc/signing/pulled/$profile_path" \
+  --configuration Release \
+  --export-options-out .asc/artifacts/ExportOptions.plist
+```
+
+Read each `profile_path` from the `files` list in the pull receipt rather than
+guessing the store layout. See [Bootstrap a fresh CI runner](/guides/code-signing#bootstrap-a-fresh-ci-runner)
+for the first run, keychain installation, profile installation, archive,
+export, and cleanup.
+
 ### Crash and Feedback Monitoring
 
 ```bash  theme={null}
@@ -224,6 +262,7 @@ asc testflight feedback list \
 * `0` - Success
 * `1` - Runtime error (API failures, network issues, etc.)
 * `2` - Usage error (invalid flags, missing arguments, etc.)
+* `3` - Authentication failure (missing App Store Connect API credentials, unauthorized, forbidden)
 
 Example error handling:
 

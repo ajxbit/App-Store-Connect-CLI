@@ -4,10 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
+	"regexp"
 	"strings"
 
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/asc"
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/cli/shared"
+	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/readonly"
 )
 
 type ClassifiedError struct {
@@ -18,11 +21,26 @@ type ClassifiedError struct {
 const (
 	requestTimeoutHint = "Increase the request timeout (e.g. set `ASC_TIMEOUT=90s`)."
 	uploadTimeoutHint  = "Increase the upload timeout (e.g. set `ASC_UPLOAD_TIMEOUT=600s`)."
+	systemStatusHint   = "Check Apple's service health with `asc system-status --service \"App Store Connect\"`."
 )
 
 func Classify(err error) ClassifiedError {
 	if err == nil {
 		return ClassifiedError{}
+	}
+
+	// A read-only refusal is a policy decision, not a command failure: render
+	// the refusal itself so the line stays stable regardless of which command
+	// wrapped it, and add no hint because the message already names the cause.
+	if refused, ok := errors.AsType[*readonly.RefusedError](err); ok {
+		return ClassifiedError{Message: refused.Error()}
+	}
+
+	// A missing Apple web session carries its own next step; the App Store
+	// Connect API credential hint below would send the caller to the wrong
+	// sign-in.
+	if missing, ok := errors.AsType[*shared.MissingWebSessionError](err); ok {
+		return ClassifiedError{Message: err.Error(), Hint: missing.Hint}
 	}
 
 	if errors.Is(err, shared.ErrMissingAuth) {
@@ -43,11 +61,34 @@ func Classify(err error) ClassifiedError {
 		}
 	}
 
+	var apiErr *asc.APIError
+	if errors.As(err, &apiErr) && apiErr.HTTPStatusCode() >= 500 {
+		return ClassifiedError{
+			Message: err.Error(),
+			Hint:    systemStatusHint,
+		}
+	}
+
+	if bundleID := appNotFoundBundleID(apiErr); bundleID != "" {
+		return ClassifiedError{
+			Message: err.Error(),
+			Hint:    fmt.Sprintf("App IDs are numeric. Find this app's ID with `asc apps list --bundle-id %q` and pass that instead.", bundleID),
+		}
+	}
+
 	if containsPrivacyError(err) {
 		return ClassifiedError{
 			Message: err.Error(),
 			Hint:    "App privacy declarations (data usages) are not available via the public API. Use `asc web privacy pull|plan|apply|publish` or complete App Privacy in the App Store Connect web UI: https://appstoreconnect.apple.com",
 		}
+	}
+
+	// API-level remediation is already part of the rendered error. Do not add
+	// the generic permission hint as well: agreement-blocked 403s are account
+	// state, not an API-key role problem, and the two messages conflict.
+	var remediationErr *asc.APIError
+	if errors.As(err, &remediationErr) && strings.TrimSpace(remediationErr.Remediation) != "" {
+		return ClassifiedError{Message: err.Error()}
 	}
 
 	if errors.Is(err, asc.ErrForbidden) {
@@ -68,6 +109,26 @@ func Classify(err error) ClassifiedError {
 		Message: err.Error(),
 		Hint:    "",
 	}
+}
+
+// appNotFoundIDPattern matches Apple's 404 detail for an unknown app, such as
+// "There is no resource of type 'apps' with id 'com.example.app'". Many
+// commands put --app straight into /v1/apps/{id}, so a bundle ID there ends
+// in this error instead of a lookup.
+var (
+	appNotFoundIDPattern = regexp.MustCompile(`no resource of type 'apps' with id '([^']*)'`)
+	bundleIDPattern      = regexp.MustCompile(`^[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+$`)
+)
+
+func appNotFoundBundleID(apiErr *asc.APIError) string {
+	if apiErr == nil || apiErr.HTTPStatusCode() != http.StatusNotFound {
+		return ""
+	}
+	match := appNotFoundIDPattern.FindStringSubmatch(apiErr.Detail)
+	if match == nil || !bundleIDPattern.MatchString(match[1]) {
+		return ""
+	}
+	return match[1]
 }
 
 func isUploadTimeoutError(err error) bool {

@@ -24,8 +24,8 @@ var betaTesterUsagePeriods = map[string]struct{}{
 func BetaTestersMetricsCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("metrics", flag.ExitOnError)
 
-	testerID := fs.String("tester-id", "", "Beta tester ID")
-	aliasID := fs.String("id", "", "Beta tester ID (alias of --tester-id)")
+	testerID := shared.BindResourceIDFlag(fs, "tester-id", "betaTesters", "Beta tester ID")
+	aliasID := shared.BindResourceIDFlag(fs, "id", "betaTesters", "Beta tester ID (alias of --tester-id)")
 	appID := fs.String("app", "", "App Store Connect app ID (or ASC_APP_ID env)")
 	period := fs.String("period", "", "Reporting period: "+strings.Join(betaTesterUsagePeriodList(), ", "))
 	limit := fs.Int("limit", 0, "Maximum results per page (1-200)")
@@ -46,10 +46,10 @@ Examples:
 		Exec: func(ctx context.Context, args []string) error {
 			if *limit != 0 && (*limit < 1 || *limit > 200) {
 				fmt.Fprintln(os.Stderr, "Error: --limit must be between 1 and 200")
-				return flag.ErrHelp
+				return shared.WithDiagnostic(flag.ErrHelp, shared.DiagnosticInvalidInput, "--limit")
 			}
 			if err := shared.ValidateNextURL(*next); err != nil {
-				return fmt.Errorf("testflight beta-testers metrics: %w", err)
+				return shared.UsageErrorfCtx(ctx, "testflight beta-testers metrics: %v", err)
 			}
 
 			testerValue := strings.TrimSpace(*testerID)
@@ -57,24 +57,27 @@ Examples:
 			if testerValue == "" {
 				testerValue = aliasValue
 			} else if aliasValue != "" && aliasValue != testerValue {
-				return fmt.Errorf("testflight beta-testers metrics: --tester-id and --id must match")
+				return shared.WithDiagnostic(
+					shared.NewValidationError(fmt.Errorf("testflight beta-testers metrics: --tester-id and --id must match")),
+					shared.DiagnosticConflictingInput,
+					"",
+				)
 			}
 
 			periodValue, err := normalizeBetaTesterUsagePeriod(*period)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %s\n", err.Error())
-				return flag.ErrHelp
+				return usageErrorFromValidation(ctx, "%v", err)
 			}
 
 			resolvedAppID := shared.ResolveAppID(*appID)
 			nextValue := strings.TrimSpace(*next)
 			if nextValue == "" && testerValue == "" {
 				fmt.Fprintln(os.Stderr, "Error: --tester-id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--tester-id")
 			}
 			if nextValue == "" && resolvedAppID == "" {
 				fmt.Fprintf(os.Stderr, "Error: --app is required (or set ASC_APP_ID)\n\n")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--app")
 			}
 
 			client, err := shared.GetASCClient()
@@ -108,7 +111,11 @@ func normalizeBetaTesterUsagePeriod(value string) (string, error) {
 		return "", nil
 	}
 	if _, ok := betaTesterUsagePeriods[value]; !ok {
-		return "", fmt.Errorf("--period must be one of: %s", strings.Join(betaTesterUsagePeriodList(), ", "))
+		return "", shared.WithDiagnostic(
+			shared.NewValidationError(fmt.Errorf("--period must be one of: %s", strings.Join(betaTesterUsagePeriodList(), ", "))),
+			shared.DiagnosticInvalidInput,
+			"--period",
+		)
 	}
 	return value, nil
 }

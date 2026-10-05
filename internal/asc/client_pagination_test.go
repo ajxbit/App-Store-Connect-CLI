@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -238,6 +239,78 @@ func TestPaginateAll_TypedNilFirstPage(t *testing.T) {
 	}
 }
 
+func TestPaginateAll_NonPointerResponseReturnsError(t *testing.T) {
+	firstPage := valuePaginatedResponse{data: []string{"first"}}
+
+	_, err := PaginateAll(context.Background(), firstPage, nil)
+	if err == nil {
+		t.Fatal("expected an unsupported response error, got nil")
+	}
+	if !strings.Contains(err.Error(), "expected pointer") {
+		t.Fatalf("expected pointer error, got %v", err)
+	}
+}
+
+func TestPaginateAll_NilFetcherWithNextLink(t *testing.T) {
+	firstPage := makeBetaGroupsPage(1, 1, 2)
+
+	_, err := PaginateAll(context.Background(), firstPage, nil)
+	if !errors.Is(err, ErrMissingPaginationFetcher) {
+		t.Fatalf("expected ErrMissingPaginationFetcher, got %v", err)
+	}
+}
+
+func TestPaginateAll_TypedNilNextPage(t *testing.T) {
+	firstPage := makeBetaGroupsPage(1, 1, 2)
+
+	_, err := PaginateAll(context.Background(), firstPage, func(context.Context, string) (PaginatedResponse, error) {
+		var nextPage *BetaGroupsResponse
+		return nextPage, nil
+	})
+	if !errors.Is(err, ErrNilPaginationPage) {
+		t.Fatalf("expected ErrNilPaginationPage, got %v", err)
+	}
+}
+
+func TestPaginateAll_PointerToNonStructResponseReturnsError(t *testing.T) {
+	page := pointerToNonStructPaginatedResponse{"first"}
+
+	_, err := PaginateAll(context.Background(), &page, nil)
+	if err == nil {
+		t.Fatal("expected an unsupported response error, got nil")
+	}
+	if !strings.Contains(err.Error(), "unsupported response type") {
+		t.Fatalf("expected unsupported response error, got %v", err)
+	}
+}
+
+func TestPaginateAll_TypedNilPointerToNonStructResponseReturnsError(t *testing.T) {
+	var page *pointerToNonStructPaginatedResponse
+
+	_, err := PaginateAll(context.Background(), page, nil)
+	if err == nil {
+		t.Fatal("expected an unsupported response error, got nil")
+	}
+	if !strings.Contains(err.Error(), "unsupported response type") {
+		t.Fatalf("expected unsupported response error, got %v", err)
+	}
+}
+
+// valuePaginatedResponse verifies that paginator input validation does not
+// call reflect.Value.IsNil on a non-nilable concrete implementation.
+type valuePaginatedResponse struct {
+	links Links
+	data  []string
+}
+
+func (r valuePaginatedResponse) GetLinks() *Links { return &r.links }
+func (r valuePaginatedResponse) GetData() any     { return r.data }
+
+type pointerToNonStructPaginatedResponse []string
+
+func (r *pointerToNonStructPaginatedResponse) GetLinks() *Links { return nil }
+func (r *pointerToNonStructPaginatedResponse) GetData() any     { return []string(*r) }
+
 func TestPaginateAll_EmptyData(t *testing.T) {
 	firstPage := &BetaTestersResponse{
 		Data:  []Resource[BetaTesterAttributes]{},
@@ -291,6 +364,83 @@ type unsupportedPaginatedResponse struct {
 
 func (r *unsupportedPaginatedResponse) GetLinks() *Links { return &r.links }
 func (r *unsupportedPaginatedResponse) GetData() any     { return r.data }
+
+// rawDataPaginatedResponse is a test-only type whose GetData returns raw JSON
+// bytes instead of an item slice.
+type rawDataPaginatedResponse struct {
+	links Links
+	data  json.RawMessage
+}
+
+func (r *rawDataPaginatedResponse) GetLinks() *Links { return &r.links }
+func (r *rawDataPaginatedResponse) GetData() any     { return r.data }
+
+// nonSliceDataPaginatedResponse is a test-only type whose GetData does not
+// return a slice at all.
+type nonSliceDataPaginatedResponse struct {
+	links Links
+}
+
+func (r *nonSliceDataPaginatedResponse) GetLinks() *Links { return &r.links }
+func (r *nonSliceDataPaginatedResponse) GetData() any     { return "not a slice" }
+
+func TestPageDataLen(t *testing.T) {
+	t.Run("counts resource slice", func(t *testing.T) {
+		page := makeBetaGroupsPage(1, 3, 2)
+		count, ok := PageDataLen(page)
+		if !ok || count != 3 {
+			t.Fatalf("PageDataLen() = (%d, %t), want (3, true)", count, ok)
+		}
+	})
+
+	t.Run("counts empty resource slice", func(t *testing.T) {
+		page := &BetaGroupsResponse{Data: []Resource[BetaGroupAttributes]{}}
+		count, ok := PageDataLen(page)
+		if !ok || count != 0 {
+			t.Fatalf("PageDataLen() = (%d, %t), want (0, true)", count, ok)
+		}
+	})
+
+	t.Run("counts non-resource item slice", func(t *testing.T) {
+		page := &unsupportedPaginatedResponse{data: []string{"a", "b"}}
+		count, ok := PageDataLen(page)
+		if !ok || count != 2 {
+			t.Fatalf("PageDataLen() = (%d, %t), want (2, true)", count, ok)
+		}
+	})
+
+	t.Run("nil interface not counted", func(t *testing.T) {
+		count, ok := PageDataLen(nil)
+		if ok || count != 0 {
+			t.Fatalf("PageDataLen(nil) = (%d, %t), want (0, false)", count, ok)
+		}
+	})
+
+	t.Run("typed nil not counted", func(t *testing.T) {
+		var typedNil *BetaGroupsResponse
+		var page PaginatedResponse = typedNil
+		count, ok := PageDataLen(page)
+		if ok || count != 0 {
+			t.Fatalf("PageDataLen(typed nil) = (%d, %t), want (0, false)", count, ok)
+		}
+	})
+
+	t.Run("raw JSON data not counted as bytes", func(t *testing.T) {
+		page := &rawDataPaginatedResponse{data: json.RawMessage(`[{"id":"a"},{"id":"b"}]`)}
+		count, ok := PageDataLen(page)
+		if ok || count != 0 {
+			t.Fatalf("PageDataLen(raw JSON data) = (%d, %t), want (0, false)", count, ok)
+		}
+	})
+
+	t.Run("non-slice data not counted", func(t *testing.T) {
+		page := &nonSliceDataPaginatedResponse{}
+		count, ok := PageDataLen(page)
+		if ok || count != 0 {
+			t.Fatalf("PageDataLen(non-slice data) = (%d, %t), want (0, false)", count, ok)
+		}
+	})
+}
 
 func TestPaginateAll_ContextCancelled(t *testing.T) {
 	firstPage := &AppsResponse{
@@ -361,7 +511,9 @@ func TestPaginateAll_PreReleaseVersionsResponse(t *testing.T) {
 			{Type: ResourceTypePreReleaseVersions, ID: "prv-1-0"},
 			{Type: ResourceTypePreReleaseVersions, ID: "prv-1-1"},
 		},
-		Links: Links{Next: "page=2"},
+		Links:    Links{Self: "page=1", First: "page=1", Next: "page=2"},
+		Included: json.RawMessage(`[{"type":"apps","id":"app-1"}]`),
+		Meta:     json.RawMessage(`{"paging":{"total":4,"limit":2}}`),
 	}
 
 	result, err := PaginateAll(context.Background(), firstPage, func(ctx context.Context, nextURL string) (PaginatedResponse, error) {
@@ -370,7 +522,8 @@ func TestPaginateAll_PreReleaseVersionsResponse(t *testing.T) {
 				{Type: ResourceTypePreReleaseVersions, ID: "prv-2-0"},
 				{Type: ResourceTypePreReleaseVersions, ID: "prv-2-1"},
 			},
-			Links: Links{},
+			Links:    Links{},
+			Included: json.RawMessage(`[{"type":"builds","id":"build-1"}]`),
 		}, nil
 	})
 	if err != nil {
@@ -384,6 +537,63 @@ func TestPaginateAll_PreReleaseVersionsResponse(t *testing.T) {
 	expected := totalPages * perPage
 	if len(versions.Data) != expected {
 		t.Fatalf("expected %d versions, got %d", expected, len(versions.Data))
+	}
+	if versions.Links != (Links{}) {
+		t.Fatalf("expected page-local links to be cleared, got %#v", versions.Links)
+	}
+	if len(versions.Meta) != 0 {
+		t.Fatalf("expected page-local meta to be cleared, got %s", versions.Meta)
+	}
+	var included []Resource[json.RawMessage]
+	if err := json.Unmarshal(versions.Included, &included); err != nil {
+		t.Fatalf("decode included resources: %v", err)
+	}
+	if len(included) != 2 {
+		t.Fatalf("expected 2 included resources, got %d", len(included))
+	}
+	gotIDs := make(map[string]bool, len(included))
+	for _, resource := range included {
+		gotIDs[resource.ID] = true
+	}
+	for _, id := range []string{"app-1", "build-1"} {
+		if !gotIDs[id] {
+			t.Fatalf("missing included resource %q: %#v", id, included)
+		}
+	}
+}
+
+func TestPaginateAll_PreReleaseVersionsEmptyDataIsArray(t *testing.T) {
+	result, err := PaginateAll(context.Background(), &PreReleaseVersionsResponse{
+		Data:  []PreReleaseVersion{},
+		Links: Links{Self: "page=1"},
+		Meta:  json.RawMessage(`{"paging":{"total":0,"limit":50}}`),
+	}, func(context.Context, string) (PaginatedResponse, error) {
+		t.Fatal("unexpected next-page fetch")
+		return nil, nil
+	})
+	if err != nil {
+		t.Fatalf("PaginateAll() error: %v", err)
+	}
+	encoded, err := json.Marshal(result)
+	if err != nil {
+		t.Fatalf("marshal paginated response: %v", err)
+	}
+	var envelope map[string]json.RawMessage
+	if err := json.Unmarshal(encoded, &envelope); err != nil {
+		t.Fatalf("unmarshal paginated response: %v", err)
+	}
+	if string(envelope["data"]) != "[]" {
+		t.Fatalf("expected empty data array, got %s", envelope["data"])
+	}
+	if result.GetLinks().Self != "page=1" {
+		t.Fatalf("expected document links to be preserved, got %#v", result.GetLinks())
+	}
+	versions, ok := result.(*PreReleaseVersionsResponse)
+	if !ok {
+		t.Fatalf("expected *PreReleaseVersionsResponse, got %T", result)
+	}
+	if string(versions.Meta) != `{"paging":{"total":0,"limit":50}}` {
+		t.Fatalf("expected document meta to be preserved, got %s", versions.Meta)
 	}
 }
 
@@ -534,6 +744,348 @@ func TestPaginateAll_BuildsPreservesIncluded(t *testing.T) {
 	if included[0].ID != "prv-1" || included[1].ID != "prv-2" {
 		t.Fatalf("unexpected included IDs: %+v", included)
 	}
+}
+
+func TestRawJSONArrayAccumulatorDeduplicatesJSONAPIResourcesByIdentity(t *testing.T) {
+	acc := &rawJSONArrayAccumulator{}
+	for i, payload := range []json.RawMessage{
+		json.RawMessage(`[
+			{"type":"betaGroups","id":"group-a","attributes":{"name":"Alpha"}},
+			{"type":"apps","id":"shared-id"}
+		]`),
+		json.RawMessage(`[
+			{"id":"group-a","type":"betaGroups","attributes":{"name":"Alpha updated"}},
+			{"type":"betaGroups","id":"group-b","attributes":{"name":"Bravo"}},
+			{"type":"builds","id":"shared-id"}
+		]`),
+	} {
+		if err := acc.add(payload); err != nil {
+			t.Fatalf("add payload %d: %v", i+1, err)
+		}
+	}
+	merged, err := acc.merged()
+	if err != nil {
+		t.Fatalf("acc.merged() error: %v", err)
+	}
+
+	var included []struct {
+		Type       string `json:"type"`
+		ID         string `json:"id"`
+		Attributes struct {
+			Name string `json:"name"`
+		} `json:"attributes"`
+	}
+	if err := json.Unmarshal(merged, &included); err != nil {
+		t.Fatalf("decode merged resources: %v", err)
+	}
+	if len(included) != 4 {
+		t.Fatalf("expected four distinct type-and-ID resources, got %+v", included)
+	}
+	if included[0].Type != "betaGroups" || included[0].ID != "group-a" || included[0].Attributes.Name != "Alpha" {
+		t.Fatalf("expected the first group-a representation to win, got %+v", included[0])
+	}
+	if included[1].Type != "apps" || included[1].ID != "shared-id" ||
+		included[2].Type != "betaGroups" || included[2].ID != "group-b" ||
+		included[3].Type != "builds" || included[3].ID != "shared-id" {
+		t.Fatalf("expected stable order with type-scoped identities, got %+v", included)
+	}
+}
+
+func TestPaginateAll_MergesOverlappingIncludedAcrossPages(t *testing.T) {
+	const totalPages = 3
+
+	makePage := func(page int) *BuildsResponse {
+		links := Links{}
+		if page < totalPages {
+			links.Next = fmt.Sprintf("page=%d", page+1)
+		}
+		return &BuildsResponse{
+			Data: []Resource[BuildAttributes]{
+				{Type: ResourceTypeBuilds, ID: fmt.Sprintf("build-%d", page)},
+			},
+			Included: json.RawMessage(fmt.Sprintf(`[
+				{"type":"apps","id":"app-1","attributes":{"name":"App from page %d"}},
+				{"type":"preReleaseVersions","id":"prv-%d","attributes":{"version":"1.0.%d"}}
+			]`, page, page, page)),
+			Links: links,
+		}
+	}
+
+	result, err := PaginateAll(context.Background(), makePage(1), func(ctx context.Context, nextURL string) (PaginatedResponse, error) {
+		page, err := parseMockPageNum(nextURL)
+		if err != nil {
+			return nil, err
+		}
+		return makePage(page), nil
+	})
+	if err != nil {
+		t.Fatalf("PaginateAll() error: %v", err)
+	}
+
+	builds, ok := result.(*BuildsResponse)
+	if !ok {
+		t.Fatalf("expected *BuildsResponse, got %T", result)
+	}
+	if len(builds.Data) != totalPages {
+		t.Fatalf("data length = %d, want %d", len(builds.Data), totalPages)
+	}
+	var included []struct {
+		Type       string `json:"type"`
+		ID         string `json:"id"`
+		Attributes struct {
+			Name string `json:"name"`
+		} `json:"attributes"`
+	}
+	if err := json.Unmarshal(builds.Included, &included); err != nil {
+		t.Fatalf("decode merged included payload: %v", err)
+	}
+
+	wantIdentities := []string{"apps/app-1", "preReleaseVersions/prv-1", "preReleaseVersions/prv-2", "preReleaseVersions/prv-3"}
+	gotIdentities := make([]string, 0, len(included))
+	for _, resource := range included {
+		gotIdentities = append(gotIdentities, resource.Type+"/"+resource.ID)
+	}
+	if !slices.Equal(gotIdentities, wantIdentities) {
+		t.Fatalf("included identities = %v, want %v", gotIdentities, wantIdentities)
+	}
+	if included[0].Attributes.Name != "App from page 1" {
+		t.Fatalf("expected first page's app representation to win, got %q", included[0].Attributes.Name)
+	}
+}
+
+func TestPaginateAll_SinglePageIncludedRetainedVerbatim(t *testing.T) {
+	payload := json.RawMessage("[ { \"type\": \"apps\", \"id\": \"app-1\" } ]")
+	firstPage := &BuildsResponse{
+		Data:     []Resource[BuildAttributes]{{Type: ResourceTypeBuilds, ID: "build-1"}},
+		Included: payload,
+	}
+
+	result, err := PaginateAll(context.Background(), firstPage, func(ctx context.Context, nextURL string) (PaginatedResponse, error) {
+		t.Fatalf("unexpected fetch of %q for a single page", nextURL)
+		return nil, nil
+	})
+	if err != nil {
+		t.Fatalf("PaginateAll() error: %v", err)
+	}
+	builds, ok := result.(*BuildsResponse)
+	if !ok {
+		t.Fatalf("expected *BuildsResponse, got %T", result)
+	}
+	if string(builds.Included) != string(payload) {
+		t.Fatalf("included = %q, want byte-preserved %q", builds.Included, payload)
+	}
+}
+
+func TestPaginateAll_PaginationErrorPreservesPartialIncluded(t *testing.T) {
+	firstPage := &BuildsResponse{
+		Data:     []Resource[BuildAttributes]{{Type: ResourceTypeBuilds, ID: "build-1"}},
+		Included: json.RawMessage(`[{"type":"apps","id":"app-1"}]`),
+		Links:    Links{Next: "page=2"},
+	}
+
+	result, err := PaginateAll(context.Background(), firstPage, func(ctx context.Context, nextURL string) (PaginatedResponse, error) {
+		return nil, errors.New("page unavailable")
+	})
+	if err == nil || !strings.Contains(err.Error(), "page 2") {
+		t.Fatalf("expected page 2 error, got %v", err)
+	}
+	builds, ok := result.(*BuildsResponse)
+	if !ok {
+		t.Fatalf("expected partial *BuildsResponse, got %T", result)
+	}
+	if len(builds.Data) != 1 {
+		t.Fatalf("partial data length = %d, want 1", len(builds.Data))
+	}
+	if got := string(builds.Included); got != string(firstPage.Included) {
+		t.Fatalf("partial included = %q, want %q", got, firstPage.Included)
+	}
+}
+
+func TestPaginateAll_PaginationErrorMergesPartialIncluded(t *testing.T) {
+	firstPage := &BuildsResponse{
+		Data:     []Resource[BuildAttributes]{{Type: ResourceTypeBuilds, ID: "build-1"}},
+		Included: json.RawMessage(`[{"type":"apps","id":"app-1","attributes":{"name":"first"}}]`),
+		Links:    Links{Next: "page=2"},
+	}
+
+	result, err := PaginateAll(context.Background(), firstPage, func(ctx context.Context, nextURL string) (PaginatedResponse, error) {
+		switch nextURL {
+		case "page=2":
+			return &BuildsResponse{
+				Data: []Resource[BuildAttributes]{{Type: ResourceTypeBuilds, ID: "build-2"}},
+				Included: json.RawMessage(`[
+					{"type":"apps","id":"app-1","attributes":{"name":"later"}},
+					{"type":"apps","id":"app-2"}
+				]`),
+				Links: Links{Next: "page=3"},
+			}, nil
+		case "page=3":
+			return nil, errors.New("page unavailable")
+		default:
+			t.Fatalf("unexpected next URL %q", nextURL)
+			return nil, nil
+		}
+	})
+	if err == nil || !strings.Contains(err.Error(), "page 3") {
+		t.Fatalf("expected page 3 error, got %v", err)
+	}
+
+	builds, ok := result.(*BuildsResponse)
+	if !ok {
+		t.Fatalf("expected partial *BuildsResponse, got %T", result)
+	}
+	if len(builds.Data) != 2 {
+		t.Fatalf("partial data length = %d, want 2", len(builds.Data))
+	}
+	var included []struct {
+		Type       string `json:"type"`
+		ID         string `json:"id"`
+		Attributes struct {
+			Name string `json:"name"`
+		} `json:"attributes"`
+	}
+	if err := json.Unmarshal(builds.Included, &included); err != nil {
+		t.Fatalf("decode partial included: %v", err)
+	}
+	if len(included) != 2 || included[0].ID != "app-1" || included[0].Attributes.Name != "first" || included[1].ID != "app-2" {
+		t.Fatalf("partial included = %+v, want first app-1 representation and app-2", included)
+	}
+}
+
+func TestPaginateAll_RepeatedURLPreservesPartialIncluded(t *testing.T) {
+	firstPage := &BuildsResponse{
+		Data:     []Resource[BuildAttributes]{{Type: ResourceTypeBuilds, ID: "build-1"}},
+		Included: json.RawMessage(`[{"type":"apps","id":"app-1"}]`),
+		Links:    Links{Next: "page=2"},
+	}
+
+	result, err := PaginateAll(context.Background(), firstPage, func(ctx context.Context, nextURL string) (PaginatedResponse, error) {
+		return &BuildsResponse{
+			Data:     []Resource[BuildAttributes]{{Type: ResourceTypeBuilds, ID: "build-2"}},
+			Included: json.RawMessage(`[{"type":"apps","id":"app-2"}]`),
+			Links:    Links{Next: "page=2"},
+		}, nil
+	})
+	if err == nil || !errors.Is(err, ErrRepeatedPaginationURL) {
+		t.Fatalf("expected repeated URL error, got %v", err)
+	}
+	builds, ok := result.(*BuildsResponse)
+	if !ok {
+		t.Fatalf("expected partial *BuildsResponse, got %T", result)
+	}
+	if len(builds.Data) != 2 {
+		t.Fatalf("partial data length = %d, want 2", len(builds.Data))
+	}
+	var included []struct {
+		Type string `json:"type"`
+		ID   string `json:"id"`
+	}
+	if err := json.Unmarshal(builds.Included, &included); err != nil {
+		t.Fatalf("decode partial included: %v", err)
+	}
+	if len(included) != 2 || included[0].ID != "app-1" || included[1].ID != "app-2" {
+		t.Fatalf("partial included = %+v, want app-1 and app-2", included)
+	}
+}
+
+var benchmarkIncludedSink int
+
+func BenchmarkPaginateAllIncludedAggregation(b *testing.B) {
+	const (
+		pageCount        = 96
+		resourcesPerPage = 24
+	)
+	payloads := make([]json.RawMessage, pageCount)
+	for page := range pageCount {
+		resources := make([]map[string]any, 0, resourcesPerPage+1)
+		resources = append(resources, map[string]any{
+			"type": "apps",
+			"id":   "shared-app",
+		})
+		for resource := range resourcesPerPage {
+			resources = append(resources, map[string]any{
+				"type": "preReleaseVersions",
+				"id":   fmt.Sprintf("page-%d-resource-%d", page, resource),
+			})
+		}
+		encoded, err := json.Marshal(resources)
+		if err != nil {
+			b.Fatalf("marshal benchmark payload: %v", err)
+		}
+		payloads[page] = encoded
+	}
+
+	b.Run("legacy-remerge", func(b *testing.B) {
+		for range b.N {
+			var merged json.RawMessage
+			for _, payload := range payloads {
+				var err error
+				merged, err = mergeRawJSONArrayBaseline(merged, payload)
+				if err != nil {
+					b.Fatal(err)
+				}
+			}
+			benchmarkIncludedSink = len(merged)
+		}
+	})
+
+	b.Run("accumulator", func(b *testing.B) {
+		for range b.N {
+			acc := &rawJSONArrayAccumulator{}
+			for _, payload := range payloads {
+				if err := acc.add(payload); err != nil {
+					b.Fatal(err)
+				}
+			}
+			merged, err := acc.merged()
+			if err != nil {
+				b.Fatal(err)
+			}
+			benchmarkIncludedSink = len(merged)
+		}
+	})
+}
+
+// mergeRawJSONArrayBaseline mirrors the pre-accumulator implementation for
+// the benchmark comparison. It intentionally reparses and remarshals the
+// growing aggregate on every page.
+func mergeRawJSONArrayBaseline(dst, src json.RawMessage) (json.RawMessage, error) {
+	switch {
+	case len(src) == 0:
+		return dst, nil
+	case len(dst) == 0:
+		return append(json.RawMessage(nil), src...), nil
+	}
+
+	var dstItems []json.RawMessage
+	if err := json.Unmarshal(dst, &dstItems); err != nil {
+		return nil, fmt.Errorf("parse existing array: %w", err)
+	}
+	var srcItems []json.RawMessage
+	if err := json.Unmarshal(src, &srcItems); err != nil {
+		return nil, fmt.Errorf("parse incoming array: %w", err)
+	}
+
+	merged := make([]json.RawMessage, 0, len(dstItems)+len(srcItems))
+	seen := make(map[string]struct{}, len(dstItems)+len(srcItems))
+	appendUnique := func(items []json.RawMessage) {
+		for _, item := range items {
+			key := rawJSONArrayItemKey(item)
+			if _, ok := seen[key]; ok {
+				continue
+			}
+			seen[key] = struct{}{}
+			merged = append(merged, item)
+		}
+	}
+	appendUnique(dstItems)
+	appendUnique(srcItems)
+
+	result, err := json.Marshal(merged)
+	if err != nil {
+		return nil, fmt.Errorf("marshal merged array: %w", err)
+	}
+	return result, nil
 }
 
 func TestPaginateAll_GameCenterEnabledVersions(t *testing.T) {

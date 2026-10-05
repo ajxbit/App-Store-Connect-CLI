@@ -25,7 +25,7 @@ func MarketplaceWebhooksCommand() *ffcli.Command {
 
 Examples:
   asc marketplace webhooks list
-  asc marketplace webhooks get --webhook-id "WEBHOOK_ID"`,
+  asc marketplace webhooks view --webhook-id "WEBHOOK_ID"`,
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
 		Subcommands: []*ffcli.Command{
@@ -67,10 +67,10 @@ Examples:
 			warnMarketplaceWebhooksDeprecated()
 
 			if *limit != 0 && (*limit < 1 || *limit > 200) {
-				return fmt.Errorf("marketplace webhooks list: --limit must be between 1 and 200")
+				return shared.UsageError("marketplace webhooks list: --limit must be between 1 and 200")
 			}
 			if err := shared.ValidateNextURL(*next); err != nil {
-				return fmt.Errorf("marketplace webhooks list: %w", err)
+				return shared.UsageErrorf("marketplace webhooks list: %v", err)
 			}
 
 			fieldsValue, err := normalizeMarketplaceWebhookFields(*fields)
@@ -121,21 +121,21 @@ Examples:
 	}
 }
 
-// MarketplaceWebhooksGetCommand returns the webhooks get subcommand.
+// MarketplaceWebhooksGetCommand returns the webhooks view subcommand.
 func MarketplaceWebhooksGetCommand() *ffcli.Command {
-	fs := flag.NewFlagSet("get", flag.ExitOnError)
+	fs := flag.NewFlagSet("view", flag.ExitOnError)
 
-	webhookID := fs.String("webhook-id", "", "Marketplace webhook ID")
+	webhookID := shared.BindResourceIDFlag(fs, "webhook-id", "marketplaceWebhooks", "Marketplace webhook ID")
 	output := shared.BindOutputFlags(fs)
 
 	return &ffcli.Command{
-		Name:       "get",
-		ShortUsage: "asc marketplace webhooks get --webhook-id \"WEBHOOK_ID\" [flags]",
-		ShortHelp:  "Get a marketplace webhook by ID.",
-		LongHelp: `Get a marketplace webhook by ID.
+		Name:       "view",
+		ShortUsage: "asc marketplace webhooks view --webhook-id \"WEBHOOK_ID\" [flags]",
+		ShortHelp:  "View a marketplace webhook by ID.",
+		LongHelp: `View a marketplace webhook by ID.
 
 Examples:
-  asc marketplace webhooks get --webhook-id "WEBHOOK_ID"`,
+  asc marketplace webhooks view --webhook-id "WEBHOOK_ID"`,
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
@@ -144,12 +144,12 @@ Examples:
 			trimmedID := strings.TrimSpace(*webhookID)
 			if trimmedID == "" {
 				fmt.Fprintln(os.Stderr, "Error: --webhook-id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--webhook-id")
 			}
 
 			client, err := shared.GetASCClient()
 			if err != nil {
-				return fmt.Errorf("marketplace webhooks get: %w", err)
+				return fmt.Errorf("marketplace webhooks view: %w", err)
 			}
 
 			requestCtx, cancel := shared.ContextWithTimeout(ctx)
@@ -157,7 +157,7 @@ Examples:
 
 			webhook, err := client.GetMarketplaceWebhook(requestCtx, trimmedID)
 			if err != nil {
-				return fmt.Errorf("marketplace webhooks get: failed to fetch: %w", err)
+				return fmt.Errorf("marketplace webhooks view: failed to fetch: %w", err)
 			}
 
 			return shared.PrintOutput(webhook, *output.Output, *output.Pretty)
@@ -189,12 +189,12 @@ Examples:
 			endpointURL := strings.TrimSpace(*url)
 			if endpointURL == "" {
 				fmt.Fprintln(os.Stderr, "Error: --url is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--url")
 			}
 			secretValue := strings.TrimSpace(*secret)
 			if secretValue == "" {
 				fmt.Fprintln(os.Stderr, "Error: --secret is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--secret")
 			}
 
 			client, err := shared.GetASCClient()
@@ -219,7 +219,7 @@ Examples:
 func MarketplaceWebhooksUpdateCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("update", flag.ExitOnError)
 
-	webhookID := fs.String("webhook-id", "", "Marketplace webhook ID")
+	webhookID := shared.BindResourceIDFlag(fs, "webhook-id", "marketplaceWebhooks", "Marketplace webhook ID")
 	url := fs.String("url", "", "Webhook endpoint URL")
 	secret := fs.String("secret", "", "Webhook secret")
 	output := shared.BindOutputFlags(fs)
@@ -241,7 +241,7 @@ Examples:
 			trimmedID := strings.TrimSpace(*webhookID)
 			if trimmedID == "" {
 				fmt.Fprintln(os.Stderr, "Error: --webhook-id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--webhook-id")
 			}
 
 			visited := map[string]bool{}
@@ -251,7 +251,7 @@ Examples:
 
 			if !visited["url"] && !visited["secret"] {
 				fmt.Fprintln(os.Stderr, "Error: at least one update flag is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("")
 			}
 
 			attrs := asc.MarketplaceWebhookUpdateAttributes{}
@@ -286,7 +286,7 @@ Examples:
 func MarketplaceWebhooksDeleteCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("delete", flag.ExitOnError)
 
-	webhookID := fs.String("webhook-id", "", "Marketplace webhook ID")
+	webhookID := shared.BindResourceIDFlag(fs, "webhook-id", "marketplaceWebhooks", "Marketplace webhook ID")
 	confirm := fs.Bool("confirm", false, "Confirm deletion")
 	output := shared.BindOutputFlags(fs)
 
@@ -306,11 +306,11 @@ Examples:
 			trimmedID := strings.TrimSpace(*webhookID)
 			if trimmedID == "" {
 				fmt.Fprintln(os.Stderr, "Error: --webhook-id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--webhook-id")
 			}
 			if !*confirm {
 				fmt.Fprintln(os.Stderr, "Error: --confirm is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--confirm")
 			}
 
 			client, err := shared.GetASCClient()

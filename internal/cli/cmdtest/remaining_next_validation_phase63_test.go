@@ -185,6 +185,7 @@ func TestBuildsListRejectsInvalidNextURLPhase63(t *testing.T) {
 		t,
 		[]string{"builds", "list"},
 		"builds: --next",
+		true,
 	)
 }
 
@@ -448,7 +449,7 @@ func TestReviewAttachmentsListPaginateFromNextWithoutReviewDetailPhase63(t *test
 
 	runGameCenterAchievementsPaginateFromNext(
 		t,
-		[]string{"review", "attachments-list", "--review-detail", "review-detail-1"},
+		[]string{"review", "attachments-list"},
 		firstURL,
 		secondURL,
 		firstBody,
@@ -470,8 +471,8 @@ func TestReviewItemsListPaginateFromNextWithoutSubmissionPhase63(t *testing.T) {
 	const firstURL = "https://api.appstoreconnect.apple.com/v1/reviewSubmissions/submission-1/items?cursor=AQ&limit=200"
 	const secondURL = "https://api.appstoreconnect.apple.com/v1/reviewSubmissions/submission-1/items?cursor=BQ&limit=200"
 
-	firstBody := `{"data":[{"type":"reviewSubmissionItems","id":"review-item-next-1"}],"links":{"next":"` + secondURL + `"}}`
-	secondBody := `{"data":[{"type":"reviewSubmissionItems","id":"review-item-next-2"}],"links":{"next":""}}`
+	firstBody := `{"data":[{"type":"reviewSubmissionItems","id":"review-item-next-1"}],"links":{"self":"/v1/reviewSubmissions/submission-1/items","next":"` + secondURL + `"}}`
+	secondBody := `{"data":[{"type":"reviewSubmissionItems","id":"review-item-next-2"}],"links":{"self":"/v1/reviewSubmissions/submission-1/items","next":""}}`
 
 	runGameCenterAchievementsPaginateFromNext(
 		t,
@@ -524,8 +525,8 @@ func TestReviewSubmissionsListPaginateFromNextWithoutAppPhase63(t *testing.T) {
 	const firstURL = "https://api.appstoreconnect.apple.com/v1/apps/app-1/reviewSubmissions?cursor=AQ&limit=200"
 	const secondURL = "https://api.appstoreconnect.apple.com/v1/apps/app-1/reviewSubmissions?cursor=BQ&limit=200"
 
-	firstBody := `{"data":[{"type":"reviewSubmissions","id":"review-submission-next-1"}],"links":{"next":"` + secondURL + `"}}`
-	secondBody := `{"data":[{"type":"reviewSubmissions","id":"review-submission-next-2"}],"links":{"next":""}}`
+	firstBody := `{"data":[{"type":"reviewSubmissions","id":"review-submission-next-1"}],"links":{"self":"/v1/apps/app-1/reviewSubmissions","next":"` + secondURL + `"}}`
+	secondBody := `{"data":[{"type":"reviewSubmissions","id":"review-submission-next-2"}],"links":{"self":"/v1/apps/app-1/reviewSubmissions","next":""}}`
 
 	runGameCenterAchievementsPaginateFromNext(
 		t,

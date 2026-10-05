@@ -77,7 +77,7 @@ Examples:
 				return flag.ErrHelp
 			}
 			if err := shared.ValidateNextURL(*next); err != nil {
-				return fmt.Errorf("builds uploads list: %w", err)
+				return shared.UsageErrorf("builds uploads list: %v", err)
 			}
 			if err := shared.ValidateSort(*sort, "cfBundleVersion", "-cfBundleVersion", "uploadedDate", "-uploadedDate"); err != nil {
 				fmt.Fprintf(os.Stderr, "Error: %s\n", err.Error())
@@ -87,7 +87,7 @@ Examples:
 			resolvedAppID := shared.ResolveAppID(*appID)
 			if resolvedAppID == "" && strings.TrimSpace(*next) == "" {
 				fmt.Fprintf(os.Stderr, "Error: --app is required (or set ASC_APP_ID)\n\n")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--app")
 			}
 
 			platforms, err := shared.NormalizeAppStoreVersionPlatforms(shared.SplitCSVUpper(*platform))
@@ -117,7 +117,8 @@ Examples:
 
 			if *paginate {
 				paginateOpts := append(opts, asc.WithBuildUploadsLimit(200))
-				resp, err := shared.PaginateWithSpinner(requestCtx,
+				resp, err := shared.PaginateWithSpinner(
+					requestCtx,
 					func(ctx context.Context) (asc.PaginatedResponse, error) {
 						return client.GetBuildUploads(ctx, resolvedAppID, paginateOpts...)
 					},
@@ -145,7 +146,7 @@ Examples:
 func BuildsUploadsViewCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("uploads view", flag.ExitOnError)
 
-	id := fs.String("id", "", "Build upload ID")
+	id := shared.BindResourceIDFlag(fs, "id", "buildUploads", "Build upload ID")
 	output := shared.BindOutputFlags(fs)
 
 	return &ffcli.Command{
@@ -162,7 +163,7 @@ Examples:
 			uploadID := strings.TrimSpace(*id)
 			if uploadID == "" {
 				fmt.Fprintln(os.Stderr, "Error: --id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--id")
 			}
 
 			client, err := shared.GetASCClient()
@@ -187,7 +188,7 @@ Examples:
 func BuildsUploadsDeleteCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("uploads delete", flag.ExitOnError)
 
-	id := fs.String("id", "", "Build upload ID")
+	id := shared.BindResourceIDFlag(fs, "id", "buildUploads", "Build upload ID")
 	confirm := fs.Bool("confirm", false, "Confirm deletion")
 	output := shared.BindOutputFlags(fs)
 
@@ -205,11 +206,11 @@ Examples:
 			uploadID := strings.TrimSpace(*id)
 			if uploadID == "" {
 				fmt.Fprintln(os.Stderr, "Error: --id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--id")
 			}
 			if !*confirm {
 				fmt.Fprintln(os.Stderr, "Error: --confirm is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--confirm")
 			}
 
 			client, err := shared.GetASCClient()
@@ -264,7 +265,7 @@ Examples:
 func BuildsUploadFilesListCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("files list", flag.ExitOnError)
 
-	uploadID := fs.String("upload", "", "Build upload ID")
+	uploadID := shared.BindResourceIDFlag(fs, "upload", "buildUploads", "Build upload ID")
 	limit := fs.Int("limit", 0, "Maximum results per page (1-200)")
 	next := fs.String("next", "", "Fetch next page using a links.next URL")
 	paginate := fs.Bool("paginate", false, "Automatically fetch all pages (aggregate results)")
@@ -283,16 +284,16 @@ Examples:
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
 			if *limit != 0 && (*limit < 1 || *limit > 200) {
-				return fmt.Errorf("builds uploads files list: --limit must be between 1 and 200")
+				return shared.UsageError("builds uploads files list: --limit must be between 1 and 200")
 			}
 			if err := shared.ValidateNextURL(*next); err != nil {
-				return fmt.Errorf("builds uploads files list: %w", err)
+				return shared.UsageErrorf("builds uploads files list: %v", err)
 			}
 
 			uploadValue := strings.TrimSpace(*uploadID)
 			if uploadValue == "" && strings.TrimSpace(*next) == "" {
 				fmt.Fprintln(os.Stderr, "Error: --upload is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--upload")
 			}
 
 			client, err := shared.GetASCClient()
@@ -311,11 +312,12 @@ Examples:
 			if *paginate {
 				if uploadValue == "" {
 					fmt.Fprintln(os.Stderr, "Error: --upload is required")
-					return flag.ErrHelp
+					return shared.MissingRequiredUsageError("--upload")
 				}
 
 				paginateOpts := append(opts, asc.WithBuildUploadFilesLimit(200))
-				resp, err := shared.PaginateWithSpinner(requestCtx,
+				resp, err := shared.PaginateWithSpinner(
+					requestCtx,
 					func(ctx context.Context) (asc.PaginatedResponse, error) {
 						return client.GetBuildUploadFiles(ctx, uploadValue, paginateOpts...)
 					},
@@ -344,7 +346,7 @@ Examples:
 func BuildsUploadFilesViewCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("files view", flag.ExitOnError)
 
-	id := fs.String("id", "", "Build upload file ID")
+	id := shared.BindResourceIDFlag(fs, "id", "buildUploadFiles", "Build upload file ID")
 	output := shared.BindOutputFlags(fs)
 
 	return &ffcli.Command{
@@ -361,7 +363,7 @@ Examples:
 			fileID := strings.TrimSpace(*id)
 			if fileID == "" {
 				fmt.Fprintln(os.Stderr, "Error: --id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--id")
 			}
 
 			client, err := shared.GetASCClient()

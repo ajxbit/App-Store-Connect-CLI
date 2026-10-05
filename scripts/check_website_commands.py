@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import functools
+import os
 import re
 import shlex
 import subprocess
@@ -26,14 +27,47 @@ META_TOKEN_RE = re.compile(r"^<[^>]+>$|^\[[^\]]+\]$")
 GENERIC_TOKENS = {"command", "subcommand", "subcmd"}
 SHELL_OPERATORS = {"|", ";", ">", "<"}
 ELLIPSIS_TOKENS = {"...", "…"}
+COMMAND_PASSTHROUGH_RE = re.compile(r"(?:^|\s)--\s+<[^>]+>")
 REQUIRED_FLAGS_BY_COMMAND: dict[tuple[str, ...], set[str]] = {
     ("submit", "create"): {"--build", "--confirm"},
 }
-BOOLEAN_FLAG_OVERRIDES = {"--api-debug", "--debug", "--retry-log"}
+# `--profile` is the one root-owned selector the CLI relocates when it is
+# written after the command name (cmd/profile_flag_hoist.go), so documented
+# examples may place it among a command's own flags. Every other global flag
+# must still precede the top-level command.
+GLOBAL_FLAGS_ACCEPTED_AFTER_COMMAND = {"--profile"}
+REQUIRED_FLAGS_BEFORE_PASSTHROUGH_BY_COMMAND: dict[tuple[str, ...], set[str]] = {
+    ("signing", "run"): {"--identity", "--profile"},
+}
+# Presence-aware booleans intentionally omit a displayed default because unset
+# and explicit false have different behavior. Scope these overrides by command
+# so same-named value flags remain value flags elsewhere in the CLI.
+BOOLEAN_FLAG_OVERRIDES: dict[tuple[str, ...], set[str]] = {
+    (): {"--api-debug", "--debug", "--retry-log"},
+    ("testflight", "groups", "create"): {
+        "--access-all-builds",
+        "--feedback-enabled",
+        "--internal",
+        "--public-link-enabled",
+        "--public-link-limit-enabled",
+    },
+    ("testflight", "beta-groups", "create"): {
+        "--access-all-builds",
+        "--feedback-enabled",
+        "--internal",
+        "--public-link-enabled",
+        "--public-link-limit-enabled",
+    },
+    # `versions update --confirm` tracks presence so an explicit
+    # `--confirm=false` is rejected instead of silently ignored.
+    ("versions", "update"): {"--confirm"},
+}
 HIDDEN_DEPRECATED_ALIAS_FLAGS: dict[tuple[str, ...], dict[str, bool]] = {
-    # DeprecatedUsageFunc intentionally hides FLAGS in help output for
-    # compatibility aliases, but we still need accurate flag validation so docs
-    # examples fail on deprecations instead of bogus unknown-flag errors.
+    # `asc submit create` and `asc submit preflight` are removed-command
+    # stubs handled by the parent's Exec, so they have no FLAGS in help output.
+    # Keep the historical flag shape here so migration docs that quote the old
+    # invocations fail on the removal itself instead of a bogus unknown-flag
+    # error.
     ("submit", "create"): {
         "--app": False,
         "--build": False,
@@ -71,7 +105,9 @@ class Example:
     source: str = "fenced"
 
 
-def parse_help_text(help_text: str, *, is_root: bool) -> CommandSpec:
+def parse_help_text(
+    help_text: str, *, is_root: bool, path: tuple[str, ...] = ()
+) -> CommandSpec:
     usage = ""
     flags: dict[str, bool] = {}
     subcommands: set[str] = set()
@@ -107,7 +143,7 @@ def parse_help_text(help_text: str, *, is_root: bool) -> CommandSpec:
             if match:
                 flag, description = match.group(1), match.group(2)
                 flags[flag] = (
-                    flag in BOOLEAN_FLAG_OVERRIDES
+                    flag in BOOLEAN_FLAG_OVERRIDES.get(path, set())
                     or description.rstrip().endswith("(default: false)")
                     or description.rstrip().endswith("(default: true)")
                 )
@@ -124,7 +160,7 @@ def parse_help_text(help_text: str, *, is_root: bool) -> CommandSpec:
             if match:
                 subcommands.add(match.group(1))
 
-    return CommandSpec(path=(), usage=usage, flags=flags, subcommands=subcommands)
+    return CommandSpec(path=path, usage=usage, flags=flags, subcommands=subcommands)
 
 
 def command_help(binary_path: Path, path: tuple[str, ...]) -> str:
@@ -133,6 +169,7 @@ def command_help(binary_path: Path, path: tuple[str, ...]) -> str:
         check=True,
         capture_output=True,
         text=True,
+        env=telemetry_disabled_environment(),
     )
     return proc.stderr or proc.stdout
 
@@ -144,13 +181,20 @@ def path_help(binary_path: Path, path: tuple[str, ...]) -> str:
         check=False,
         capture_output=True,
         text=True,
+        env=telemetry_disabled_environment(),
     )
     return proc.stderr or proc.stdout
 
 
+def telemetry_disabled_environment() -> dict[str, str]:
+    environment = os.environ.copy()
+    environment["ASC_TELEMETRY_DISABLED"] = "1"
+    return environment
+
+
 def build_command_index(binary_path: Path) -> dict[tuple[str, ...], CommandSpec]:
     root_help = command_help(binary_path, ())
-    root_spec = parse_help_text(root_help, is_root=True)
+    root_spec = parse_help_text(root_help, is_root=True, path=())
     index: dict[tuple[str, ...], CommandSpec] = {
         (): CommandSpec(
             path=(),
@@ -166,7 +210,7 @@ def build_command_index(binary_path: Path) -> dict[tuple[str, ...], CommandSpec]
         for subcommand in sorted(index[path].subcommands):
             child_path = (*path, subcommand)
             child_help = command_help(binary_path, child_path)
-            child_spec = parse_help_text(child_help, is_root=False)
+            child_spec = parse_help_text(child_help, is_root=False, path=child_path)
             index[child_path] = CommandSpec(
                 path=child_path,
                 usage=child_spec.usage,
@@ -479,7 +523,9 @@ def hidden_deprecated_alias_spec(
         return None
 
     deprecated_help = path_help(binary_path, deprecated_path)
-    deprecated_spec = parse_help_text(deprecated_help, is_root=False)
+    deprecated_spec = parse_help_text(
+        deprecated_help, is_root=False, path=deprecated_path
+    )
     canonical_path = usage_command_path(deprecated_spec.usage) or deprecated_path
     flags = dict(deprecated_spec.flags)
     if not flags:
@@ -594,6 +640,7 @@ def validate_example(
     pending_flag: str | None = None
     saw_positional = False
     seen_flags: set[str] = set()
+    satisfied_flags: set[str] = set()
 
     while i < len(tokens):
         token = tokens[i]
@@ -604,14 +651,44 @@ def validate_example(
                     f"missing value for flag {pending_flag!r} in {example.raw!r}"
                 )
                 return errors
+            if token.strip():
+                satisfied_flags.add(pending_flag)
+            else:
+                satisfied_flags.discard(pending_flag)
             pending_flag = None
             i += 1
             continue
         if token == "--help":
             i += 1
             continue
+        if token == "--":
+            if not COMMAND_PASSTHROUGH_RE.search(current.usage):
+                errors.append(
+                    f"{example.path.relative_to(example.path.parents[1])}:{example.line_number}: "
+                    f"{' '.join(current.path)!r} does not accept command passthrough in {example.raw!r}"
+                )
+                return errors
+            if i + 1 >= len(tokens) or not tokens[i + 1].strip():
+                errors.append(
+                    f"{example.path.relative_to(example.path.parents[1])}:{example.line_number}: "
+                    f"command passthrough separator must be followed by a non-empty command "
+                    f"in {example.raw!r}"
+                )
+                return errors
+            missing_flags = sorted(
+                REQUIRED_FLAGS_BEFORE_PASSTHROUGH_BY_COMMAND.get(current.path, set())
+                - satisfied_flags
+            )
+            if missing_flags:
+                errors.append(
+                    f"{example.path.relative_to(example.path.parents[1])}:{example.line_number}: "
+                    f"missing required flag(s) {', '.join(missing_flags)!r} before command passthrough "
+                    f"for {' '.join(current.path)!r} in {example.raw!r}"
+                )
+                return errors
+            break
         if token.startswith("--"):
-            flag = token.split("=", 1)[0]
+            flag, separator, inline_value = token.partition("=")
             if flag in current.flags:
                 if saw_positional and style == "flags_before_positionals":
                     errors.append(
@@ -619,10 +696,55 @@ def validate_example(
                         f"flag {flag!r} appears after positional arguments in {example.raw!r}"
                     )
                 seen_flags.add(flag)
-                pending_flag = flag if "=" not in token and not current.flags.get(flag, False) else None
+                if current.flags.get(flag, False):
+                    satisfied_flags.add(flag)
+                elif separator and inline_value.strip():
+                    satisfied_flags.add(flag)
+                else:
+                    satisfied_flags.discard(flag)
+                pending_flag = flag if not separator and not current.flags.get(flag, False) else None
                 i += 1
                 continue
             if flag in root.flags:
+                if flag in GLOBAL_FLAGS_ACCEPTED_AFTER_COMMAND:
+                    # The runtime relocation stops at the first positional
+                    # argument, whatever the command's own flag style, so a
+                    # trailing selector there is an unknown flag at runtime.
+                    if saw_positional:
+                        errors.append(
+                            f"{example.path.relative_to(example.path.parents[1])}:{example.line_number}: "
+                            f"global flag {flag!r} appears after positional arguments in {example.raw!r}"
+                        )
+                        return errors
+                    i += 1
+                    if not separator and not root.flags.get(flag, False):
+                        if i >= len(tokens) or tokens[i].startswith("--"):
+                            errors.append(
+                                f"{example.path.relative_to(example.path.parents[1])}:{example.line_number}: "
+                                f"missing value for flag {flag!r} in {example.raw!r}"
+                            )
+                            return errors
+                        # A separated value that names a subcommand is a
+                        # misplaced command name at runtime, not a profile
+                        # name; the inline spelling disambiguates it.
+                        if tokens[i] in current.subcommands:
+                            errors.append(
+                                f"{example.path.relative_to(example.path.parents[1])}:{example.line_number}: "
+                                f"value {tokens[i]!r} for global flag {flag!r} names a subcommand of "
+                                f"{' '.join(current.path)!r}; use {flag}=NAME in {example.raw!r}"
+                            )
+                            return errors
+                        i += 1
+                    # The runtime relocates the selector into the root flag
+                    # run, so command-path resolution continues past it.
+                    while i < len(tokens) and current.subcommands and tokens[i] in current.subcommands:
+                        current_path = (*current_path, tokens[i])
+                        current = index[current_path]
+                        i += 1
+                    style = usage_position_style(current)
+                    if current.path == ("workflow", "run"):
+                        style = "positionals_and_flags"
+                    continue
                 errors.append(
                     f"{example.path.relative_to(example.path.parents[1])}:{example.line_number}: "
                     f"global flag {flag!r} must appear before the top-level command in {example.raw!r}"

@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestMetadataHelpShowsKeywordsWorkflow(t *testing.T) {
@@ -19,6 +20,7 @@ func TestMetadataHelpShowsKeywordsWorkflow(t *testing.T) {
 	metadataCmd := findSubcommand(root, "metadata")
 	if metadataCmd == nil {
 		t.Fatal("expected metadata command")
+		return
 	}
 
 	metadataUsage := metadataCmd.UsageFunc(metadataCmd)
@@ -32,6 +34,7 @@ func TestMetadataHelpShowsKeywordsWorkflow(t *testing.T) {
 	keywordsCmd := findSubcommand(root, "metadata", "keywords")
 	if keywordsCmd == nil {
 		t.Fatal("expected metadata keywords command")
+		return
 	}
 	keywordsUsage := keywordsCmd.UsageFunc(keywordsCmd)
 	for _, subcommand := range []string{"import", "audit", "plan", "diff", "localize", "apply", "push", "sync"} {
@@ -39,26 +42,28 @@ func TestMetadataHelpShowsKeywordsWorkflow(t *testing.T) {
 			t.Fatalf("expected metadata keywords help to list %s, got %q", subcommand, keywordsUsage)
 		}
 	}
-	if !strings.Contains(keywordsUsage, "asc apps search-keywords") {
-		t.Fatalf("expected metadata keywords help to point to raw relationship commands, got %q", keywordsUsage)
+	if !strings.Contains(keywordsUsage, "asc apps search-keywords list") {
+		t.Fatalf("expected metadata keywords help to point to the app keyword read command, got %q", keywordsUsage)
 	}
 }
 
-func TestRawSearchKeywordsHelpPointsToMetadataKeywords(t *testing.T) {
+func TestSearchKeywordsHelpDistinguishesSupportedWorkflows(t *testing.T) {
 	root := RootCommand("1.2.3")
 
 	appsCmd := findSubcommand(root, "apps", "search-keywords")
 	if appsCmd == nil {
 		t.Fatal("expected apps search-keywords command")
+		return
 	}
 	appsUsage := appsCmd.UsageFunc(appsCmd)
-	if !strings.Contains(appsUsage, "asc metadata keywords") {
-		t.Fatalf("expected apps search-keywords help to point to metadata keywords, got %q", appsUsage)
+	if !strings.Contains(appsUsage, "set --app") || !strings.Contains(appsUsage, "version-localized") {
+		t.Fatalf("expected apps search-keywords help to document the supported version-localization setter, got %q", appsUsage)
 	}
 
 	localizationsCmd := findSubcommand(root, "localizations", "search-keywords")
 	if localizationsCmd == nil {
 		t.Fatal("expected localizations search-keywords command")
+		return
 	}
 	localizationsUsage := localizationsCmd.UsageFunc(localizationsCmd)
 	if !strings.Contains(localizationsUsage, "asc metadata keywords") {
@@ -216,18 +221,18 @@ func TestMetadataKeywordsImportDryRunReportsOverLimitIssue(t *testing.T) {
 	if payload.Valid {
 		t.Fatalf("expected invalid preview payload, got %+v", payload)
 	}
-	if len(payload.Issues) != 1 || payload.Issues[0].Locale != "en-US" || payload.Issues[0].Message != "keywords exceed 100 bytes" || payload.Issues[0].Length != 101 || payload.Issues[0].Limit != 100 {
+	if len(payload.Issues) != 1 || payload.Issues[0].Locale != "en-US" || payload.Issues[0].Message != "keywords exceed 100 characters" || payload.Issues[0].Length != 101 || payload.Issues[0].Limit != 100 {
 		t.Fatalf("unexpected issues payload: %+v", payload.Issues)
 	}
-	if len(payload.Results) != 1 || payload.Results[0].Action != "invalid" || payload.Results[0].Reason != "keywords exceed 100 bytes" {
+	if len(payload.Results) != 1 || payload.Results[0].Action != "invalid" || payload.Results[0].Reason != "keywords exceed 100 characters" {
 		t.Fatalf("unexpected result payload: %+v", payload.Results)
 	}
 }
 
-func TestMetadataKeywordsImportDryRunReportsOverLimitByteIssue(t *testing.T) {
+func TestMetadataKeywordsImportDryRunReportsOverLimitCharacterIssue(t *testing.T) {
 	dir := t.TempDir()
 	inputPath := filepath.Join(t.TempDir(), "keywords.txt")
-	keywords := strings.Repeat("語", 34)
+	keywords := strings.Repeat("語", 101)
 	if err := os.WriteFile(inputPath, []byte(keywords), 0o644); err != nil {
 		t.Fatalf("write input: %v", err)
 	}
@@ -278,10 +283,10 @@ func TestMetadataKeywordsImportDryRunReportsOverLimitByteIssue(t *testing.T) {
 	if payload.Valid {
 		t.Fatalf("expected invalid preview payload, got %+v", payload)
 	}
-	if len(payload.Issues) != 1 || payload.Issues[0].Locale != "ja" || payload.Issues[0].Message != "keywords exceed 100 bytes" || payload.Issues[0].Length != len(keywords) || payload.Issues[0].Limit != 100 {
+	if len(payload.Issues) != 1 || payload.Issues[0].Locale != "ja" || payload.Issues[0].Message != "keywords exceed 100 characters" || payload.Issues[0].Length != 101 || payload.Issues[0].Limit != 100 {
 		t.Fatalf("unexpected issues payload: %+v", payload.Issues)
 	}
-	if len(payload.Results) != 1 || payload.Results[0].Action != "invalid" || payload.Results[0].Reason != "keywords exceed 100 bytes" {
+	if len(payload.Results) != 1 || payload.Results[0].Action != "invalid" || payload.Results[0].Reason != "keywords exceed 100 characters" {
 		t.Fatalf("unexpected result payload: %+v", payload.Results)
 	}
 }
@@ -1161,7 +1166,7 @@ func TestMetadataKeywordsPlanBuildsKeywordOnlyRemotePlan(t *testing.T) {
 		}
 		switch req.URL.Path {
 		case "/v1/apps/app-1/appStoreVersions":
-			if req.URL.Query().Get("filter[appStoreState]") != "" {
+			if req.URL.Query().Get("filter[appStoreState]") != "" || req.URL.Query().Get("filter[appVersionState]") == "READY_FOR_DISTRIBUTION" {
 				return metadataKeywordsJSONResponse(`{"data":[],"links":{"next":""}}`)
 			}
 			return metadataKeywordsJSONResponse(`{"data":[{"type":"appStoreVersions","id":"version-1","attributes":{"versionString":"1.2.3","platform":"IOS"}}],"links":{"next":""}}`)
@@ -1239,6 +1244,79 @@ func TestMetadataKeywordsPlanBuildsKeywordOnlyRemotePlan(t *testing.T) {
 	}
 }
 
+func TestMetadataKeywordsPlanUsesFreshReadinessContextAfterSlowPagination(t *testing.T) {
+	setupAuth(t)
+	t.Setenv("ASC_BYPASS_KEYCHAIN", "1")
+	t.Setenv("ASC_CONFIG_PATH", filepath.Join(t.TempDir(), "nonexistent.json"))
+	t.Setenv("ASC_APP_ID", "")
+	t.Setenv("ASC_TIMEOUT", "100ms")
+	t.Setenv("ASC_MAX_RETRIES", "0")
+
+	dir := t.TempDir()
+	versionDir := filepath.Join(dir, "version", "1.2.3")
+	if err := os.MkdirAll(versionDir, 0o755); err != nil {
+		t.Fatalf("mkdir version: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(versionDir, "ja.json"), []byte(`{"keywords":"nihongo"}`), 0o644); err != nil {
+		t.Fatalf("write ja: %v", err)
+	}
+
+	originalTransport := http.DefaultTransport
+	t.Cleanup(func() { http.DefaultTransport = originalTransport })
+	localizationReads := 0
+	readinessReads := 0
+	http.DefaultTransport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		if req.Method != http.MethodGet {
+			t.Fatalf("expected GET, got %s %s", req.Method, req.URL.Path)
+		}
+		switch req.URL.Path {
+		case "/v1/apps/app-1/appStoreVersions":
+			if req.URL.Query().Get("filter[appStoreState]") != "" || req.URL.Query().Get("filter[appVersionState]") == "READY_FOR_DISTRIBUTION" {
+				return metadataKeywordsJSONResponse(`{"data":[{"type":"appStoreVersions","id":"released","attributes":{"versionString":"1.0","platform":"IOS","appStoreState":"READY_FOR_SALE"}}],"links":{"next":""}}`)
+			}
+			return metadataKeywordsJSONResponse(`{"data":[{"type":"appStoreVersions","id":"version-1","attributes":{"versionString":"1.2.3","platform":"IOS"}}],"links":{"next":""}}`)
+		case "/v1/appStoreVersions/version-1/appStoreVersionLocalizations":
+			localizationReads++
+			deadline, ok := req.Context().Deadline()
+			if !ok || time.Until(deadline) < 70*time.Millisecond {
+				t.Fatalf("expected fresh localization page deadline, remaining=%s", time.Until(deadline))
+			}
+			time.Sleep(60 * time.Millisecond)
+			if localizationReads == 1 {
+				return metadataKeywordsJSONResponse(`{"data":[],"links":{"next":"/v1/appStoreVersions/version-1/appStoreVersionLocalizations?cursor=next"}}`)
+			}
+			return metadataKeywordsJSONResponse(`{"data":[],"links":{"next":""}}`)
+		case "/v1/appStoreVersions/version-1":
+			readinessReads++
+			deadline, ok := req.Context().Deadline()
+			if !ok || time.Until(deadline) < 70*time.Millisecond {
+				t.Fatalf("expected fresh readiness deadline, remaining=%s", time.Until(deadline))
+			}
+			return metadataKeywordsJSONResponse(`{"data":{"type":"appStoreVersions","id":"version-1","attributes":{"versionString":"1.2.3","platform":"IOS"},"relationships":{"app":{"data":{"type":"apps","id":"app-1"}}}}}`)
+		default:
+			t.Fatalf("unexpected request: %s %s", req.Method, req.URL.Path)
+			return nil, nil
+		}
+	})
+
+	root := RootCommand("1.2.3")
+	root.FlagSet.SetOutput(io.Discard)
+	stdout, stderr := captureOutput(t, func() {
+		if err := root.Parse([]string{"metadata", "keywords", "plan", "--app", "app-1", "--version", "1.2.3", "--dir", dir}); err != nil {
+			t.Fatalf("parse: %v", err)
+		}
+		if err := root.Run(context.Background()); err != nil {
+			t.Fatalf("run: %v", err)
+		}
+	})
+	if stderr != "" || localizationReads != 2 || readinessReads != 1 {
+		t.Fatalf("unexpected request counts: localization=%d readiness=%d stderr=%q", localizationReads, readinessReads, stderr)
+	}
+	if !strings.Contains(stdout, `"whatsNew"`) {
+		t.Fatalf("expected update-context warning to require whatsNew: %s", stdout)
+	}
+}
+
 func TestMetadataKeywordsPlanDoesNotWarnForExistingLocaleUpdate(t *testing.T) {
 	setupAuth(t)
 	t.Setenv("ASC_BYPASS_KEYCHAIN", "1")
@@ -1262,7 +1340,7 @@ func TestMetadataKeywordsPlanDoesNotWarnForExistingLocaleUpdate(t *testing.T) {
 		}
 		switch req.URL.Path {
 		case "/v1/apps/app-1/appStoreVersions":
-			if req.URL.Query().Get("filter[appStoreState]") != "" {
+			if req.URL.Query().Get("filter[appStoreState]") != "" || req.URL.Query().Get("filter[appVersionState]") == "READY_FOR_DISTRIBUTION" {
 				return metadataKeywordsJSONResponse(`{"data":[],"links":{"next":""}}`)
 			}
 			return metadataKeywordsJSONResponse(`{"data":[{"type":"appStoreVersions","id":"version-1","attributes":{"versionString":"1.2.3","platform":"IOS"}}],"links":{"next":""}}`)
@@ -1341,7 +1419,7 @@ func TestMetadataKeywordsDiffIncludesCreateWarnings(t *testing.T) {
 		}
 		switch req.URL.Path {
 		case "/v1/apps/app-1/appStoreVersions":
-			if req.URL.Query().Get("filter[appStoreState]") != "" {
+			if req.URL.Query().Get("filter[appStoreState]") != "" || req.URL.Query().Get("filter[appVersionState]") == "READY_FOR_DISTRIBUTION" {
 				return metadataKeywordsJSONResponse(`{"data":[],"links":{"next":""}}`)
 			}
 			return metadataKeywordsJSONResponse(`{"data":[{"type":"appStoreVersions","id":"version-1","attributes":{"versionString":"1.2.3","platform":"IOS"}}],"links":{"next":""}}`)
@@ -1670,7 +1748,7 @@ func TestMetadataKeywordsApplyCreatesLocale(t *testing.T) {
 	http.DefaultTransport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
 		switch req.URL.Path {
 		case "/v1/apps/app-1/appStoreVersions":
-			if strings.Contains(req.URL.RawQuery, "filter%5BappStoreState%5D") {
+			if strings.Contains(req.URL.RawQuery, "filter%5BappStoreState%5D") || req.URL.Query().Get("filter[appVersionState]") == "READY_FOR_DISTRIBUTION" {
 				return metadataKeywordsJSONResponse(`{"data":[],"links":{"next":""}}`)
 			}
 			return metadataKeywordsJSONResponse(`{"data":[{"type":"appStoreVersions","id":"version-1","attributes":{"versionString":"1.2.3","platform":"IOS"}}],"links":{"next":""}}`)

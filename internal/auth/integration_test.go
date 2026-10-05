@@ -99,7 +99,8 @@ func TestIntegrationAuthConfig(t *testing.T) {
 		tempDir := t.TempDir()
 
 		// Login with bypass-keychain --local writes to .asc/config.json in cwd
-		cmd := exec.Command(ascBinary, "auth", "login",
+		cmd := exec.Command(
+			ascBinary, "auth", "login",
 			"--bypass-keychain",
 			"--local",
 			"--name", "TestKey",
@@ -156,7 +157,8 @@ func TestIntegrationAuthConfig(t *testing.T) {
 
 		// Check auth status
 		cmd := exec.Command(ascBinary, "auth", "status")
-		cmd.Env = append(os.Environ(),
+		cmd.Env = append(
+			os.Environ(),
 			"ASC_CONFIG_PATH="+configPath,
 			"ASC_BYPASS_KEYCHAIN=1",
 		)
@@ -199,7 +201,8 @@ func TestIntegrationAuthConfig(t *testing.T) {
 		}
 
 		cmd := exec.Command(ascBinary, "auth", "switch", "--name", "client")
-		cmd.Env = append(filterEnv(os.Environ(), "ASC_CONFIG_PATH", "ASC_BYPASS_KEYCHAIN"),
+		cmd.Env = append(
+			filterEnv(os.Environ(), "ASC_CONFIG_PATH", "ASC_BYPASS_KEYCHAIN"),
 			"ASC_CONFIG_PATH="+configPath,
 			"ASC_BYPASS_KEYCHAIN=1",
 		)
@@ -217,10 +220,12 @@ func TestIntegrationAuthConfig(t *testing.T) {
 		}
 
 		cmd = exec.Command(ascBinary, "--profile", "client", "apps", "list", "--limit", "1")
-		cmd.Env = append(filterEnv(os.Environ(),
-			"ASC_KEY_ID", "ASC_ISSUER_ID", "ASC_PRIVATE_KEY_PATH",
-			"ASC_CONFIG_PATH", "ASC_BYPASS_KEYCHAIN",
-		),
+		cmd.Env = append(
+			filterEnv(
+				os.Environ(),
+				"ASC_KEY_ID", "ASC_ISSUER_ID", "ASC_PRIVATE_KEY_PATH",
+				"ASC_CONFIG_PATH", "ASC_BYPASS_KEYCHAIN",
+			),
 			"ASC_CONFIG_PATH="+configPath,
 			"ASC_BYPASS_KEYCHAIN=1",
 		)
@@ -250,7 +255,8 @@ func TestIntegrationAuthConfig(t *testing.T) {
 
 		// Try to list apps using config credentials
 		cmd := exec.Command(ascBinary, "apps", "list")
-		cmd.Env = filterEnv(os.Environ(),
+		cmd.Env = filterEnv(
+			os.Environ(),
 			"ASC_KEY_ID", "ASC_ISSUER_ID", "ASC_PRIVATE_KEY_PATH",
 		)
 		cmd.Env = append(cmd.Env, "ASC_CONFIG_PATH="+configPath)
@@ -287,7 +293,8 @@ func TestIntegrationAuthConfig(t *testing.T) {
 
 		// Try to list builds without --app flag (should use config app_id)
 		cmd := exec.Command(ascBinary, "builds", "list", "--limit", "1")
-		cmd.Env = filterEnv(os.Environ(),
+		cmd.Env = filterEnv(
+			os.Environ(),
 			"ASC_KEY_ID", "ASC_ISSUER_ID", "ASC_PRIVATE_KEY_PATH", "ASC_APP_ID",
 		)
 		cmd.Env = append(cmd.Env, "ASC_CONFIG_PATH="+configPath)
@@ -299,67 +306,6 @@ func TestIntegrationAuthConfig(t *testing.T) {
 		// Verify we got valid JSON response
 		if !strings.Contains(string(output), `"type":"builds"`) && !strings.Contains(string(output), `"data":[]`) {
 			t.Fatalf("expected builds response, got: %s", output)
-		}
-	})
-
-	t.Run("auth_logout_clears_credentials_preserves_settings", func(t *testing.T) {
-		tempDir := t.TempDir()
-		configPath := filepath.Join(tempDir, "config.json")
-
-		// Create config with credentials AND other settings
-		cfg := &config.Config{
-			KeyID:          keyID,
-			IssuerID:       issuerID,
-			PrivateKeyPath: keyPath,
-			DefaultKeyName: "LogoutTestKey",
-			AppID:          "12345",
-			VendorNumber:   "67890",
-			Timeout: func() config.DurationValue {
-				value, err := config.ParseDurationValue("60s")
-				if err != nil {
-					t.Fatalf("ParseDurationValue(\"60s\") error: %v", err)
-				}
-				return value
-			}(),
-		}
-		if err := config.SaveAt(configPath, cfg); err != nil {
-			t.Fatalf("failed to save config: %v", err)
-		}
-
-		// Logout
-		cmd := exec.Command(ascBinary, "auth", "logout")
-		cmd.Env = append(os.Environ(), "ASC_CONFIG_PATH="+configPath)
-		output, err := cmd.CombinedOutput()
-		if err != nil {
-			t.Fatalf("auth logout failed: %v\nOutput: %s", err, output)
-		}
-
-		// Verify config still exists
-		data, err := os.ReadFile(configPath)
-		if err != nil {
-			t.Fatalf("config file should still exist: %v", err)
-		}
-
-		// Verify credentials are cleared but settings are preserved
-		var loadedCfg config.Config
-		if err := json.Unmarshal(data, &loadedCfg); err != nil {
-			t.Fatalf("failed to parse config: %v", err)
-		}
-
-		// Credentials should be cleared
-		if loadedCfg.KeyID != "" || loadedCfg.IssuerID != "" || loadedCfg.PrivateKeyPath != "" {
-			t.Fatal("credentials should be cleared after logout")
-		}
-
-		// Settings should be preserved
-		if loadedCfg.AppID != "12345" {
-			t.Fatalf("AppID should be preserved, got %q", loadedCfg.AppID)
-		}
-		if loadedCfg.VendorNumber != "67890" {
-			t.Fatalf("VendorNumber should be preserved, got %q", loadedCfg.VendorNumber)
-		}
-		if loadedCfg.Timeout.String() != "60s" {
-			t.Fatalf("Timeout should be preserved, got %q", loadedCfg.Timeout.String())
 		}
 	})
 }

@@ -26,7 +26,7 @@ func AccessibilityCommand() *ffcli.Command {
 
 Examples:
   asc accessibility list --app "APP_ID"
-  asc accessibility get --id "DECLARATION_ID"
+  asc accessibility view --id "DECLARATION_ID"
   asc accessibility create --app "APP_ID" --device-family IPHONE --supports-voiceover true
   asc accessibility update --id "DECLARATION_ID" --publish true
   asc accessibility delete --id "DECLARATION_ID" --confirm`,
@@ -72,11 +72,14 @@ Examples:
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
-			if *limit != 0 && (*limit < 1 || *limit > 200) {
-				return fmt.Errorf("accessibility list: --limit must be between 1 and 200")
-			}
 			if err := shared.ValidateNextURL(*next); err != nil {
-				return fmt.Errorf("accessibility list: %w", err)
+				return shared.UsageErrorf("accessibility list: %v", err)
+			}
+			if err := rejectAccessibilityNextFlagConflicts(fs, *next, "app", "device-family", "state", "fields", "limit"); err != nil {
+				return err
+			}
+			if *limit != 0 && (*limit < 1 || *limit > 200) {
+				return shared.UsageError("accessibility list: --limit must be between 1 and 200")
 			}
 
 			deviceFamilies, err := normalizeAccessibilityDeviceFamilies(shared.SplitCSVUpper(*deviceFamily))
@@ -97,7 +100,7 @@ Examples:
 			resolvedAppID := shared.ResolveAppID(*appID)
 			if resolvedAppID == "" && strings.TrimSpace(*next) == "" {
 				fmt.Fprintln(os.Stderr, "Error: --app is required (or set ASC_APP_ID)")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--app")
 			}
 
 			client, err := shared.GetASCClient()
@@ -143,40 +146,56 @@ Examples:
 	}
 }
 
-// AccessibilityGetCommand returns the accessibility get subcommand.
-func AccessibilityGetCommand() *ffcli.Command {
-	fs := flag.NewFlagSet("get", flag.ExitOnError)
+func rejectAccessibilityNextFlagConflicts(fs *flag.FlagSet, next string, names ...string) error {
+	if strings.TrimSpace(next) == "" {
+		return nil
+	}
+	provided := make(map[string]struct{}, len(names))
+	fs.Visit(func(f *flag.Flag) {
+		provided[f.Name] = struct{}{}
+	})
+	for _, name := range names {
+		if _, ok := provided[name]; ok {
+			return shared.UsageErrorf("accessibility list: --next cannot be combined with --%s", name)
+		}
+	}
+	return nil
+}
 
-	id := fs.String("id", "", "Accessibility declaration ID (required)")
+// AccessibilityGetCommand returns the accessibility view subcommand.
+func AccessibilityGetCommand() *ffcli.Command {
+	fs := flag.NewFlagSet("view", flag.ExitOnError)
+
+	id := shared.BindResourceIDFlag(fs, "id", "accessibilityDeclarations", "Accessibility declaration ID (required)")
 	fields := fs.String("fields", "", "Fields to include: "+strings.Join(accessibilityDeclarationFieldList(), ", "))
 	output := shared.BindOutputFlags(fs)
 
 	return &ffcli.Command{
-		Name:       "get",
-		ShortUsage: "asc accessibility get --id DECLARATION_ID",
-		ShortHelp:  "Get an accessibility declaration by ID.",
-		LongHelp: `Get an accessibility declaration by ID.
+		Name:       "view",
+		ShortUsage: "asc accessibility view --id DECLARATION_ID",
+		ShortHelp:  "View an accessibility declaration by ID.",
+		LongHelp: `View an accessibility declaration by ID.
 
 Examples:
-  asc accessibility get --id "DECLARATION_ID"
-  asc accessibility get --id "DECLARATION_ID" --fields "deviceFamily,state"`,
+  asc accessibility view --id "DECLARATION_ID"
+  asc accessibility view --id "DECLARATION_ID" --fields "deviceFamily,state"`,
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
 			idValue := strings.TrimSpace(*id)
 			if idValue == "" {
 				fmt.Fprintln(os.Stderr, "Error: --id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--id")
 			}
 
 			fieldsValue, err := normalizeAccessibilityDeclarationFields(*fields)
 			if err != nil {
-				return fmt.Errorf("accessibility get: %w", err)
+				return fmt.Errorf("accessibility view: %w", err)
 			}
 
 			client, err := shared.GetASCClient()
 			if err != nil {
-				return fmt.Errorf("accessibility get: %w", err)
+				return fmt.Errorf("accessibility view: %w", err)
 			}
 
 			requestCtx, cancel := shared.ContextWithTimeout(ctx)
@@ -184,7 +203,7 @@ Examples:
 
 			resp, err := client.GetAccessibilityDeclaration(requestCtx, idValue, fieldsValue)
 			if err != nil {
-				return fmt.Errorf("accessibility get: failed to fetch: %w", err)
+				return fmt.Errorf("accessibility view: failed to fetch: %w", err)
 			}
 
 			return shared.PrintOutput(resp, *output.Output, *output.Pretty)
@@ -224,13 +243,13 @@ Examples:
 			resolvedAppID := shared.ResolveAppID(*appID)
 			if resolvedAppID == "" {
 				fmt.Fprintln(os.Stderr, "Error: --app is required (or set ASC_APP_ID)")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--app")
 			}
 
 			deviceFamilyValue := strings.TrimSpace(*deviceFamily)
 			if deviceFamilyValue == "" {
 				fmt.Fprintln(os.Stderr, "Error: --device-family is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--device-family")
 			}
 
 			normalizedDeviceFamily, err := normalizeAccessibilityDeviceFamily(deviceFamilyValue)
@@ -275,7 +294,7 @@ Examples:
 func AccessibilityUpdateCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("update", flag.ExitOnError)
 
-	id := fs.String("id", "", "Accessibility declaration ID (required)")
+	id := shared.BindResourceIDFlag(fs, "id", "accessibilityDeclarations", "Accessibility declaration ID (required)")
 	publish := fs.String("publish", "", "Publish declaration (true/false)")
 	supportsAudioDescriptions := fs.String("supports-audio-descriptions", "", "Supports audio descriptions (true/false)")
 	supportsCaptions := fs.String("supports-captions", "", "Supports captions (true/false)")
@@ -303,7 +322,7 @@ Examples:
 			idValue := strings.TrimSpace(*id)
 			if idValue == "" {
 				fmt.Fprintln(os.Stderr, "Error: --id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--id")
 			}
 
 			attrs, err := buildAccessibilityDeclarationUpdateAttributes(map[string]string{
@@ -348,7 +367,7 @@ Examples:
 func AccessibilityDeleteCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("delete", flag.ExitOnError)
 
-	id := fs.String("id", "", "Accessibility declaration ID (required)")
+	id := shared.BindResourceIDFlag(fs, "id", "accessibilityDeclarations", "Accessibility declaration ID (required)")
 	confirm := fs.Bool("confirm", false, "Confirm deletion")
 	output := shared.BindOutputFlags(fs)
 
@@ -366,11 +385,11 @@ Examples:
 			idValue := strings.TrimSpace(*id)
 			if idValue == "" {
 				fmt.Fprintln(os.Stderr, "Error: --id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--id")
 			}
 			if !*confirm {
 				fmt.Fprintln(os.Stderr, "Error: --confirm is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--confirm")
 			}
 
 			client, err := shared.GetASCClient()

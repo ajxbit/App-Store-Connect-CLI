@@ -23,7 +23,7 @@ func PreReleaseVersionsCommand() *ffcli.Command {
 
 Examples:
   asc pre-release-versions list --app "APP_ID"
-  asc pre-release-versions relationships get --id "PR_ID" --type "app"`,
+  asc pre-release-versions relationships view --id "PR_ID" --type "app"`,
 		UsageFunc: shared.DefaultUsageFunc,
 		Subcommands: []*ffcli.Command{
 			PreReleaseVersionsListCommand(),
@@ -80,7 +80,7 @@ Examples:
 			nextValue := strings.TrimSpace(*next)
 			if resolvedAppID == "" && nextValue == "" {
 				fmt.Fprintln(os.Stderr, "Error: --app is required (or set ASC_APP_ID)")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--app")
 			}
 
 			client, err := shared.GetASCClient()
@@ -134,31 +134,31 @@ Examples:
 
 // PreReleaseVersionsGetCommand returns the pre-release versions get subcommand.
 func PreReleaseVersionsGetCommand() *ffcli.Command {
-	fs := flag.NewFlagSet("pre-release-versions get", flag.ExitOnError)
+	fs := flag.NewFlagSet("pre-release-versions view", flag.ExitOnError)
 
-	id := fs.String("id", "", "Pre-release version ID")
+	id := shared.BindResourceIDFlag(fs, "id", "preReleaseVersions", "Pre-release version ID")
 	output := shared.BindOutputFlags(fs)
 
 	return &ffcli.Command{
-		Name:       "get",
-		ShortUsage: "asc pre-release-versions get [flags]",
-		ShortHelp:  "Get a TestFlight pre-release version by ID.",
-		LongHelp: `Get a TestFlight pre-release version by ID.
+		Name:       "view",
+		ShortUsage: "asc pre-release-versions view [flags]",
+		ShortHelp:  "View a TestFlight pre-release version by ID.",
+		LongHelp: `View a TestFlight pre-release version by ID.
 
 Examples:
-  asc pre-release-versions get --id "PR_ID"`,
+  asc pre-release-versions view --id "PR_ID"`,
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
 			idValue := strings.TrimSpace(*id)
 			if idValue == "" {
 				fmt.Fprintln(os.Stderr, "Error: --id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--id")
 			}
 
 			client, err := shared.GetASCClient()
 			if err != nil {
-				return fmt.Errorf("pre-release-versions get: %w", err)
+				return fmt.Errorf("pre-release-versions view: %w", err)
 			}
 
 			requestCtx, cancel := shared.ContextWithTimeout(ctx)
@@ -166,7 +166,7 @@ Examples:
 
 			version, err := client.GetPreReleaseVersion(requestCtx, idValue)
 			if err != nil {
-				return fmt.Errorf("pre-release-versions get: failed to fetch: %w", err)
+				return fmt.Errorf("pre-release-versions view: failed to fetch: %w", err)
 			}
 
 			return shared.PrintOutput(version, *output.Output, *output.Pretty)

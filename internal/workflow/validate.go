@@ -5,7 +5,9 @@ import (
 	"maps"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
+	"time"
 )
 
 // ValidationCode classifies validation failures.
@@ -26,6 +28,18 @@ const (
 	ErrDuplicateOutputProducerName ValidationCode = "duplicate_output_producer_name"
 	ErrInvalidOutputName           ValidationCode = "invalid_output_name"
 	ErrInvalidOutputExpr           ValidationCode = "invalid_output_expr"
+	ErrStepRetryOnWorkflow         ValidationCode = "step_retry_on_workflow"
+	ErrStepTimeoutOnWorkflow       ValidationCode = "step_timeout_on_workflow"
+	ErrInvalidStepRetry            ValidationCode = "invalid_step_retry"
+	ErrInvalidRetryMaxAttempts     ValidationCode = "invalid_retry_max_attempts"
+	ErrInvalidRetryDelay           ValidationCode = "invalid_retry_delay"
+	ErrInvalidStepTimeout          ValidationCode = "invalid_step_timeout"
+)
+
+const (
+	minRetryAttempts  = 2
+	maxRetryAttempts  = 100
+	maxPolicyDuration = 24 * time.Hour
 )
 
 // ValidationError describes a structured workflow validation failure.
@@ -33,6 +47,7 @@ type ValidationError struct {
 	Code     ValidationCode `json:"code"`
 	Workflow string         `json:"workflow,omitempty"`
 	Step     int            `json:"step,omitempty"`
+	Path     string         `json:"path,omitempty"`
 	Message  string         `json:"message"`
 }
 
@@ -73,7 +88,7 @@ func Validate(def *Definition) []*ValidationError {
 		}
 	}
 
-	outputProducerWorkflows := map[string]string{}
+	outputProducerConflicts := collectOutputProducerConflicts(def)
 
 	for _, name := range names {
 		wf := def.Workflows[name]
@@ -88,6 +103,7 @@ func Validate(def *Definition) []*ValidationError {
 
 		for i, step := range wf.Steps {
 			idx := i + 1
+			stepPath := fmt.Sprintf("%s.steps[%d]", workflowValidationPath(name), i)
 			hasRun := strings.TrimSpace(step.Run) != ""
 			hasWorkflow := strings.TrimSpace(step.Workflow) != ""
 			hasRawRun := step.Run != ""
@@ -128,6 +144,73 @@ func Validate(def *Definition) []*ValidationError {
 				})
 			}
 
+			if step.retryExplicitNull {
+				errs = append(errs, &ValidationError{
+					Code:     ErrInvalidStepRetry,
+					Workflow: name,
+					Step:     idx,
+					Path:     stepPath + ".retry",
+					Message:  fmt.Sprintf("%s must be an object, not null", stepPath+".retry"),
+				})
+			} else if step.Retry != nil {
+				if !hasRun {
+					errs = append(errs, &ValidationError{
+						Code:     ErrStepRetryOnWorkflow,
+						Workflow: name,
+						Step:     idx,
+						Path:     stepPath + ".retry",
+						Message:  fmt.Sprintf("%s is only supported on run steps", stepPath+".retry"),
+					})
+				} else {
+					if step.Retry.MaxAttempts < minRetryAttempts || step.Retry.MaxAttempts > maxRetryAttempts {
+						errs = append(errs, &ValidationError{
+							Code:     ErrInvalidRetryMaxAttempts,
+							Workflow: name,
+							Step:     idx,
+							Path:     stepPath + ".retry.max_attempts",
+							Message:  fmt.Sprintf("%s must be between %d and %d and counts the initial attempt", stepPath+".retry.max_attempts", minRetryAttempts, maxRetryAttempts),
+						})
+					}
+					if _, err := parsePositivePolicyDuration(step.Retry.Delay); err != nil {
+						errs = append(errs, &ValidationError{
+							Code:     ErrInvalidRetryDelay,
+							Workflow: name,
+							Step:     idx,
+							Path:     stepPath + ".retry.delay",
+							Message:  fmt.Sprintf("%s must be a positive duration no greater than %s: %v", stepPath+".retry.delay", maxPolicyDuration, err),
+						})
+					}
+				}
+			}
+
+			if step.timeoutExplicitNull {
+				errs = append(errs, &ValidationError{
+					Code:     ErrInvalidStepTimeout,
+					Workflow: name,
+					Step:     idx,
+					Path:     stepPath + ".timeout",
+					Message:  fmt.Sprintf("%s must be a duration string, not null", stepPath+".timeout"),
+				})
+			} else if step.Timeout != nil {
+				if !hasRun {
+					errs = append(errs, &ValidationError{
+						Code:     ErrStepTimeoutOnWorkflow,
+						Workflow: name,
+						Step:     idx,
+						Path:     stepPath + ".timeout",
+						Message:  fmt.Sprintf("%s is only supported on run steps", stepPath+".timeout"),
+					})
+				} else if _, err := parsePositivePolicyDuration(*step.Timeout); err != nil {
+					errs = append(errs, &ValidationError{
+						Code:     ErrInvalidStepTimeout,
+						Workflow: name,
+						Step:     idx,
+						Path:     stepPath + ".timeout",
+						Message:  fmt.Sprintf("%s must be a positive duration no greater than %s: %v", stepPath+".timeout", maxPolicyDuration, err),
+					})
+				}
+			}
+
 			if len(step.Outputs) > 0 {
 				if hasWorkflow {
 					errs = append(errs, &ValidationError{
@@ -147,15 +230,13 @@ func Validate(def *Definition) []*ValidationError {
 						Message:  fmt.Sprintf("workflow %q step %d must use a reference-safe 'name' when declaring outputs", name, idx),
 					})
 				} else {
-					if prevWorkflow, exists := outputProducerWorkflows[trimmedName]; exists {
+					if prevWorkflow, exists := outputProducerConflicts[name][idx]; exists {
 						errs = append(errs, &ValidationError{
 							Code:     ErrDuplicateOutputProducerName,
 							Workflow: name,
 							Step:     idx,
 							Message:  fmt.Sprintf("workflow %q step %d reuses output-producing step name %q already declared in workflow %q", name, idx, trimmedName, prevWorkflow),
 						})
-					} else {
-						outputProducerWorkflows[trimmedName] = name
 					}
 				}
 
@@ -198,6 +279,100 @@ func Validate(def *Definition) []*ValidationError {
 	}
 
 	return errs
+}
+
+func workflowValidationPath(name string) string {
+	if validWorkflowName.MatchString(name) {
+		return "workflows." + name
+	}
+	return "workflows[" + strconv.Quote(name) + "]"
+}
+
+func parsePositivePolicyDuration(value string) (time.Duration, error) {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return 0, fmt.Errorf("duration is required")
+	}
+	duration, err := time.ParseDuration(trimmed)
+	if err != nil {
+		return 0, fmt.Errorf("parse duration %q: %w", trimmed, err)
+	}
+	if duration <= 0 {
+		return 0, fmt.Errorf("duration must be greater than zero")
+	}
+	if duration > maxPolicyDuration {
+		return 0, fmt.Errorf("duration exceeds %s", maxPolicyDuration)
+	}
+	return duration, nil
+}
+
+func collectOutputProducerConflicts(def *Definition) map[string]map[int]string {
+	conflicts := map[string]map[int]string{}
+	reachabilityCache := map[string]map[string]struct{}{}
+
+	for _, root := range slices.Sorted(maps.Keys(def.Workflows)) {
+		reachable := workflowsReachableFrom(def, root, reachabilityCache, map[string]bool{})
+		seen := map[string]string{}
+
+		reachableNames := slices.Sorted(maps.Keys(reachable))
+		for _, workflowName := range reachableNames {
+			wf := def.Workflows[workflowName]
+			for i, step := range wf.Steps {
+				if len(step.Outputs) == 0 {
+					continue
+				}
+
+				trimmedName := strings.TrimSpace(step.Name)
+				if trimmedName == "" || !validWorkflowName.MatchString(trimmedName) {
+					continue
+				}
+
+				if prevWorkflow, exists := seen[trimmedName]; exists {
+					if conflicts[workflowName] == nil {
+						conflicts[workflowName] = map[int]string{}
+					}
+					if _, recorded := conflicts[workflowName][i+1]; !recorded {
+						conflicts[workflowName][i+1] = prevWorkflow
+					}
+					continue
+				}
+
+				seen[trimmedName] = workflowName
+			}
+		}
+	}
+
+	return conflicts
+}
+
+func workflowsReachableFrom(def *Definition, root string, cache map[string]map[string]struct{}, visiting map[string]bool) map[string]struct{} {
+	if reachable, ok := cache[root]; ok {
+		return reachable
+	}
+	if visiting[root] {
+		return map[string]struct{}{root: {}}
+	}
+
+	visiting[root] = true
+	reachable := map[string]struct{}{root: {}}
+
+	if wf, ok := def.Workflows[root]; ok {
+		for _, step := range wf.Steps {
+			ref := strings.TrimSpace(step.Workflow)
+			if ref == "" {
+				continue
+			}
+			for name := range workflowsReachableFrom(def, ref, cache, visiting) {
+				reachable[name] = struct{}{}
+			}
+		}
+	}
+
+	delete(visiting, root)
+	if len(visiting) == 0 {
+		cache[root] = reachable
+	}
+	return reachable
 }
 
 // detectCycles performs DFS across all workflows to find circular references.

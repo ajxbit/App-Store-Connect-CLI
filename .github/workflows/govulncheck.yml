@@ -19,9 +19,16 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - name: Scan Go dependencies and reachable code paths
-        id: govulncheck
-        uses: golang/govulncheck-action@b625fbe08f3bccbe446d94fbf87fcc875a4f50ee # v1.0.4
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
-          go-package: ./...
+          go-download-base-url: https://dl.google.com/go
+          cache: true
+
+      - name: Install govulncheck
+        run: make install-govulncheck
+
+      - name: Scan Go dependencies and reachable code paths
+        run: govulncheck -format text ./...

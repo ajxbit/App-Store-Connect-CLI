@@ -5,6 +5,7 @@ import (
 	"os"
 
 	"github.com/rudrankriyam/App-Store-Connect-CLI/cmd"
+	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/telemetry"
 )
 
 var (
@@ -18,6 +19,9 @@ func versionInfoString() string {
 }
 
 func run(args []string) int {
+	if telemetry.RunMaintenanceWorkerIfRequested(args) {
+		return cmd.ExitSuccess
+	}
 	return cmd.Run(args, versionInfoString())
 }
 

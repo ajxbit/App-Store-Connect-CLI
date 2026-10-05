@@ -40,7 +40,7 @@ Examples:
 func VersionsExperimentsV2ListCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("experiments-v2 list", flag.ExitOnError)
 
-	versionID := fs.String("version-id", "", "App Store version ID")
+	versionID := shared.BindResourceIDFlag(fs, "version-id", "appStoreVersions", "App Store version ID")
 	limit := fs.Int("limit", 0, "Maximum results per page (1-200)")
 	next := fs.String("next", "", "Fetch next page using a links.next URL")
 	paginate := fs.Bool("paginate", false, "Automatically fetch all pages (aggregate results)")
@@ -59,16 +59,16 @@ Examples:
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
 			if *limit != 0 && (*limit < 1 || *limit > 200) {
-				return fmt.Errorf("versions experiments-v2 list: --limit must be between 1 and 200")
+				return shared.UsageError("versions experiments-v2 list: --limit must be between 1 and 200")
 			}
 			if err := shared.ValidateNextURL(*next); err != nil {
-				return fmt.Errorf("versions experiments-v2 list: %w", err)
+				return shared.UsageErrorf("versions experiments-v2 list: %v", err)
 			}
 
 			versionValue := strings.TrimSpace(*versionID)
 			if versionValue == "" && strings.TrimSpace(*next) == "" {
 				fmt.Fprintln(os.Stderr, "Error: --version-id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--version-id")
 			}
 
 			client, err := shared.GetASCClient()

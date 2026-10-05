@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -94,7 +95,8 @@ func ResolveTiers(ctx context.Context, client *asc.Client, appID, territory stri
 
 // ResolveSubscriptionTiers resolves subscription price point tiers for a subscription and territory.
 func ResolveSubscriptionTiers(ctx context.Context, client *asc.Client, subscriptionID, territory string, refresh bool) ([]TierEntry, error) {
-	return resolveScopedTiers(ctx, client, "subscription", subscriptionID, territory, tierCacheScopeSubscription, refresh,
+	return resolveScopedTiers(
+		ctx, client, "subscription", subscriptionID, territory, tierCacheScopeSubscription, refresh,
 		func(ctx context.Context, client *asc.Client, resourceID, territory, nextURL string) (tierPage, error) {
 			opts := []asc.SubscriptionPricePointsOption{
 				asc.WithSubscriptionPricePointsLimit(200),
@@ -118,7 +120,8 @@ func ResolveSubscriptionTiers(ctx context.Context, client *asc.Client, subscript
 
 // ResolveIAPTiers resolves in-app purchase price point tiers for an IAP and territory.
 func ResolveIAPTiers(ctx context.Context, client *asc.Client, iapID, territory string, refresh bool) ([]TierEntry, error) {
-	return resolveScopedTiers(ctx, client, "in-app purchase", iapID, territory, tierCacheScopeIAP, refresh,
+	return resolveScopedTiers(
+		ctx, client, "in-app purchase", iapID, territory, tierCacheScopeIAP, refresh,
 		func(ctx context.Context, client *asc.Client, resourceID, territory, nextURL string) (tierPage, error) {
 			opts := []asc.IAPPricePointsOption{
 				asc.WithIAPPricePointsLimit(200),
@@ -255,7 +258,9 @@ func resolveTiersWithFetcher(
 	}
 
 	if len(tiers) > 0 {
-		_ = saveCache(tiers)
+		if err := saveCache(tiers); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to cache price tiers: %v\n", err)
+		}
 	}
 
 	return tiers, nil
@@ -353,10 +358,12 @@ func ResolvePricePointByPrice(tiers []TierEntry, price string) (string, error) {
 }
 
 // ValidatePriceSelectionFlags checks that --price-point, --tier, --price, and --free are mutually exclusive.
-// Returns a usage-style error if more than one is set.
+// Returns a usage-style error if more than one is set. Each failure carries a
+// structured diagnostic so callers can classify it without re-deriving which
+// rule was violated; the rendered messages are unchanged.
 func ValidatePriceSelectionFlags(pricePoint string, tier int, price string, free ...bool) error {
 	if tier < 0 {
-		return fmt.Errorf("--tier must be a positive integer")
+		return WithDiagnostic(fmt.Errorf("--tier must be a positive integer"), DiagnosticInvalidInput, "--tier")
 	}
 
 	supportsFree := len(free) > 0
@@ -377,10 +384,10 @@ func ValidatePriceSelectionFlags(pricePoint string, tier int, price string, free
 		count++
 	}
 	if count == 0 {
-		return fmt.Errorf("%s", requiredMessage)
+		return WithDiagnostic(fmt.Errorf("%s", requiredMessage), DiagnosticRequiredInputMissing, "")
 	}
 	if count > 1 {
-		return fmt.Errorf("%s", mutuallyExclusiveMessage)
+		return WithDiagnostic(fmt.Errorf("%s", mutuallyExclusiveMessage), DiagnosticConflictingInput, "")
 	}
 	return nil
 }

@@ -99,8 +99,8 @@ func TestAppTagsListOutputAndQueryOptions(t *testing.T) {
 		}
 	})
 
-	if stderr != "" {
-		t.Fatalf("expected empty stderr, got %q", stderr)
+	if stderr != "Warning: App-tag territories are deprecated in API 4.5; remove territory selections and lookups. Requests are still forwarded for compatibility.\n" {
+		t.Fatalf("expected one deprecation warning, got %q", stderr)
 	}
 
 	var out struct {
@@ -279,7 +279,7 @@ func TestAppTagsListOutputErrors(t *testing.T) {
 		{
 			name:    "unsupported output",
 			args:    []string{"app-tags", "list", "--app", "app-1", "--output", "yaml"},
-			wantErr: "unsupported format: yaml",
+			wantErr: `(got "yaml")`,
 		},
 		{
 			name:    "pretty with markdown",
@@ -301,7 +301,7 @@ func TestAppTagsListOutputErrors(t *testing.T) {
 				runErr = root.Run(context.Background())
 			})
 
-			if !errors.Is(runErr, flag.ErrHelp) {
+			if !isUsageClassError(runErr) {
 				t.Fatalf("expected help error, got %v", runErr)
 			}
 			if stdout != "" {
@@ -332,14 +332,17 @@ func TestAppTagsListRejectsInvalidNextURL(t *testing.T) {
 	if runErr == nil {
 		t.Fatal("expected error, got nil")
 	}
+	if !errors.Is(runErr, flag.ErrHelp) {
+		t.Fatalf("expected ErrHelp, got %v", runErr)
+	}
 	if !strings.Contains(runErr.Error(), "app-tags list: --next must be an App Store Connect URL") {
 		t.Fatalf("expected invalid --next error, got %v", runErr)
 	}
 	if stdout != "" {
 		t.Fatalf("expected empty stdout, got %q", stdout)
 	}
-	if stderr != "" {
-		t.Fatalf("expected empty stderr, got %q", stderr)
+	if !strings.Contains(stderr, "app-tags list: --next must be an App Store Connect URL") {
+		t.Fatalf("expected invalid --next diagnostic in stderr, got %q", stderr)
 	}
 }
 
@@ -436,8 +439,8 @@ func TestAppTagsListPaginateWithFiltersUsesQueryOptions(t *testing.T) {
 		}
 	})
 
-	if stderr != "" {
-		t.Fatalf("expected empty stderr, got %q", stderr)
+	if stderr != "Warning: App-tag territories are deprecated in API 4.5; remove territory selections and lookups. Requests are still forwarded for compatibility.\n" {
+		t.Fatalf("expected one deprecation warning, got %q", stderr)
 	}
 	if !strings.Contains(stdout, `"id":"tag-page-1"`) || !strings.Contains(stdout, `"id":"tag-page-2"`) {
 		t.Fatalf("expected both paginated tags in output, got %q", stdout)
@@ -455,6 +458,7 @@ func TestAppTagsListValidationErrors(t *testing.T) {
 			name:    "invalid fields",
 			args:    []string{"app-tags", "list", "--app", "app-1", "--paginate", "--fields", "name,bad"},
 			wantErr: "app-tags list: --fields must be one of:",
+			isHelp:  true,
 		},
 		{
 			name:    "territory fields require include",

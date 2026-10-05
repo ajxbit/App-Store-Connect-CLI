@@ -146,7 +146,7 @@ func StatusCommand(rt *runtime.Runtime, runF func(context.Context, *StatusOption
 
 - [cmd/root.go](../../cmd/root.go)
 - [internal/cli/shared/shared.go](../../internal/cli/shared/shared.go)
-- [internal/cli/shared/compat_aliases.go](../../internal/cli/shared/compat_aliases.go)
+- [internal/cli/shared/visible_usage.go](../../internal/cli/shared/visible_usage.go)
 - [internal/cli/registry/registry.go](../../internal/cli/registry/registry.go)
 
 ### CLI packages with the most non-test weight
@@ -229,7 +229,7 @@ Owner outcome:
 Primary targets:
 
 - [internal/cli/registry/registry.go](../../internal/cli/registry/registry.go)
-- [internal/cli/shared/compat_aliases.go](../../internal/cli/shared/compat_aliases.go)
+- [internal/cli/shared/visible_usage.go](../../internal/cli/shared/visible_usage.go)
 - command-specific deprecated wrappers
 
 ### Workstream E: Testing and Guardrails
@@ -258,7 +258,7 @@ Goals:
 - define the runtime package shape
 - inventory compatibility aliases and long-lived shims
 - freeze non-essential top-level command expansion during Q2
-- decide which experimental surfaces are explicitly deferred
+- decide which surfaces are explicitly deferred
 - write down the greenfield target so migrations are judged against an end-state, not just against current code
 
 Deliverables:

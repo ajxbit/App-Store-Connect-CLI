@@ -54,12 +54,12 @@ Examples:
 func BuildsAppViewCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("app view", flag.ExitOnError)
 
-	selectors := bindBuildSelectorFlags(fs, buildSelectorFlagOptions{includeLegacyID: true})
+	selectors := bindBuildSelectorFlags(fs, buildSelectorFlagOptions{})
 	output := shared.BindOutputFlags(fs)
 
 	return &ffcli.Command{
 		Name:       "view",
-		ShortUsage: "asc builds app view (--build-id BUILD_ID | --app APP --latest | --app APP --build-number BUILD_NUMBER [--version VERSION] [--platform PLATFORM])",
+		ShortUsage: "asc builds app view (--build-id BUILD_ID | --app APP --latest | --app APP --build-number BUILD_NUMBER --platform PLATFORM [--version VERSION])",
 		ShortHelp:  "View the app for a build.",
 		LongHelp: `View the app for a build.
 
@@ -69,9 +69,6 @@ Examples:
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
-			if err := selectors.applyLegacyAliases(); err != nil {
-				return err
-			}
 			if err := selectors.validate(); err != nil {
 				return err
 			}
@@ -128,12 +125,12 @@ Examples:
 func BuildsPreReleaseVersionViewCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("pre-release-version view", flag.ExitOnError)
 
-	selectors := bindBuildSelectorFlags(fs, buildSelectorFlagOptions{includeLegacyID: true})
+	selectors := bindBuildSelectorFlags(fs, buildSelectorFlagOptions{})
 	output := shared.BindOutputFlags(fs)
 
 	return &ffcli.Command{
 		Name:       "view",
-		ShortUsage: "asc builds pre-release-version view (--build-id BUILD_ID | --app APP --latest | --app APP --build-number BUILD_NUMBER [--version VERSION] [--platform PLATFORM])",
+		ShortUsage: "asc builds pre-release-version view (--build-id BUILD_ID | --app APP --latest | --app APP --build-number BUILD_NUMBER --platform PLATFORM [--version VERSION])",
 		ShortHelp:  "View the pre-release version for a build.",
 		LongHelp: `View the pre-release version for a build.
 
@@ -143,9 +140,6 @@ Examples:
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
-			if err := selectors.applyLegacyAliases(); err != nil {
-				return err
-			}
 			if err := selectors.validate(); err != nil {
 				return err
 			}
@@ -201,7 +195,7 @@ Examples:
 func BuildsIconsListCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("icons list", flag.ExitOnError)
 
-	selectors := bindBuildSelectorFlags(fs, buildSelectorFlagOptions{includeLegacyID: true})
+	selectors := bindBuildSelectorFlags(fs, buildSelectorFlagOptions{})
 	limit := fs.Int("limit", 0, "Maximum results per page (1-200)")
 	next := fs.String("next", "", "Fetch next page using a links.next URL")
 	paginate := fs.Bool("paginate", false, "Automatically fetch all pages (aggregate results)")
@@ -220,14 +214,11 @@ Examples:
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
-			if err := selectors.applyLegacyAliases(); err != nil {
-				return err
-			}
 			if *limit != 0 && (*limit < 1 || *limit > 200) {
-				return fmt.Errorf("builds icons list: --limit must be between 1 and 200")
+				return shared.UsageError("builds icons list: --limit must be between 1 and 200")
 			}
 			if err := shared.ValidateNextURL(*next); err != nil {
-				return fmt.Errorf("builds icons list: %w", err)
+				return shared.UsageErrorf("builds icons list: %v", err)
 			}
 
 			nextValue := strings.TrimSpace(*next)
@@ -235,6 +226,8 @@ Examples:
 				if err := selectors.validate(); err != nil {
 					return err
 				}
+			} else if err := selectors.validateNextPageSelectorFlags(); err != nil {
+				return fmt.Errorf("builds icons list: %w", err)
 			}
 
 			client, err := shared.GetASCClient()
@@ -260,7 +253,8 @@ Examples:
 
 			if *paginate {
 				paginateOpts := append(opts, asc.WithBuildIconsLimit(200))
-				resp, err := shared.PaginateWithSpinner(requestCtx,
+				resp, err := shared.PaginateWithSpinner(
+					requestCtx,
 					func(ctx context.Context) (asc.PaginatedResponse, error) {
 						return client.GetBuildIcons(ctx, buildID, paginateOpts...)
 					},
@@ -313,12 +307,12 @@ Examples:
 func BuildsBetaAppReviewSubmissionViewCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("beta-app-review-submission view", flag.ExitOnError)
 
-	selectors := bindBuildSelectorFlags(fs, buildSelectorFlagOptions{includeLegacyID: true})
+	selectors := bindBuildSelectorFlags(fs, buildSelectorFlagOptions{})
 	output := shared.BindOutputFlags(fs)
 
 	return &ffcli.Command{
 		Name:       "view",
-		ShortUsage: "asc builds beta-app-review-submission view (--build-id BUILD_ID | --app APP --latest | --app APP --build-number BUILD_NUMBER [--version VERSION] [--platform PLATFORM])",
+		ShortUsage: "asc builds beta-app-review-submission view (--build-id BUILD_ID | --app APP --latest | --app APP --build-number BUILD_NUMBER --platform PLATFORM [--version VERSION])",
 		ShortHelp:  "View beta app review submission for a build.",
 		LongHelp: `View beta app review submission for a build.
 
@@ -328,9 +322,6 @@ Examples:
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
-			if err := selectors.applyLegacyAliases(); err != nil {
-				return err
-			}
 			if err := selectors.validate(); err != nil {
 				return err
 			}
@@ -391,12 +382,12 @@ Examples:
 func BuildsBuildBetaDetailViewCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("build-beta-detail view", flag.ExitOnError)
 
-	selectors := bindBuildSelectorFlags(fs, buildSelectorFlagOptions{includeLegacyID: true})
+	selectors := bindBuildSelectorFlags(fs, buildSelectorFlagOptions{})
 	output := shared.BindOutputFlags(fs)
 
 	return &ffcli.Command{
 		Name:       "view",
-		ShortUsage: "asc builds build-beta-detail view (--build-id BUILD_ID | --app APP --latest | --app APP --build-number BUILD_NUMBER [--version VERSION] [--platform PLATFORM])",
+		ShortUsage: "asc builds build-beta-detail view (--build-id BUILD_ID | --app APP --latest | --app APP --build-number BUILD_NUMBER --platform PLATFORM [--version VERSION])",
 		ShortHelp:  "View build beta detail for a build.",
 		LongHelp: `View build beta detail for a build.
 
@@ -406,9 +397,6 @@ Examples:
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
-			if err := selectors.applyLegacyAliases(); err != nil {
-				return err
-			}
 			if err := selectors.validate(); err != nil {
 				return err
 			}

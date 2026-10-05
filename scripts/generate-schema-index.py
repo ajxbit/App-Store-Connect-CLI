@@ -66,6 +66,56 @@ def extract_request_attributes(schemas: dict, ref: str):
     return fields if fields else None
 
 
+def extract_request_relationships(schemas: dict, ref: str):
+    resolved = resolve_ref(schemas, ref) if ref else None
+    if not resolved:
+        return None
+
+    data = resolved.get("properties", {}).get("data", {})
+    if "$ref" in data:
+        data = resolve_ref(schemas, data["$ref"]) or data
+
+    relationships = data.get("properties", {}).get("relationships", {})
+    if "$ref" in relationships:
+        relationships = resolve_ref(schemas, relationships["$ref"]) or relationships
+
+    required = set(relationships.get("required", []))
+    result = {}
+    for name, relationship in relationships.get("properties", {}).items():
+        if "$ref" in relationship:
+            relationship = resolve_ref(schemas, relationship["$ref"]) or relationship
+
+        linkage = relationship.get("properties", {}).get("data", {})
+        if "$ref" in linkage:
+            linkage = resolve_ref(schemas, linkage["$ref"]) or linkage
+
+        cardinality = "many" if linkage.get("type") == "array" else "one"
+        resource_identifier = (
+            linkage.get("items", {}) if cardinality == "many" else linkage
+        )
+        if "$ref" in resource_identifier:
+            resource_identifier = (
+                resolve_ref(schemas, resource_identifier["$ref"])
+                or resource_identifier
+            )
+
+        resource_types = (
+            resource_identifier.get("properties", {})
+            .get("type", {})
+            .get("enum", [])
+        )
+        if not resource_types:
+            continue
+
+        result[name] = {
+            "resourceType": resource_types[0],
+            "cardinality": cardinality,
+            "required": name in required,
+        }
+
+    return result if result else None
+
+
 def compact_parameter(parameter_components: dict, parameter: dict):
     p = parameter
     if "$ref" in p:
@@ -110,6 +160,30 @@ def compact_parameters(
     return compact
 
 
+def get_operation_action(schemas: dict, operation_id: str, response_ref: str):
+    response = resolve_ref(schemas, response_ref) if response_ref else None
+    if response:
+        data = response.get("properties", {}).get("data", {})
+        if "$ref" in data:
+            data = resolve_ref(schemas, data["$ref"])
+        if data:
+            if data.get("type") == "array":
+                return "list"
+            return "get"
+
+    suffix = operation_id.rsplit("_", 1)[-1]
+    if suffix in {
+        "getInstance",
+        "getToOneRelated",
+        "getToOneRelationship",
+        "getMetrics",
+    }:
+        return "get"
+    if suffix in {"getCollection", "getToManyRelated", "getToManyRelationship"}:
+        return "list"
+    return None
+
+
 def build_index(spec: dict) -> list[dict]:
     schemas = spec.get("components", {}).get("schemas", {})
     parameter_components = spec.get("components", {}).get("parameters", {})
@@ -141,6 +215,9 @@ def build_index(spec: dict) -> list[dict]:
                 attrs = extract_request_attributes(schemas, ref)
                 if attrs:
                     entry["requestAttributes"] = attrs
+                relationships = extract_request_relationships(schemas, ref)
+                if relationships:
+                    entry["requestRelationships"] = relationships
 
             for code in ("200", "201"):
                 resp = details.get("responses", {}).get(code, {})
@@ -152,6 +229,15 @@ def build_index(spec: dict) -> list[dict]:
                 if rs and "$ref" in rs:
                     entry["responseSchema"] = rs["$ref"].split("/")[-1]
                     break
+
+            if method == "get":
+                get_action = get_operation_action(
+                    schemas,
+                    details.get("operationId", ""),
+                    rs.get("$ref", "") if rs else "",
+                )
+                if get_action:
+                    entry["getAction"] = get_action
 
             index.append(entry)
 

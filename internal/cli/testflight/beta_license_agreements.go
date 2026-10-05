@@ -25,8 +25,8 @@ func BetaLicenseAgreementsCommand() *ffcli.Command {
 
 Examples:
   asc testflight beta-license-agreements list --app "APP_ID"
-  asc testflight beta-license-agreements get --id "AGREEMENT_ID"
-  asc testflight beta-license-agreements get --app "APP_ID"
+  asc testflight beta-license-agreements view --id "AGREEMENT_ID"
+  asc testflight beta-license-agreements view --app "APP_ID"
   asc testflight beta-license-agreements update --id "AGREEMENT_ID" --agreement-text "Updated terms"`,
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
@@ -69,10 +69,14 @@ Examples:
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
 			if *limit != 0 && (*limit < 1 || *limit > 200) {
-				return fmt.Errorf("beta-license-agreements list: --limit must be between 1 and 200")
+				return shared.WithDiagnostic(
+					shared.UsageErrorCtx(ctx, "beta-license-agreements list: --limit must be between 1 and 200"),
+					shared.DiagnosticInvalidInput,
+					"--limit",
+				)
 			}
 			if err := shared.ValidateNextURL(*next); err != nil {
-				return fmt.Errorf("beta-license-agreements list: %w", err)
+				return shared.UsageErrorfCtx(ctx, "beta-license-agreements list: %v", err)
 			}
 
 			client, err := shared.GetASCClient()
@@ -119,9 +123,9 @@ Examples:
 
 // BetaLicenseAgreementsGetCommand returns the beta license agreements get subcommand.
 func BetaLicenseAgreementsGetCommand() *ffcli.Command {
-	fs := flag.NewFlagSet("get", flag.ExitOnError)
+	fs := flag.NewFlagSet("view", flag.ExitOnError)
 
-	id := fs.String("id", "", "Beta license agreement ID")
+	id := shared.BindResourceIDFlag(fs, "id", "betaLicenseAgreements", "Beta license agreement ID")
 	appID := fs.String("app", "", "App Store Connect app ID (or ASC_APP_ID env)")
 	fields := fs.String("fields", "", "Fields to include (betaLicenseAgreements), comma-separated")
 	appFields := fs.String("app-fields", "", "App fields to include, comma-separated")
@@ -129,14 +133,14 @@ func BetaLicenseAgreementsGetCommand() *ffcli.Command {
 	output := shared.BindOutputFlags(fs)
 
 	return &ffcli.Command{
-		Name:       "get",
-		ShortUsage: "asc testflight beta-license-agreements get --id \"AGREEMENT_ID\" | --app \"APP_ID\"",
-		ShortHelp:  "Get a beta license agreement by ID or app.",
-		LongHelp: `Get a beta license agreement by ID or app.
+		Name:       "view",
+		ShortUsage: "asc testflight beta-license-agreements view --id \"AGREEMENT_ID\" | --app \"APP_ID\"",
+		ShortHelp:  "View a beta license agreement by ID or app.",
+		LongHelp: `View a beta license agreement by ID or app.
 
 Examples:
-  asc testflight beta-license-agreements get --id "AGREEMENT_ID"
-  asc testflight beta-license-agreements get --app "APP_ID"`,
+  asc testflight beta-license-agreements view --id "AGREEMENT_ID"
+  asc testflight beta-license-agreements view --app "APP_ID"`,
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
@@ -147,20 +151,20 @@ Examples:
 			}
 			if idValue == "" && appValue == "" {
 				fmt.Fprintln(os.Stderr, "Error: --id or --app is required (or set ASC_APP_ID)")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("")
 			}
 			if idValue != "" && strings.TrimSpace(*appID) != "" {
 				fmt.Fprintln(os.Stderr, "Error: --id and --app are mutually exclusive")
-				return flag.ErrHelp
+				return shared.WithDiagnostic(flag.ErrHelp, shared.DiagnosticConflictingInput, "")
 			}
 			if appValue != "" && (strings.TrimSpace(*appFields) != "" || strings.TrimSpace(*include) != "") {
 				fmt.Fprintln(os.Stderr, "Error: --app-fields and --include are only valid with --id")
-				return flag.ErrHelp
+				return shared.WithDiagnostic(flag.ErrHelp, shared.DiagnosticConflictingInput, "")
 			}
 
 			client, err := shared.GetASCClient()
 			if err != nil {
-				return fmt.Errorf("beta-license-agreements get: %w", err)
+				return fmt.Errorf("beta-license-agreements view: %w", err)
 			}
 
 			requestCtx, cancel := shared.ContextWithTimeout(ctx)
@@ -169,7 +173,7 @@ Examples:
 			if appValue != "" {
 				resp, err := client.GetBetaLicenseAgreementForApp(requestCtx, appValue, shared.SplitCSV(*fields))
 				if err != nil {
-					return fmt.Errorf("beta-license-agreements get: failed to fetch: %w", err)
+					return fmt.Errorf("beta-license-agreements view: failed to fetch: %w", err)
 				}
 				return shared.PrintOutput(resp, *output.Output, *output.Pretty)
 			}
@@ -181,7 +185,7 @@ Examples:
 			}
 			resp, err := client.GetBetaLicenseAgreement(requestCtx, idValue, opts...)
 			if err != nil {
-				return fmt.Errorf("beta-license-agreements get: failed to fetch: %w", err)
+				return fmt.Errorf("beta-license-agreements view: failed to fetch: %w", err)
 			}
 
 			return shared.PrintOutput(resp, *output.Output, *output.Pretty)
@@ -193,7 +197,7 @@ Examples:
 func BetaLicenseAgreementsUpdateCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("update", flag.ExitOnError)
 
-	id := fs.String("id", "", "Beta license agreement ID")
+	id := shared.BindResourceIDFlag(fs, "id", "betaLicenseAgreements", "Beta license agreement ID")
 	agreementText := fs.String("agreement-text", "", "Updated agreement text")
 	output := shared.BindOutputFlags(fs)
 
@@ -211,12 +215,12 @@ Examples:
 			idValue := strings.TrimSpace(*id)
 			if idValue == "" {
 				fmt.Fprintln(os.Stderr, "Error: --id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--id")
 			}
 			textValue := strings.TrimSpace(*agreementText)
 			if textValue == "" {
 				fmt.Fprintln(os.Stderr, "Error: --agreement-text is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--agreement-text")
 			}
 
 			client, err := shared.GetASCClient()

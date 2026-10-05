@@ -13,19 +13,27 @@ import (
 type SalesReportType string
 
 const (
-	SalesReportTypeSales             SalesReportType = "SALES"
-	SalesReportTypePreOrder          SalesReportType = "PRE_ORDER"
-	SalesReportTypeNewsstand         SalesReportType = "NEWSSTAND"
-	SalesReportTypeSubscription      SalesReportType = "SUBSCRIPTION"
-	SalesReportTypeSubscriptionEvent SalesReportType = "SUBSCRIPTION_EVENT"
+	SalesReportTypeSales                           SalesReportType = "SALES"
+	SalesReportTypePreOrder                        SalesReportType = "PRE_ORDER"
+	SalesReportTypeNewsstand                       SalesReportType = "NEWSSTAND"
+	SalesReportTypeSubscription                    SalesReportType = "SUBSCRIPTION"
+	SalesReportTypeSubscriptionEvent               SalesReportType = "SUBSCRIPTION_EVENT"
+	SalesReportTypeSubscriber                      SalesReportType = "SUBSCRIBER"
+	SalesReportTypeSubscriptionOfferCodeRedemption SalesReportType = "SUBSCRIPTION_OFFER_CODE_REDEMPTION"
+	SalesReportTypeInstalls                        SalesReportType = "INSTALLS"
+	SalesReportTypeFirstAnnual                     SalesReportType = "FIRST_ANNUAL"
+	SalesReportTypeWinBackEligibility              SalesReportType = "WIN_BACK_ELIGIBILITY"
 )
 
 // SalesReportSubType represents the report detail level.
 type SalesReportSubType string
 
 const (
-	SalesReportSubTypeSummary  SalesReportSubType = "SUMMARY"
-	SalesReportSubTypeDetailed SalesReportSubType = "DETAILED"
+	SalesReportSubTypeSummary            SalesReportSubType = "SUMMARY"
+	SalesReportSubTypeDetailed           SalesReportSubType = "DETAILED"
+	SalesReportSubTypeSummaryInstallType SalesReportSubType = "SUMMARY_INSTALL_TYPE"
+	SalesReportSubTypeSummaryTerritory   SalesReportSubType = "SUMMARY_TERRITORY"
+	SalesReportSubTypeSummaryChannel     SalesReportSubType = "SUMMARY_CHANNEL"
 )
 
 // SalesReportFrequency represents the reporting frequency.
@@ -44,7 +52,9 @@ type SalesReportVersion string
 const (
 	SalesReportVersion1_0 SalesReportVersion = "1_0"
 	SalesReportVersion1_1 SalesReportVersion = "1_1"
+	SalesReportVersion1_2 SalesReportVersion = "1_2"
 	SalesReportVersion1_3 SalesReportVersion = "1_3"
+	SalesReportVersion1_4 SalesReportVersion = "1_4"
 )
 
 // AnalyticsAccessType represents analytics report access types.
@@ -53,15 +63,6 @@ type AnalyticsAccessType string
 const (
 	AnalyticsAccessTypeOngoing         AnalyticsAccessType = "ONGOING"
 	AnalyticsAccessTypeOneTimeSnapshot AnalyticsAccessType = "ONE_TIME_SNAPSHOT"
-)
-
-// AnalyticsReportRequestState represents analytics request states.
-type AnalyticsReportRequestState string
-
-const (
-	AnalyticsReportRequestStateProcessing AnalyticsReportRequestState = "PROCESSING"
-	AnalyticsReportRequestStateCompleted  AnalyticsReportRequestState = "COMPLETED"
-	AnalyticsReportRequestStateFailed     AnalyticsReportRequestState = "FAILED"
 )
 
 // SalesReportParams describes sales report query parameters.
@@ -82,10 +83,8 @@ type ReportDownload struct {
 
 // AnalyticsReportRequestAttributes describes analytics report request data.
 type AnalyticsReportRequestAttributes struct {
-	AccessType             AnalyticsAccessType         `json:"accessType,omitempty"`
-	State                  AnalyticsReportRequestState `json:"state,omitempty"`
-	CreatedDate            string                      `json:"createdDate,omitempty"`
-	StoppedDueToInactivity *bool                       `json:"stoppedDueToInactivity,omitempty"`
+	AccessType             AnalyticsAccessType `json:"accessType,omitempty"`
+	StoppedDueToInactivity *bool               `json:"stoppedDueToInactivity,omitempty"`
 }
 
 // AnalyticsReportRequestRelationships describes request relationships.
@@ -200,7 +199,7 @@ type AnalyticsReportRequestReportsLinkagesResponse = LinkagesResponse
 
 type analyticsReportRequestsQuery struct {
 	listQuery
-	state string
+	accessType AnalyticsAccessType
 }
 
 type analyticsReportsQuery struct {
@@ -210,6 +209,8 @@ type analyticsReportsQuery struct {
 
 type analyticsReportInstancesQuery struct {
 	listQuery
+	granularities   []string
+	processingDates []string
 }
 
 type analyticsReportSegmentsQuery struct {
@@ -246,10 +247,10 @@ func WithAnalyticsReportRequestsNextURL(next string) AnalyticsReportRequestsOpti
 	}
 }
 
-// WithAnalyticsReportRequestsState filters requests by state.
-func WithAnalyticsReportRequestsState(state string) AnalyticsReportRequestsOption {
+// WithAnalyticsReportRequestsAccessType filters requests by access type.
+func WithAnalyticsReportRequestsAccessType(accessType AnalyticsAccessType) AnalyticsReportRequestsOption {
 	return func(q *analyticsReportRequestsQuery) {
-		q.state = strings.TrimSpace(state)
+		q.accessType = AnalyticsAccessType(strings.TrimSpace(string(accessType)))
 	}
 }
 
@@ -286,6 +287,20 @@ func WithAnalyticsReportInstancesNextURL(next string) AnalyticsReportInstancesOp
 		if strings.TrimSpace(next) != "" {
 			q.nextURL = strings.TrimSpace(next)
 		}
+	}
+}
+
+// WithAnalyticsReportInstancesGranularities filters instances by one or more granularities.
+func WithAnalyticsReportInstancesGranularities(granularities []string) AnalyticsReportInstancesOption {
+	return func(q *analyticsReportInstancesQuery) {
+		q.granularities = normalizeUniqueList(normalizeUpperList(granularities))
+	}
+}
+
+// WithAnalyticsReportInstancesProcessingDates filters instances by one or more processing dates.
+func WithAnalyticsReportInstancesProcessingDates(dates []string) AnalyticsReportInstancesOption {
+	return func(q *analyticsReportInstancesQuery) {
+		q.processingDates = normalizeUniqueList(dates)
 	}
 }
 
@@ -332,8 +347,8 @@ func buildSalesReportQuery(params SalesReportParams) string {
 
 func buildAnalyticsReportRequestsQuery(query *analyticsReportRequestsQuery) string {
 	values := url.Values{}
-	if strings.TrimSpace(query.state) != "" {
-		values.Set("filter[state]", strings.TrimSpace(query.state))
+	if strings.TrimSpace(string(query.accessType)) != "" {
+		values.Set("filter[accessType]", strings.TrimSpace(string(query.accessType)))
 	}
 	addLimit(values, query.limit)
 	return values.Encode()
@@ -350,6 +365,8 @@ func buildAnalyticsReportsQuery(query *analyticsReportsQuery) string {
 
 func buildAnalyticsReportInstancesQuery(query *analyticsReportInstancesQuery) string {
 	values := url.Values{}
+	addCSV(values, "filter[granularity]", query.granularities)
+	addCSV(values, "filter[processingDate]", query.processingDates)
 	addLimit(values, query.limit)
 	return values.Encode()
 }
@@ -413,7 +430,6 @@ func (c *Client) GetAnalyticsReportRequests(ctx context.Context, appID string, o
 	for _, opt := range opts {
 		opt(query)
 	}
-
 	path := "/v1/analyticsReportRequests"
 	if strings.TrimSpace(appID) != "" {
 		path = fmt.Sprintf("/v1/apps/%s/analyticsReportRequests", strings.TrimSpace(appID))
@@ -442,7 +458,10 @@ func (c *Client) GetAnalyticsReportRequests(ctx context.Context, appID string, o
 
 // GetAnalyticsReportRequest retrieves a specific analytics report request by ID.
 func (c *Client) GetAnalyticsReportRequest(ctx context.Context, requestID string) (*AnalyticsReportRequestResponse, error) {
-	path := fmt.Sprintf("/v1/analyticsReportRequests/%s", requestID)
+	path, err := resourcePath("/v1/analyticsReportRequests/%s", requestID)
+	if err != nil {
+		return nil, fmt.Errorf("analytics report request: %w", err)
+	}
 	data, err := c.do(ctx, "GET", path, nil)
 	if err != nil {
 		return nil, err
@@ -457,14 +476,20 @@ func (c *Client) GetAnalyticsReportRequest(ctx context.Context, requestID string
 
 // DeleteAnalyticsReportRequest deletes an analytics report request by ID.
 func (c *Client) DeleteAnalyticsReportRequest(ctx context.Context, requestID string) error {
-	path := fmt.Sprintf("/v1/analyticsReportRequests/%s", strings.TrimSpace(requestID))
-	_, err := c.do(ctx, "DELETE", path, nil)
+	path, err := resourcePath("/v1/analyticsReportRequests/%s", requestID)
+	if err != nil {
+		return fmt.Errorf("analytics report request: %w", err)
+	}
+	_, err = c.do(ctx, "DELETE", path, nil)
 	return err
 }
 
 // GetAnalyticsReport retrieves a specific analytics report by ID.
 func (c *Client) GetAnalyticsReport(ctx context.Context, reportID string) (*AnalyticsReportResponse, error) {
-	path := fmt.Sprintf("/v1/analyticsReports/%s", strings.TrimSpace(reportID))
+	path, err := resourcePath("/v1/analyticsReports/%s", reportID)
+	if err != nil {
+		return nil, fmt.Errorf("analytics report: %w", err)
+	}
 	data, err := c.do(ctx, "GET", path, nil)
 	if err != nil {
 		return nil, err
@@ -484,15 +509,22 @@ func (c *Client) GetAnalyticsReports(ctx context.Context, requestID string, opts
 		opt(query)
 	}
 
-	path := fmt.Sprintf("/v1/analyticsReportRequests/%s/reports", strings.TrimSpace(requestID))
+	var path string
 	if query.nextURL != "" {
 		// Validate nextURL to prevent credential exfiltration
 		if err := validateNextURL(query.nextURL); err != nil {
 			return nil, fmt.Errorf("analyticsReports: %w", err)
 		}
 		path = query.nextURL
-	} else if queryString := buildAnalyticsReportsQuery(query); queryString != "" {
-		path += "?" + queryString
+	} else {
+		var err error
+		path, err = resourcePath("/v1/analyticsReportRequests/%s/reports", requestID)
+		if err != nil {
+			return nil, fmt.Errorf("analytics reports: %w", err)
+		}
+		if queryString := buildAnalyticsReportsQuery(query); queryString != "" {
+			path += "?" + queryString
+		}
 	}
 
 	data, err := c.do(ctx, "GET", path, nil)
@@ -542,15 +574,22 @@ func (c *Client) GetAnalyticsReportInstances(ctx context.Context, reportID strin
 		opt(query)
 	}
 
-	path := fmt.Sprintf("/v1/analyticsReports/%s/instances", strings.TrimSpace(reportID))
+	var path string
 	if query.nextURL != "" {
 		// Validate nextURL to prevent credential exfiltration
 		if err := validateNextURL(query.nextURL); err != nil {
 			return nil, fmt.Errorf("analyticsReportInstances: %w", err)
 		}
 		path = query.nextURL
-	} else if queryString := buildAnalyticsReportInstancesQuery(query); queryString != "" {
-		path += "?" + queryString
+	} else {
+		var err error
+		path, err = resourcePath("/v1/analyticsReports/%s/instances", reportID)
+		if err != nil {
+			return nil, fmt.Errorf("analytics report instances: %w", err)
+		}
+		if queryString := buildAnalyticsReportInstancesQuery(query); queryString != "" {
+			path += "?" + queryString
+		}
 	}
 
 	data, err := c.do(ctx, "GET", path, nil)
@@ -567,7 +606,10 @@ func (c *Client) GetAnalyticsReportInstances(ctx context.Context, reportID strin
 
 // GetAnalyticsReportInstance retrieves a specific report instance by ID.
 func (c *Client) GetAnalyticsReportInstance(ctx context.Context, instanceID string) (*AnalyticsReportInstanceResponse, error) {
-	path := fmt.Sprintf("/v1/analyticsReportInstances/%s", strings.TrimSpace(instanceID))
+	path, err := resourcePath("/v1/analyticsReportInstances/%s", instanceID)
+	if err != nil {
+		return nil, fmt.Errorf("analytics report instance: %w", err)
+	}
 	data, err := c.do(ctx, "GET", path, nil)
 	if err != nil {
 		return nil, err
@@ -582,6 +624,13 @@ func (c *Client) GetAnalyticsReportInstance(ctx context.Context, instanceID stri
 
 // GetAnalyticsReportInstanceSegmentsRelationships retrieves segment linkages for a report instance.
 func (c *Client) GetAnalyticsReportInstanceSegmentsRelationships(ctx context.Context, instanceID string, opts ...LinkagesOption) (*AnalyticsReportInstanceSegmentsLinkagesResponse, error) {
+	if strings.TrimSpace(instanceID) != "" {
+		var err error
+		instanceID, err = ValidateResourcePathSegment(instanceID)
+		if err != nil {
+			return nil, fmt.Errorf("analytics report instance segments relationship: %w", err)
+		}
+	}
 	return getTypedResourceLinkages[AnalyticsReportInstanceSegmentsLinkagesResponse](
 		c,
 		ctx,
@@ -601,15 +650,22 @@ func (c *Client) GetAnalyticsReportSegments(ctx context.Context, instanceID stri
 		opt(query)
 	}
 
-	path := fmt.Sprintf("/v1/analyticsReportInstances/%s/segments", strings.TrimSpace(instanceID))
+	var path string
 	if query.nextURL != "" {
 		// Validate nextURL to prevent credential exfiltration
 		if err := validateNextURL(query.nextURL); err != nil {
 			return nil, fmt.Errorf("analyticsReportSegments: %w", err)
 		}
 		path = query.nextURL
-	} else if queryString := buildAnalyticsReportSegmentsQuery(query); queryString != "" {
-		path += "?" + queryString
+	} else {
+		var err error
+		path, err = resourcePath("/v1/analyticsReportInstances/%s/segments", instanceID)
+		if err != nil {
+			return nil, fmt.Errorf("analytics report segments: %w", err)
+		}
+		if queryString := buildAnalyticsReportSegmentsQuery(query); queryString != "" {
+			path += "?" + queryString
+		}
 	}
 
 	data, err := c.do(ctx, "GET", path, nil)
@@ -626,7 +682,10 @@ func (c *Client) GetAnalyticsReportSegments(ctx context.Context, instanceID stri
 
 // GetAnalyticsReportSegment retrieves a specific report segment by ID.
 func (c *Client) GetAnalyticsReportSegment(ctx context.Context, segmentID string) (*AnalyticsReportSegmentResponse, error) {
-	path := fmt.Sprintf("/v1/analyticsReportSegments/%s", strings.TrimSpace(segmentID))
+	path, err := resourcePath("/v1/analyticsReportSegments/%s", segmentID)
+	if err != nil {
+		return nil, fmt.Errorf("analytics report segment: %w", err)
+	}
 	data, err := c.do(ctx, "GET", path, nil)
 	if err != nil {
 		return nil, err
@@ -646,7 +705,7 @@ func (c *Client) DownloadAnalyticsReport(ctx context.Context, downloadURL string
 		return nil, fmt.Errorf("analytics download: %w", err)
 	}
 
-	resp, err := c.doStreamNoAuth(ctx, "GET", downloadURL, "application/a-gzip")
+	resp, err := c.doStreamNoAuth(ctx, downloadURL, "application/a-gzip")
 	if err != nil {
 		return nil, err
 	}

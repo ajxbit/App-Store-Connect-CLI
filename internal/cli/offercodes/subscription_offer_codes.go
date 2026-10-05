@@ -70,7 +70,22 @@ var offerCodeCustomerEligibilityMap = map[string]asc.SubscriptionCustomerEligibi
 	string(asc.SubscriptionCustomerEligibilityExpired):  asc.SubscriptionCustomerEligibilityExpired,
 }
 
-func parseOfferCodePrices(value string) ([]asc.SubscriptionOfferCodePrice, error) {
+func parseOfferCodePrices(value string, mode asc.SubscriptionOfferMode) ([]asc.SubscriptionOfferCodePrice, error) {
+	if mode == asc.SubscriptionOfferModeFreeTrial {
+		if strings.Contains(value, ":") {
+			return nil, fmt.Errorf("--prices for FREE_TRIAL must use TERRITORY entries without price point IDs")
+		}
+		territoryIDs, err := shared.NormalizeASCTerritoryCSV(value)
+		if err != nil {
+			return nil, err
+		}
+		prices := make([]asc.SubscriptionOfferCodePrice, 0, len(territoryIDs))
+		for _, territoryID := range territoryIDs {
+			prices = append(prices, asc.SubscriptionOfferCodePrice{TerritoryID: territoryID})
+		}
+		return prices, nil
+	}
+
 	entries, err := shared.ParseASCTerritoryValueCSV(value)
 	if err != nil {
 		return nil, err
@@ -93,17 +108,18 @@ func parseOfferCodePrices(value string) ([]asc.SubscriptionOfferCodePrice, error
 // OfferCodesGetCommand returns the offer codes get subcommand.
 func OfferCodesGetCommand() *ffcli.Command {
 	return shared.BuildIDGetCommand(shared.IDGetCommandConfig{
-		FlagSetName: "get",
-		Name:        "get",
-		ShortUsage:  "asc offer-codes get --offer-code-id ID",
-		ShortHelp:   "Get a subscription offer code by ID.",
-		LongHelp: `Get a subscription offer code by ID.
+		FlagSetName: "view",
+		Name:        "view",
+		ShortUsage:  "asc offer-codes view --offer-code-id ID",
+		ShortHelp:   "View a subscription offer code by ID.",
+		LongHelp: `View a subscription offer code by ID.
 
 Examples:
-  asc offer-codes get --offer-code-id "OFFER_CODE_ID"`,
+  asc offer-codes view --offer-code-id "OFFER_CODE_ID"`,
 		IDFlag:      "offer-code-id",
 		IDUsage:     "Subscription offer code ID (required)",
-		ErrorPrefix: "offer-codes get",
+		IDType:      "subscriptionOfferCodes",
+		ErrorPrefix: "offer-codes view",
 		Fetch: func(ctx context.Context, client *asc.Client, id string) (any, error) {
 			return client.GetSubscriptionOfferCode(ctx, id)
 		},
@@ -114,7 +130,7 @@ Examples:
 func OfferCodesCreateCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("create", flag.ExitOnError)
 
-	subscriptionID := fs.String("subscription-id", "", "Subscription ID, product ID, or exact current name (required)")
+	subscriptionID := shared.BindResourceIDFlag(fs, "subscription-id", "subscriptions", "Subscription ID, product ID, or exact current name (required)")
 	appID := fs.String("app", "", "App Store Connect app ID (or ASC_APP_ID env; required when --subscription-id uses a product ID or name)")
 	name := fs.String("name", "", "Offer code name (required)")
 	customerEligibilities := fs.String("customer-eligibilities", "", "Customer eligibilities: "+strings.Join(offerCodeCustomerEligibilityValues, ", "))
@@ -124,8 +140,7 @@ func OfferCodesCreateCommand() *ffcli.Command {
 	var numberOfPeriods optionalInt
 	fs.Var(&numberOfPeriods, "number-of-periods", "Number of periods (required)")
 	autoRenewEnabled := fs.String("auto-renew-enabled", "", "Auto-renew enabled (true/false)")
-	prices := fs.String("prices", "", "Offer code prices: TERRITORY:PRICE_POINT_ID entries (required)")
-	priceIDs := fs.String("price-id", "", "Deprecated: use --prices")
+	prices := fs.String("prices", "", "Offer code prices (required): TERRITORY entries for FREE_TRIAL or TERRITORY:PRICE_POINT_ID entries for paid modes; territory accepts alpha-2, alpha-3, or exact English country name")
 	output := shared.BindOutputFlags(fs)
 
 	return &ffcli.Command{
@@ -135,6 +150,7 @@ func OfferCodesCreateCommand() *ffcli.Command {
 		LongHelp: `Create a subscription offer code.
 
 Examples:
+  asc offer-codes create --subscription-id "SUB_ID" --name "SPRING" --customer-eligibilities NEW --offer-eligibility STACK_WITH_INTRO_OFFERS --duration ONE_MONTH --offer-mode FREE_TRIAL --number-of-periods 1 --prices "USA"
   asc offer-codes create --subscription-id "SUB_ID" --name "SPRING" --customer-eligibilities NEW --offer-eligibility STACK_WITH_INTRO_OFFERS --duration ONE_MONTH --offer-mode PAY_AS_YOU_GO --number-of-periods 1 --prices "USA:PRICE_POINT_ID"`,
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
@@ -142,18 +158,18 @@ Examples:
 			subscription := strings.TrimSpace(*subscriptionID)
 			if subscription == "" {
 				fmt.Fprintln(os.Stderr, "Error: --subscription-id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--subscription-id")
 			}
 
 			trimmedName := strings.TrimSpace(*name)
 			if trimmedName == "" {
 				fmt.Fprintln(os.Stderr, "Error: --name is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--name")
 			}
 
 			if strings.TrimSpace(*customerEligibilities) == "" {
 				fmt.Fprintln(os.Stderr, "Error: --customer-eligibilities is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--customer-eligibilities")
 			}
 			customerEligibilityValues, err := normalizeOfferCodeCustomerEligibilities(*customerEligibilities)
 			if err != nil {
@@ -162,7 +178,7 @@ Examples:
 
 			if strings.TrimSpace(*offerEligibility) == "" {
 				fmt.Fprintln(os.Stderr, "Error: --offer-eligibility is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--offer-eligibility")
 			}
 			offerEligibilityValue, err := normalizeOfferCodeEligibility(*offerEligibility)
 			if err != nil {
@@ -171,7 +187,7 @@ Examples:
 
 			if strings.TrimSpace(*duration) == "" {
 				fmt.Fprintln(os.Stderr, "Error: --duration is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--duration")
 			}
 			durationValue, err := normalizeOfferCodeDuration(*duration)
 			if err != nil {
@@ -180,7 +196,7 @@ Examples:
 
 			if strings.TrimSpace(*offerMode) == "" {
 				fmt.Fprintln(os.Stderr, "Error: --offer-mode is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--offer-mode")
 			}
 			offerModeValue, err := normalizeOfferCodeMode(*offerMode)
 			if err != nil {
@@ -189,23 +205,21 @@ Examples:
 
 			if !numberOfPeriods.set {
 				fmt.Fprintln(os.Stderr, "Error: --number-of-periods is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--number-of-periods")
 			}
 			if numberOfPeriods.value <= 0 {
 				return fmt.Errorf("offer-codes create: --number-of-periods must be greater than 0")
 			}
 
 			pricesValue := strings.TrimSpace(*prices)
-			if pricesValue == "" {
-				pricesValue = strings.TrimSpace(*priceIDs)
-			}
-			priceEntries, err := parseOfferCodePrices(pricesValue)
+			priceEntries, err := parseOfferCodePrices(pricesValue, offerModeValue)
 			if err != nil {
-				return fmt.Errorf("offer-codes create: %w", err)
+				fmt.Fprintln(os.Stderr, "Error:", err.Error())
+				return flag.ErrHelp
 			}
 			if len(priceEntries) == 0 {
 				fmt.Fprintln(os.Stderr, "Error: --prices is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--prices")
 			}
 
 			autoRenewEnabledValue, err := shared.ParseOptionalBoolFlag("--auto-renew-enabled", *autoRenewEnabled)
@@ -265,6 +279,7 @@ Examples:
   asc offer-codes update --offer-code-id "OFFER_CODE_ID" --active true`,
 		IDFlag:      "offer-code-id",
 		IDUsage:     "Subscription offer code ID (required)",
+		IDType:      "subscriptionOfferCodes",
 		ErrorPrefix: "offer-codes update",
 		Update: func(ctx context.Context, client *asc.Client, id string, active *bool) (any, error) {
 			return client.UpdateSubscriptionOfferCode(ctx, id, asc.SubscriptionOfferCodeUpdateAttributes{Active: active})

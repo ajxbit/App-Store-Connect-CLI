@@ -13,14 +13,74 @@ import (
 
 // BuildAttributes describes a build resource.
 type BuildAttributes struct {
-	Version                 string `json:"version"`
-	UploadedDate            string `json:"uploadedDate"`
-	ExpirationDate          string `json:"expirationDate,omitempty"`
-	ProcessingState         string `json:"processingState,omitempty"`
-	MinOSVersion            string `json:"minOsVersion,omitempty"`
-	UsesNonExemptEncryption *bool  `json:"usesNonExemptEncryption,omitempty"`
-	Expired                 bool   `json:"expired,omitempty"`
+	Version                    string            `json:"version"`
+	UploadedDate               string            `json:"uploadedDate"`
+	ExpirationDate             string            `json:"expirationDate,omitempty"`
+	ProcessingState            string            `json:"processingState,omitempty"`
+	MinOSVersion               string            `json:"minOsVersion,omitempty"`
+	LSMinimumSystemVersion     string            `json:"lsMinimumSystemVersion,omitempty"`
+	ComputedMinMacOSVersion    string            `json:"computedMinMacOsVersion,omitempty"`
+	ComputedMinVisionOSVersion string            `json:"computedMinVisionOsVersion,omitempty"`
+	IconAssetToken             *ImageAsset       `json:"iconAssetToken,omitempty"`
+	BuildAudienceType          BuildAudienceType `json:"buildAudienceType,omitempty"`
+	UsesNonExemptEncryption    *bool             `json:"usesNonExemptEncryption,omitempty"`
+	Expired                    bool              `json:"-"`
+	expiredSet                 bool
 }
+
+// UnmarshalJSON records whether the API supplied expired so an explicit false
+// survives subsequent JSON output without changing the public bool field.
+func (a *BuildAttributes) UnmarshalJSON(data []byte) error {
+	type buildAttributesAlias BuildAttributes
+	a.Expired = false
+	a.expiredSet = false
+	aux := struct {
+		*buildAttributesAlias
+		Expired *bool `json:"expired"`
+	}{
+		buildAttributesAlias: (*buildAttributesAlias)(a),
+	}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	a.expiredSet = aux.Expired != nil
+	if aux.Expired != nil {
+		a.Expired = *aux.Expired
+	}
+	return nil
+}
+
+// MarshalJSON preserves the distinction between an absent expired attribute
+// and an explicit false value returned by App Store Connect.
+func (a BuildAttributes) MarshalJSON() ([]byte, error) {
+	type buildAttributesAlias BuildAttributes
+	var expired *bool
+	if a.expiredSet || a.Expired {
+		expired = &a.Expired
+	}
+	return json.Marshal(struct {
+		buildAttributesAlias
+		Expired *bool `json:"expired,omitempty"`
+	}{
+		buildAttributesAlias: buildAttributesAlias(a),
+		Expired:              expired,
+	})
+}
+
+// ExpiredValue reports the build expiry value and whether the API supplied it.
+// The presence result prevents callers from treating an omitted attribute as
+// an explicit false value.
+func (a BuildAttributes) ExpiredValue() (bool, bool) {
+	return a.Expired, a.expiredSet || a.Expired
+}
+
+// BuildAudienceType represents who can receive a build.
+type BuildAudienceType string
+
+const (
+	BuildAudienceTypeInternalOnly     BuildAudienceType = "INTERNAL_ONLY"
+	BuildAudienceTypeAppStoreEligible BuildAudienceType = "APP_STORE_ELIGIBLE"
+)
 
 // IconAssetType represents the icon type for build icons.
 type IconAssetType string
@@ -176,9 +236,47 @@ type AppMediaAssetState struct {
 }
 
 // StateDetail represents details about a state (errors, warnings, infos).
+//
+// App Store Connect describes state details with `code` and `description`
+// (schemas StateDetail and AppMediaStateError); it does not send `message`.
+// Message is kept as a decoded alias of Description so callers that read either
+// field always see Apple's human-readable text. It is excluded from encoding so
+// re-emitted payloads stay faithful to the App Store Connect wire format.
 type StateDetail struct {
-	Code    string `json:"code,omitempty"`
-	Message string `json:"message,omitempty"`
+	Code        string `json:"code,omitempty"`
+	Description string `json:"description,omitempty"`
+	Message     string `json:"-"`
+}
+
+// UnmarshalJSON decodes a state detail and mirrors the human-readable text
+// across Description and Message so either field carries Apple's text.
+func (d *StateDetail) UnmarshalJSON(data []byte) error {
+	var raw struct {
+		Code        *string `json:"code"`
+		Description *string `json:"description"`
+		Message     *string `json:"message"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+
+	*d = StateDetail{}
+	if raw.Code != nil {
+		d.Code = *raw.Code
+	}
+	if raw.Description != nil {
+		d.Description = *raw.Description
+	}
+	if raw.Message != nil {
+		d.Message = *raw.Message
+	}
+	if raw.Description == nil && raw.Message != nil {
+		d.Description = *raw.Message
+	}
+	if raw.Message == nil && raw.Description != nil {
+		d.Message = *raw.Description
+	}
+	return nil
 }
 
 // GetBuilds retrieves the list of builds for an app
@@ -198,9 +296,10 @@ func (c *Client) GetBuilds(ctx context.Context, appID string, opts ...BuildsOpti
 	} else {
 		values := url.Values{}
 		// Use /v1/builds endpoint when sorting, limiting, or filtering by
-		// version/preReleaseVersion.version/processingState/preReleaseVersion/platform/expired,
+		// version/preReleaseVersion.version/processingState/preReleaseVersion/platform/
+		// betaAppReviewSubmission.betaReviewState/expired,
 		// since /v1/apps/{id}/builds doesn't support these
-		if query.sort != "" || query.limit > 0 || query.version != "" || query.preReleaseVersion != "" || len(query.processingStates) > 0 || len(query.preReleasePlatforms) > 0 || len(query.preReleaseVersionIDs) > 0 || query.expired != nil || len(query.include) > 0 {
+		if query.sort != "" || query.limit > 0 || query.version != "" || query.preReleaseVersion != "" || len(query.processingStates) > 0 || len(query.preReleasePlatforms) > 0 || len(query.preReleaseVersionIDs) > 0 || len(query.betaReviewStates) > 0 || query.expired != nil || len(query.include) > 0 {
 			path = "/v1/builds"
 			values.Set("filter[app]", appID)
 			if query.sort != "" {
@@ -223,6 +322,9 @@ func (c *Client) GetBuilds(ctx context.Context, appID string, opts ...BuildsOpti
 			}
 			if len(query.preReleaseVersionIDs) > 0 {
 				values.Set("filter[preReleaseVersion]", strings.Join(query.preReleaseVersionIDs, ","))
+			}
+			if len(query.betaReviewStates) > 0 {
+				values.Set("filter[betaAppReviewSubmission.betaReviewState]", strings.Join(query.betaReviewStates, ","))
 			}
 			if query.expired != nil {
 				values.Set("filter[expired]", strconv.FormatBool(*query.expired))
@@ -472,13 +574,12 @@ func (c *Client) AddBetaGroupsToBuildWithNotify(ctx context.Context, buildID str
 		if detail.Data.Attributes.AutoNotifyEnabled {
 			return BuildBetaGroupsNotificationActionAutoNotifyEnabled, nil
 		}
-		if _, err := c.CreateBuildBetaNotification(ctx, buildID); err != nil {
-			// Apple can still reject the follow-up create with the same
-			// already-enabled state even after buildBetaDetail says false.
-			if isAutoNotifyAlreadyEnabledNotificationError(err) {
-				return BuildBetaGroupsNotificationActionAutoNotifyEnabled, nil
-			}
+		notification, err := c.CreateBuildBetaNotification(ctx, buildID)
+		if err != nil {
 			return BuildBetaGroupsNotificationActionNone, buildBetaGroupsNotifyPartialError(buildID, "notifying testers", err)
+		}
+		if notification != nil && notification.NotificationAction == BuildBetaGroupsNotificationActionAutoNotifyEnabled {
+			return BuildBetaGroupsNotificationActionAutoNotifyEnabled, nil
 		}
 		return BuildBetaGroupsNotificationActionManual, nil
 	}
@@ -496,6 +597,9 @@ func buildBetaGroupsNotifyPartialError(buildID, step string, err error) error {
 func isAutoNotifyAlreadyEnabledNotificationError(err error) bool {
 	apiErr, ok := errors.AsType[*APIError](err)
 	if !ok || apiErr == nil {
+		return false
+	}
+	if apiErr.StatusCode != http.StatusConflict {
 		return false
 	}
 	if !strings.EqualFold(strings.TrimSpace(apiErr.Code), "STATE_ERROR.ENTITY_STATE_INVALID") {
@@ -660,7 +764,7 @@ func (c *Client) GetBuildUploads(ctx context.Context, appID string, opts ...Buil
 		path += "?" + queryString
 	}
 
-	data, err := c.do(ctx, "GET", path, nil)
+	data, err := c.doAppBuildUploadsRead(ctx, appID, path)
 	if err != nil {
 		return nil, err
 	}
@@ -704,13 +808,22 @@ func (c *Client) DeleteBuildUpload(ctx context.Context, id string) error {
 }
 
 // GetBuildUpload retrieves a build upload by ID.
-func (c *Client) GetBuildUpload(ctx context.Context, id string) (*BuildUploadResponse, error) {
+func (c *Client) GetBuildUpload(ctx context.Context, id string, opts ...BuildUploadOption) (*BuildUploadResponse, error) {
 	id = strings.TrimSpace(id)
 	if id == "" {
 		return nil, fmt.Errorf("id is required")
 	}
 
-	data, err := c.do(ctx, "GET", fmt.Sprintf("/v1/buildUploads/%s", id), nil)
+	query := &buildUploadQuery{}
+	for _, opt := range opts {
+		opt(query)
+	}
+	path := fmt.Sprintf("/v1/buildUploads/%s", id)
+	if queryString := buildBuildUploadQuery(query); queryString != "" {
+		path += "?" + queryString
+	}
+
+	data, err := c.do(ctx, "GET", path, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -842,12 +955,15 @@ func (c *Client) UpdateBuildUploadFile(ctx context.Context, id string, req Build
 
 	data, err := c.do(ctx, "PATCH", fmt.Sprintf("/v1/buildUploadFiles/%s", id), body)
 	if err != nil {
+		if isResponseBodyReadError(err) {
+			return nil, newBuildUploadFileCommitResponseError(err)
+		}
 		return nil, err
 	}
 
 	var response BuildUploadFileResponse
 	if err := json.Unmarshal(data, &response); err != nil {
-		return nil, fmt.Errorf("failed to parse response: %w", err)
+		return nil, newBuildUploadFileCommitResponseError(fmt.Errorf("failed to parse response: %w", err))
 	}
 
 	return &response, nil

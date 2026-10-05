@@ -18,6 +18,7 @@ var (
 	ErrAPIKeyNotFound        = errors.New("api key not found")
 	ErrAPIKeyNotVisible      = errors.New("api key not visible in accessible key lists")
 	ErrAPIKeyRolesUnresolved = errors.New("api key roles could not be resolved")
+	errAPIKeyListPagination  = errors.New("api key list pagination failed")
 )
 
 func integrationsHeaders(referer string) http.Header {
@@ -49,8 +50,8 @@ func (c *Client) doIrisV2Request(ctx context.Context, method, path string, body 
 	return c.doRequestBase(ctx, irisV2BaseURL, method, path, body, integrationsHeaders(integrationsIndividualKeysRefererURL))
 }
 
-func (c *Client) doOlympusRequest(ctx context.Context, method, path string, body any) ([]byte, error) {
-	return c.doRequestBase(ctx, olympusBaseURL, method, path, body, olympusHeaders(integrationsIndividualKeysRefererURL))
+func (c *Client) doOlympusGet(ctx context.Context, path string) ([]byte, error) {
+	return c.doRequestBase(ctx, olympusBaseURL, http.MethodGet, path, nil, olympusHeaders(integrationsIndividualKeysRefererURL))
 }
 
 type KeyActor struct {
@@ -169,7 +170,7 @@ func (c *Client) listTeamKeys(ctx context.Context) ([]teamAPIKey, error) {
 
 		body, err := c.doIrisV1Request(ctx, http.MethodGet, nextPath, nil)
 		if err != nil {
-			return nil, err
+			return nil, wrapAPIKeyListPageError(err, len(payloads))
 		}
 
 		var payload teamKeyPayload
@@ -266,7 +267,7 @@ func (c *Client) listIndividualKeys(ctx context.Context) ([]individualAPIKey, er
 
 		body, err := c.doIrisV2Request(ctx, http.MethodGet, nextPath, nil)
 		if err != nil {
-			return nil, err
+			return nil, wrapAPIKeyListPageError(err, len(payloads))
 		}
 
 		var payload individualKeyPayload
@@ -317,7 +318,7 @@ func (c *Client) getActor(ctx context.Context, actorID string) (*olympusActor, e
 		return nil, fmt.Errorf("actor id is required")
 	}
 
-	body, err := c.doOlympusRequest(ctx, http.MethodGet, "/actors/"+actorID+"?include=provider,person", nil)
+	body, err := c.doOlympusGet(ctx, "/actors/"+actorID+"?include=provider,person")
 	if err != nil {
 		return nil, err
 	}
@@ -366,7 +367,7 @@ func (c *Client) listActors(ctx context.Context) ([]olympusActor, error) {
 		}
 		visited[nextPath] = struct{}{}
 
-		body, err := c.doOlympusRequest(ctx, http.MethodGet, nextPath, nil)
+		body, err := c.doOlympusGet(ctx, nextPath)
 		if err != nil {
 			return nil, err
 		}
@@ -571,7 +572,17 @@ func (c *Client) LookupAPIKeyRoles(ctx context.Context, keyID string) (*APIKeyRo
 	return nil, fmt.Errorf("%w: %s", ErrAPIKeyNotFound, keyID)
 }
 
+func wrapAPIKeyListPageError(err error, pagesFetched int) error {
+	if err == nil || pagesFetched == 0 {
+		return err
+	}
+	return fmt.Errorf("%w: %w", errAPIKeyListPagination, err)
+}
+
 func shouldFallbackToIndividualKeys(err error) bool {
+	if errors.Is(err, errAPIKeyListPagination) {
+		return false
+	}
 	var apiErr *APIError
 	if !errors.As(err, &apiErr) {
 		return false

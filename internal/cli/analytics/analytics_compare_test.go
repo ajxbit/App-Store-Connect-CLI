@@ -73,6 +73,16 @@ func TestAnalyticsCompareValidationErrors(t *testing.T) {
 			wantErr: "--frequency must be",
 		},
 		{
+			name:    "sales-only report type",
+			args:    []string{"analytics", "compare", "--source", "sales", "--app", "123", "--vendor", "V", "--from", "2026-01-01", "--to", "2026-02-01", "--frequency", "DAILY", "--type", "WIN_BACK_ELIGIBILITY"},
+			wantErr: "--type for analytics compare must be",
+		},
+		{
+			name:    "sales-only report subtype",
+			args:    []string{"analytics", "compare", "--source", "sales", "--app", "123", "--vendor", "V", "--from", "2026-01-01", "--to", "2026-02-01", "--frequency", "DAILY", "--subtype", "SUMMARY_CHANNEL"},
+			wantErr: "--subtype for analytics compare must be",
+		},
+		{
 			name:    "invalid weekly comparison boundary",
 			args:    []string{"analytics", "compare", "--source", "sales", "--app", "123", "--vendor", "V", "--from", "2026-01-05", "--to", "2026-01-06", "--frequency", "WEEKLY"},
 			wantErr: "--to for weekly reports must be a Monday (week start) or Sunday (week end)",
@@ -236,6 +246,7 @@ func TestAggregateSalesMetrics(t *testing.T) {
 	a := insights.SalesMetrics{
 		RowCount:                       2,
 		UnitsColumnPresent:             true,
+		DownloadUnitsAvailable:         true,
 		DeveloperProceedsColumnPresent: true,
 		CustomerPriceColumnPresent:     true,
 		SubscriptionColumnPresent:      true,
@@ -256,6 +267,7 @@ func TestAggregateSalesMetrics(t *testing.T) {
 	b := insights.SalesMetrics{
 		RowCount:                       3,
 		UnitsColumnPresent:             true,
+		DownloadUnitsAvailable:         true,
 		DeveloperProceedsColumnPresent: true,
 		CustomerPriceColumnPresent:     true,
 		SubscriptionColumnPresent:      true,
@@ -334,6 +346,7 @@ func TestBuildCompareMetrics(t *testing.T) {
 	baseline := insights.SalesMetrics{
 		RowCount:                       5,
 		UnitsColumnPresent:             true,
+		DownloadUnitsAvailable:         true,
 		DeveloperProceedsColumnPresent: true,
 		CustomerPriceColumnPresent:     true,
 		SubscriptionColumnPresent:      true,
@@ -346,6 +359,7 @@ func TestBuildCompareMetrics(t *testing.T) {
 	comparison := insights.SalesMetrics{
 		RowCount:                       8,
 		UnitsColumnPresent:             true,
+		DownloadUnitsAvailable:         true,
 		DeveloperProceedsColumnPresent: true,
 		CustomerPriceColumnPresent:     true,
 		SubscriptionColumnPresent:      true,
@@ -385,7 +399,7 @@ func TestBuildCompareMetrics(t *testing.T) {
 
 func TestBuildCompareMetrics_ExplainsMissingColumns(t *testing.T) {
 	baseline := insights.SalesMetrics{}
-	comparison := insights.SalesMetrics{UnitsColumnPresent: true}
+	comparison := insights.SalesMetrics{UnitsColumnPresent: true, DownloadUnitsAvailable: true}
 
 	metrics := buildCompareMetrics(baseline, comparison)
 	for _, m := range metrics {
@@ -405,12 +419,14 @@ func TestBuildCompareMetrics_ExplainsMissingColumns(t *testing.T) {
 
 func TestBuildCompareMetrics_ExplainsZeroBaselineDeltaPercent(t *testing.T) {
 	baseline := insights.SalesMetrics{
-		UnitsColumnPresent: true,
-		DownloadUnitsTotal: 0,
+		UnitsColumnPresent:     true,
+		DownloadUnitsAvailable: true,
+		DownloadUnitsTotal:     0,
 	}
 	comparison := insights.SalesMetrics{
-		UnitsColumnPresent: true,
-		DownloadUnitsTotal: 12,
+		UnitsColumnPresent:     true,
+		DownloadUnitsAvailable: true,
+		DownloadUnitsTotal:     12,
 	}
 
 	metrics := buildCompareMetrics(baseline, comparison)
@@ -464,11 +480,48 @@ func TestFetchAndAggregate_SingleReportKeepsAvailableColumns(t *testing.T) {
 	if !metrics.UnitsColumnPresent {
 		t.Fatal("expected units column to be available")
 	}
+	if !metrics.DownloadUnitsAvailable {
+		t.Fatal("expected download units to be available")
+	}
 	if !metrics.DeveloperProceedsColumnPresent {
 		t.Fatal("expected developer proceeds column to be available")
 	}
 	if !metrics.CustomerPriceColumnPresent {
 		t.Fatal("expected customer price column to be available")
+	}
+}
+
+func TestFetchAndAggregate_UsesSubscriptionVersion1_4(t *testing.T) {
+	client := newCompareTestClient(t, func(req *http.Request) (*http.Response, error) {
+		if got := req.URL.Query().Get("filter[version]"); got != "1_4" {
+			t.Fatalf("filter[version] = %q, want 1_4", got)
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     make(http.Header),
+			Body: io.NopCloser(bytes.NewReader(gzipCompareText(t, compareSalesReportTSV(
+				"123",
+				"APP",
+			)))),
+			Request: req,
+		}, nil
+	})
+
+	_, found, err := fetchAndAggregate(
+		context.Background(),
+		client,
+		"V",
+		insights.SalesScope{AppID: "123", AppSKU: "APP"},
+		[]string{"2026-01-01"},
+		asc.SalesReportTypeSubscription,
+		asc.SalesReportSubTypeSummary,
+		asc.SalesReportFrequencyDaily,
+	)
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if found != 1 {
+		t.Fatalf("expected 1 found report, got %d", found)
 	}
 }
 

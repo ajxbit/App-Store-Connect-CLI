@@ -479,6 +479,7 @@ func TestRun_ResumeSkipsCompletedStepsAndReusesOutputs(t *testing.T) {
 	}
 	if firstResult == nil {
 		t.Fatal("expected structured result on failure")
+		return
 	}
 	if firstResult.Status != "error" {
 		t.Fatalf("expected status error, got %q", firstResult.Status)
@@ -577,6 +578,7 @@ func TestRun_ResumeReusesOriginalParams(t *testing.T) {
 	}
 	if firstResult == nil {
 		t.Fatal("expected structured result on failure")
+		return
 	}
 	if !firstResult.Recoverable {
 		t.Fatal("expected first failure to be recoverable")
@@ -787,6 +789,63 @@ func TestRun_SubWorkflow_CallerEnvOverridesSubWorkflowEnv(t *testing.T) {
 	}
 	if result.Status != "ok" {
 		t.Fatalf("expected ok, got %q", result.Status)
+	}
+}
+
+// TestRun_SubWorkflowWithOverridesRuntimeParams pins the top of the precedence
+// chain: mergeEnv(subWf.Env, env, resolvedWith) applies `with` last, so a value
+// hardcoded on a workflow-call step cannot be overridden with a KEY:VALUE
+// parameter at run time. The documentation must describe this order, not the
+// intuitive "parameters always win".
+func TestRun_SubWorkflowWithOverridesRuntimeParams(t *testing.T) {
+	def := &Definition{
+		Workflows: map[string]Workflow{
+			"main": {Steps: []Step{
+				{Workflow: "helper", With: map[string]string{"MSG": "from-with"}},
+			}},
+			"helper": {Steps: []Step{{Run: "echo $MSG"}}},
+		},
+	}
+	opts := runOpts("main")
+	opts.Params = map[string]string{"MSG": "from-cli-param"}
+
+	result, err := Run(context.Background(), def, opts)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	stdout := opts.Stdout.(*bytes.Buffer).String()
+	if !strings.Contains(stdout, "from-with") {
+		t.Fatalf("expected step `with` to override the runtime parameter, got %q", stdout)
+	}
+	if strings.Contains(stdout, "from-cli-param") {
+		t.Fatalf("expected the runtime parameter to lose to step `with`, got %q", stdout)
+	}
+	if result.Status != "ok" {
+		t.Fatalf("expected ok, got %q", result.Status)
+	}
+}
+
+// TestRun_SubWorkflowWithValuesAreLiteral records that `with` values are not
+// shell-expanded: only ${steps.NAME.OUTPUT} references are interpolated, so a
+// documented `"MESSAGE": "v$VERSION"` reaches the step as the literal text.
+func TestRun_SubWorkflowWithValuesAreLiteral(t *testing.T) {
+	def := &Definition{
+		Env: map[string]string{"VERSION": "1.2.0"},
+		Workflows: map[string]Workflow{
+			"main": {Steps: []Step{
+				{Workflow: "helper", With: map[string]string{"MSG": "build v$VERSION"}},
+			}},
+			"helper": {Steps: []Step{{Run: `echo "[$MSG]"`}}},
+		},
+	}
+	opts := runOpts("main")
+
+	if _, err := Run(context.Background(), def, opts); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	stdout := opts.Stdout.(*bytes.Buffer).String()
+	if !strings.Contains(stdout, "[build v$VERSION]") {
+		t.Fatalf("expected `with` values to stay literal, got %q", stdout)
 	}
 }
 
@@ -1188,6 +1247,34 @@ func TestRun_ContextCancellation(t *testing.T) {
 	}
 	if result.Status != "error" {
 		t.Fatalf("expected error status, got %q", result.Status)
+	}
+}
+
+func TestRun_ContextCancellationStillRunsErrorHook(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	def := &Definition{
+		Error: "echo error_hook_ran",
+		Workflows: map[string]Workflow{
+			"test": {Steps: []Step{{Run: "sleep 10"}}},
+		},
+	}
+	opts := runOpts("test")
+
+	result, err := Run(ctx, def, opts)
+	if err == nil {
+		t.Fatal("expected error on cancelled context")
+	}
+	if result.Hooks == nil || result.Hooks.Error == nil {
+		t.Fatalf("expected error hook to be recorded after cancellation, got %+v", result.Hooks)
+	}
+	if result.Hooks.Error.Status != "ok" {
+		t.Fatalf("expected error hook status=ok after cancellation, got %+v", result.Hooks.Error)
+	}
+	stdout := opts.Stdout.(*bytes.Buffer).String()
+	if !strings.Contains(stdout, "error_hook_ran") {
+		t.Fatalf("expected error hook output after cancellation, got %q", stdout)
 	}
 }
 

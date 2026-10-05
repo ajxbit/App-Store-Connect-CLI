@@ -5,7 +5,6 @@ import (
 	"flag"
 	"fmt"
 	"os"
-	"slices"
 	"strings"
 
 	"github.com/peterbourgon/ff/v3/ffcli"
@@ -19,15 +18,16 @@ func BuildsAddGroupsCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("add-groups", flag.ExitOnError)
 
 	selectors := bindBuildSelectorFlags(fs, buildSelectorFlagOptions{})
-	groups := fs.String("group", "", "Comma-separated beta group IDs or names")
+	groups := shared.BindOnceCSVFlag(fs, "group", "Comma-separated beta group IDs or names")
 	skipInternal := fs.Bool("skip-internal", false, "Skip internal beta groups instead of adding them")
+	dryRun := fs.Bool("dry-run", false, "Preview beta group assignment without adding groups")
 	submit := fs.Bool("submit", false, "Submit build for beta app review after adding external groups")
 	confirm := fs.Bool("confirm", false, "Confirm beta app review submission (required with --submit)")
 	output := shared.BindOutputFlags(fs)
 
 	return &ffcli.Command{
 		Name:       "add-groups",
-		ShortUsage: "asc builds add-groups (--build-id BUILD_ID | --app APP --latest | --app APP --build-number BUILD_NUMBER [--version VERSION] [--platform PLATFORM]) --group GROUP_ID[,GROUP_ID...] [--submit --confirm]",
+		ShortUsage: "asc builds add-groups (--build-id BUILD_ID | --app APP --latest | --app APP --build-number BUILD_NUMBER --platform PLATFORM [--version VERSION]) --group GROUP_ID[,GROUP_ID...] [--dry-run | --submit --confirm]",
 		ShortHelp:  "Add beta groups to a build for TestFlight distribution.",
 		LongHelp: `Add beta groups to a build for TestFlight distribution.
 
@@ -37,25 +37,44 @@ Examples:
   asc builds add-groups --build-id "BUILD_ID" --group "External Testers"
   asc builds add-groups --build-id "BUILD_ID" --group "GROUP1,GROUP2"
   asc builds add-groups --build-id "BUILD_ID" --group "INTERNAL_ID,EXTERNAL_ID" --skip-internal
-  asc builds add-groups --build-id "BUILD_ID" --group "GROUP_ID" --submit --confirm`,
+  asc builds add-groups --build-id "BUILD_ID" --group "GROUP_ID" --dry-run
+  asc builds add-groups --build-id "BUILD_ID" --group "GROUP_ID" --submit --confirm
+
+Use --dry-run to resolve the build and groups and preview the relationship
+without adding groups or submitting a review. Any state shown by its
+best-effort reads is observational and advisory, and does not predict whether
+a later assignment will be accepted.
+
+Normal assignments verify the current build processing and expiry before
+sending the relationship request. Assignments that include an external group
+also verify encryption, audience, and beta-review state. If App Store Connect
+does not provide enough state to prove readiness, the command stops without
+sending that request.`,
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
-			if err := selectors.applyLegacyAliases(); err != nil {
-				return err
+			if len(args) > 0 {
+				return shared.UsageErrorf("unexpected argument(s): %s", strings.Join(args, " "))
 			}
 			if err := selectors.validate(); err != nil {
 				return err
 			}
 
-			groupInputs := shared.SplitCSV(*groups)
+			groupInputs := shared.SplitCSV(groups.String())
 			if len(groupInputs) == 0 {
 				fmt.Fprintln(os.Stderr, "Error: --group is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--group")
+			}
+			if *submit && *dryRun {
+				return shared.WithDiagnostic(
+					shared.UsageError("--submit cannot be used with --dry-run"),
+					shared.DiagnosticConflictingInput,
+					"--dry-run",
+				)
 			}
 			if *submit && !*confirm {
 				fmt.Fprintln(os.Stderr, "Error: --confirm is required with --submit")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--confirm")
 			}
 			if *confirm && !*submit {
 				fmt.Fprintln(os.Stderr, "Error: --confirm requires --submit")
@@ -80,14 +99,26 @@ Examples:
 				return fmt.Errorf("builds add-groups: %w", err)
 			}
 
+			plan := shared.PlanBuildBetaGroupAssignment(resolvedGroups, shared.AddBuildBetaGroupsOptions{
+				SkipInternal: *skipInternal,
+			})
+			if *dryRun {
+				return reportBuildBetaGroupAssignmentDryRun(requestCtx, client, buildID, plan, output)
+			}
+			if err := shared.PreflightBuildBetaGroupAssignment(requestCtx, client, buildID, plan, shared.BuildBetaGroupPreflightOptions{
+				OperationName: "builds add-groups",
+			}); err != nil {
+				return err
+			}
+
 			addResult, err := shared.AddBuildBetaGroups(requestCtx, client, buildID, resolvedGroups, shared.AddBuildBetaGroupsOptions{
 				SkipInternal: *skipInternal,
 			})
 			if err != nil {
-				return fmt.Errorf("builds add-groups: failed to add groups: %w", err)
+				return reportBuildBetaGroupAssignmentFailure(requestCtx, client, buildID, assignmentIncludesExternalGroup(resolvedGroups), err)
 			}
 
-			submissionMessage, err := submitBuildBetaReviewIfNeeded(requestCtx, client, buildID, resolvedGroups, addResult.AddedGroupIDs, *submit)
+			submissionResult, err := shared.SubmitBuildBetaReviewIfNeeded(requestCtx, client, buildID, resolvedGroups, addResult.AddedGroupIDs, *submit, "builds add-groups")
 			if err != nil {
 				return err
 			}
@@ -97,7 +128,7 @@ Examples:
 					os.Stderr,
 					"Skipped internal group %q (%s) because --skip-internal was set\n",
 					group.NameForDisplay(),
-					group.ID,
+					shared.SanitizeTerminal(group.ID),
 				)
 			}
 
@@ -106,8 +137,8 @@ Examples:
 			} else {
 				fmt.Fprintf(os.Stderr, "Successfully added %d group(s) to build %s\n", len(addResult.AddedGroupIDs), buildID)
 			}
-			if submissionMessage != "" {
-				fmt.Fprintln(os.Stderr, submissionMessage)
+			if submissionResult.Message != "" {
+				fmt.Fprintln(os.Stderr, submissionResult.Message)
 			}
 
 			if len(addResult.AddedGroupIDs) == 0 {
@@ -167,56 +198,6 @@ func resolveBuildBetaGroupIDsFromList(inputGroups []string, groups *asc.BetaGrou
 	return resolvedIDs, nil
 }
 
-func submitBuildBetaReviewIfNeeded(ctx context.Context, client *asc.Client, buildID string, groups []resolvedBuildBetaGroup, addedGroupIDs []string, submit bool) (string, error) {
-	if !submit {
-		return "", nil
-	}
-
-	if !hasAddedExternalBuildBetaGroup(groups, addedGroupIDs) {
-		return fmt.Sprintf("Skipped beta app review submission for build %s because no external groups were added", buildID), nil
-	}
-
-	existingSubmission, err := client.GetBuildBetaAppReviewSubmission(ctx, buildID)
-	if err == nil {
-		submissionID := strings.TrimSpace(existingSubmission.Data.ID)
-		if submissionID == "" {
-			return fmt.Sprintf("Build %s already has a beta app review submission", buildID), nil
-		}
-		return fmt.Sprintf("Build %s already has beta app review submission %s", buildID, submissionID), nil
-	}
-	if !asc.IsNotFound(err) {
-		return "", fmt.Errorf("builds add-groups: failed to inspect beta app review submission: %w", err)
-	}
-
-	submission, err := client.CreateBetaAppReviewSubmission(ctx, buildID)
-	if err != nil {
-		return "", fmt.Errorf("builds add-groups: beta groups were added to build %q, but beta app review submission failed: %w", buildID, err)
-	}
-
-	submissionID := strings.TrimSpace(submission.Data.ID)
-	if submissionID == "" {
-		return fmt.Sprintf("Submitted build %s for beta app review", buildID), nil
-	}
-	return fmt.Sprintf("Submitted build %s for beta app review (%s)", buildID, submissionID), nil
-}
-
-func hasAddedExternalBuildBetaGroup(groups []resolvedBuildBetaGroup, addedGroupIDs []string) bool {
-	if len(groups) == 0 || len(addedGroupIDs) == 0 {
-		return false
-	}
-
-	for _, group := range groups {
-		if group.IsInternalGroup {
-			continue
-		}
-		if slices.Contains(addedGroupIDs, group.ID) {
-			return true
-		}
-	}
-
-	return false
-}
-
 // BuildsUpdateCommand returns the builds update subcommand.
 func BuildsUpdateCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("builds update", flag.ExitOnError)
@@ -227,7 +208,7 @@ func BuildsUpdateCommand() *ffcli.Command {
 
 	return &ffcli.Command{
 		Name:       "update",
-		ShortUsage: "asc builds update (--build-id BUILD_ID | --app APP --latest | --app APP --build-number BUILD_NUMBER [--version VERSION] [--platform PLATFORM]) --uses-non-exempt-encryption [true|false] [flags]",
+		ShortUsage: "asc builds update (--build-id BUILD_ID | --app APP --latest | --app APP --build-number BUILD_NUMBER --platform PLATFORM [--version VERSION]) --uses-non-exempt-encryption [true|false] [flags]",
 		ShortHelp:  "Update build attributes.",
 		LongHelp: `Update build attributes such as encryption compliance.
 
@@ -238,9 +219,6 @@ Examples:
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
-			if err := selectors.applyLegacyAliases(); err != nil {
-				return err
-			}
 			if err := selectors.validate(); err != nil {
 				return err
 			}
@@ -248,7 +226,7 @@ Examples:
 			trimmedEncryption := strings.TrimSpace(strings.ToLower(*usesNonExemptEncryption))
 			if trimmedEncryption == "" {
 				fmt.Fprintln(os.Stderr, "Error: at least one update flag is required (e.g. --uses-non-exempt-encryption)")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--uses-non-exempt-encryption")
 			}
 
 			attrs := asc.BuildUpdateAttributes{}
@@ -292,13 +270,13 @@ func BuildsRemoveGroupsCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("remove-groups", flag.ExitOnError)
 
 	selectors := bindBuildSelectorFlags(fs, buildSelectorFlagOptions{})
-	groups := fs.String("group", "", "Comma-separated beta group IDs")
+	groups := shared.BindOnceCSVFlag(fs, "group", "Comma-separated beta group IDs")
 	confirm := fs.Bool("confirm", false, "Confirm removal")
 	output := shared.BindOutputFlags(fs)
 
 	return &ffcli.Command{
 		Name:       "remove-groups",
-		ShortUsage: "asc builds remove-groups (--build-id BUILD_ID | --app APP --latest | --app APP --build-number BUILD_NUMBER [--version VERSION] [--platform PLATFORM]) --group GROUP_ID[,GROUP_ID...] --confirm",
+		ShortUsage: "asc builds remove-groups (--build-id BUILD_ID | --app APP --latest | --app APP --build-number BUILD_NUMBER --platform PLATFORM [--version VERSION]) --group GROUP_ID[,GROUP_ID...] --confirm",
 		ShortHelp:  "Remove beta groups from a build.",
 		LongHelp: `Remove beta groups from a build.
 
@@ -309,21 +287,18 @@ Examples:
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
-			if err := selectors.applyLegacyAliases(); err != nil {
-				return err
-			}
 			if err := selectors.validate(); err != nil {
 				return err
 			}
 
-			groupIDs := shared.SplitCSV(*groups)
+			groupIDs := shared.SplitCSV(groups.String())
 			if len(groupIDs) == 0 {
 				fmt.Fprintln(os.Stderr, "Error: --group is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--group")
 			}
 			if !*confirm {
 				fmt.Fprintln(os.Stderr, "Error: --confirm is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--confirm")
 			}
 
 			client, err := shared.GetASCClient()

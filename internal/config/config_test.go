@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -265,6 +266,47 @@ func TestPathEnvOverrideRequiresAbsolutePath(t *testing.T) {
 	}
 }
 
+func TestDefaultWritePath(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	workDir := t.TempDir()
+	if err := SaveAt(filepath.Join(workDir, ".asc", "config.json"), &Config{AppID: "123"}); err != nil {
+		t.Fatalf("SaveAt(local) error: %v", err)
+	}
+	t.Chdir(workDir)
+
+	t.Run("override", func(t *testing.T) {
+		override := filepath.Join(t.TempDir(), "nested", "..", "config.json")
+		t.Setenv("ASC_CONFIG_PATH", override)
+		path, err := DefaultWritePath()
+		if err != nil {
+			t.Fatalf("DefaultWritePath() error: %v", err)
+		}
+		if path != filepath.Clean(override) {
+			t.Fatalf("DefaultWritePath() = %q, want %q", path, filepath.Clean(override))
+		}
+	})
+
+	t.Run("relative override", func(t *testing.T) {
+		t.Setenv("ASC_CONFIG_PATH", "config.json")
+		if _, err := DefaultWritePath(); !errors.Is(err, ErrInvalidPath) {
+			t.Fatalf("DefaultWritePath() error = %v, want ErrInvalidPath", err)
+		}
+	})
+
+	t.Run("no override ignores the local config", func(t *testing.T) {
+		t.Setenv("ASC_CONFIG_PATH", "")
+		path, err := DefaultWritePath()
+		if err != nil {
+			t.Fatalf("DefaultWritePath() error: %v", err)
+		}
+		if want := filepath.Join(home, ".asc", "config.json"); path != want {
+			t.Fatalf("DefaultWritePath() = %q, want %q", path, want)
+		}
+	})
+}
+
 func TestPathUsesLocalConfig(t *testing.T) {
 	tempDir := t.TempDir()
 	t.Setenv("ASC_CONFIG_PATH", "")
@@ -452,5 +494,66 @@ func TestLoadAtRejectsMaxDelayBelowBaseDelay(t *testing.T) {
 	}
 	if !errors.Is(err, ErrInvalidConfig) {
 		t.Fatalf("expected ErrInvalidConfig, got %v", err)
+	}
+}
+
+func TestLoadAtRejectsSpecialFileWithoutReadingIt(t *testing.T) {
+	info, err := os.Lstat(os.DevNull)
+	if err != nil {
+		t.Fatalf("Lstat(%q) error: %v", os.DevNull, err)
+	}
+	if info.Mode().IsRegular() {
+		t.Skipf("%s is a regular file on this platform", os.DevNull)
+	}
+
+	_, err = LoadAt(os.DevNull)
+	if err == nil {
+		t.Fatal("expected special-file rejection, got nil")
+	}
+	if !strings.Contains(err.Error(), "not a regular file") {
+		t.Fatalf("LoadAt(%q) error = %v, want regular-file rejection", os.DevNull, err)
+	}
+}
+
+func TestLoadAtRejectsSymlinkWithoutFollowingIt(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "target.json")
+	link := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(target, []byte(`{}`), 0o600); err != nil {
+		t.Fatalf("WriteFile(target) error: %v", err)
+	}
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	_, err := LoadAt(link)
+	if err == nil {
+		t.Fatal("expected symlink rejection, got nil")
+	}
+	if !strings.Contains(err.Error(), "symlink") {
+		t.Fatalf("LoadAt(%q) error = %v, want symlink rejection", link, err)
+	}
+}
+
+func TestLoadAtRejectsSymlinkedParentWithoutFollowingIt(t *testing.T) {
+	dir := t.TempDir()
+	targetDir := filepath.Join(dir, "target")
+	if err := os.Mkdir(targetDir, 0o700); err != nil {
+		t.Fatalf("Mkdir(target) error: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(targetDir, "config.json"), []byte(`{}`), 0o600); err != nil {
+		t.Fatalf("WriteFile(target config) error: %v", err)
+	}
+	linkDir := filepath.Join(dir, "linked")
+	if err := os.Symlink(targetDir, linkDir); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	_, err := LoadAt(filepath.Join(linkDir, "config.json"))
+	if err == nil {
+		t.Fatal("expected symlinked-parent rejection, got nil")
+	}
+	if !strings.Contains(err.Error(), "symlink") {
+		t.Fatalf("LoadAt() error = %v, want symlink rejection", err)
 	}
 }

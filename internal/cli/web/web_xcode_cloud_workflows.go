@@ -23,21 +23,23 @@ func webXcodeCloudWorkflowsCommand() *ffcli.Command {
 	return &ffcli.Command{
 		Name:       "workflows",
 		ShortUsage: "asc web xcode-cloud workflows <subcommand> [flags]",
-		ShortHelp:  "[experimental] Describe, create, and edit Xcode Cloud workflows.",
-		LongHelp: `EXPERIMENTAL / UNOFFICIAL / DISCOURAGED
+		ShortHelp:  "List, describe, create, and edit Xcode Cloud workflows.",
+		LongHelp: `WEB SESSION WORKFLOWS
 
 Describe and manage workflow state for Xcode Cloud workflows
-using Apple's private CI API. Requires a web session.
+using Apple's CI API. Requires a web session.
 
+Use list to discover workflow IDs for a product.
 Use describe to inspect workflow configuration.
-Use create to create a workflow from a full private workflow payload.
-Use options to inspect the private editor option payloads.
-Use edit to apply a JSON merge patch to the private workflow payload.
+Use create to create a workflow from a full workflow payload.
+Use options to inspect the editor option payloads.
+Use edit to apply a JSON merge patch to the workflow payload.
 Use enable/disable to toggle workflow state.
 
-` + webWarningText + `
+
 
 Examples:
+  asc web xcode-cloud workflows list --product-id "UUID" --apple-id "user@example.com"
   asc web xcode-cloud workflows describe --product-id "UUID" --workflow-id "WF-UUID" --apple-id "user@example.com"
   asc web xcode-cloud workflows create --product-id "UUID" --file ./workflow.json --apple-id "user@example.com"
   asc web xcode-cloud workflows options product-config --product-id "UUID" --apple-id "user@example.com"
@@ -47,6 +49,7 @@ Examples:
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
 		Subcommands: []*ffcli.Command{
+			webXcodeCloudWorkflowListCommand(),
 			webXcodeCloudWorkflowDescribeCommand(),
 			webXcodeCloudWorkflowCreateCommand(),
 			webXcodeCloudWorkflowOptionsCommand(),
@@ -102,6 +105,91 @@ type CIWorkflowCreateResult struct {
 	Created bool `json:"created"`
 }
 
+func webXcodeCloudWorkflowListCommand() *ffcli.Command {
+	fs := flag.NewFlagSet("web xcode-cloud workflows list", flag.ExitOnError)
+	sessionFlags := bindWebSessionFlags(fs)
+	output := shared.BindOutputFlags(fs)
+
+	productID := fs.String("product-id", "", "Xcode Cloud product ID (required)")
+
+	return &ffcli.Command{
+		Name:       "list",
+		ShortUsage: "asc web xcode-cloud workflows list --product-id ID [flags]",
+		ShortHelp:  "List workflows for a product.",
+		LongHelp: `WEB SESSION WORKFLOWS
+
+List Xcode Cloud workflows for a product using Apple's CI API.
+Use the workflow IDs with describe, edit, enable, or disable.
+
+The list endpoint returns workflow ID, name, and description. Enabled state,
+branch/trigger configuration, and last-modified are not present in this
+payload; use describe for full workflow configuration.
+
+
+
+Examples:
+  asc web xcode-cloud workflows list --product-id "UUID" --apple-id "user@example.com"
+  asc web xcode-cloud workflows list --product-id "UUID" --apple-id "user@example.com" --output json`,
+		FlagSet:   fs,
+		UsageFunc: shared.DefaultUsageFunc,
+		Exec: func(ctx context.Context, args []string) error {
+			if len(args) > 0 {
+				return shared.UsageError("web xcode-cloud workflows list does not accept positional arguments")
+			}
+
+			pid := strings.TrimSpace(*productID)
+			if pid == "" {
+				fmt.Fprintln(os.Stderr, "Error: --product-id is required")
+				return shared.MissingRequiredUsageError("--product-id")
+			}
+
+			session, requestCtx, cancel, err := resolveWebSessionForCommand(ctx, sessionFlags)
+			defer cancel()
+			if err != nil {
+				return err
+			}
+			teamID := strings.TrimSpace(session.PublicProviderID)
+			if teamID == "" {
+				return fmt.Errorf("xcode-cloud workflows list failed: session has no public provider ID")
+			}
+
+			client := newCIClientFn(session)
+			var result *asc.WebXcodeCloudWorkflowsListResult
+			err = withWebSpinner("Loading Xcode Cloud workflows", func() error {
+				workflows, err := client.ListCIWorkflows(requestCtx, teamID, pid)
+				if err != nil {
+					return err
+				}
+				result = newWorkflowsListResult(pid, workflows)
+				return nil
+			})
+			if err != nil {
+				return withWebAuthHint(err, "xcode-cloud workflows list")
+			}
+
+			return shared.PrintOutput(result, *output.Output, *output.Pretty)
+		},
+	}
+}
+
+func newWorkflowsListResult(productID string, resp *webcore.CIWorkflowListResponse) *asc.WebXcodeCloudWorkflowsListResult {
+	result := &asc.WebXcodeCloudWorkflowsListResult{
+		ProductID: productID,
+		Workflows: []asc.WebXcodeCloudWorkflowListItem{},
+	}
+	if resp == nil {
+		return result
+	}
+	for _, workflow := range resp.Items {
+		result.Workflows = append(result.Workflows, asc.WebXcodeCloudWorkflowListItem{
+			ID:          workflow.ID,
+			Name:        workflow.Content.Name,
+			Description: workflow.Content.Description,
+		})
+	}
+	return result
+}
+
 func webXcodeCloudWorkflowDescribeCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("web xcode-cloud workflows describe", flag.ExitOnError)
 	sessionFlags := bindWebSessionFlags(fs)
@@ -113,13 +201,13 @@ func webXcodeCloudWorkflowDescribeCommand() *ffcli.Command {
 	return &ffcli.Command{
 		Name:       "describe",
 		ShortUsage: "asc web xcode-cloud workflows describe --product-id ID --workflow-id ID [flags]",
-		ShortHelp:  "[experimental] Show workflow configuration.",
-		LongHelp: `EXPERIMENTAL / UNOFFICIAL / DISCOURAGED
+		ShortHelp:  "Show workflow configuration.",
+		LongHelp: `WEB SESSION WORKFLOWS
 
 Show workflow configuration for a specific Xcode Cloud workflow.
 Includes state, toolchain versions, triggers, actions, and linked shared env vars.
 
-` + webWarningText + `
+
 
 Examples:
   asc web xcode-cloud workflows describe --product-id "UUID" --workflow-id "WF-UUID" --apple-id "user@example.com"
@@ -130,18 +218,16 @@ Examples:
 			pid := strings.TrimSpace(*productID)
 			if pid == "" {
 				fmt.Fprintln(os.Stderr, "Error: --product-id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--product-id")
 			}
 			wfID := strings.TrimSpace(*workflowID)
 			if wfID == "" {
 				fmt.Fprintln(os.Stderr, "Error: --workflow-id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--workflow-id")
 			}
 
-			requestCtx, cancel := shared.ContextWithTimeout(ctx)
+			session, requestCtx, cancel, err := resolveWebSessionForCommand(ctx, sessionFlags)
 			defer cancel()
-
-			session, err := resolveWebSessionForCommand(requestCtx, sessionFlags)
 			if err != nil {
 				return err
 			}
@@ -193,15 +279,15 @@ func webXcodeCloudWorkflowCreateCommand() *ffcli.Command {
 	return &ffcli.Command{
 		Name:       "create",
 		ShortUsage: "asc web xcode-cloud workflows create --product-id ID --file ./workflow.json [--workflow-id ID] [flags]",
-		ShortHelp:  "[experimental] Create a workflow from a full private payload.",
-		LongHelp: `EXPERIMENTAL / UNOFFICIAL / DISCOURAGED
+		ShortHelp:  "Create a workflow from a full payload.",
+		LongHelp: `WEB SESSION WORKFLOWS
 
 Create an Xcode Cloud workflow by sending a full workflow payload to the
-private workflow save endpoint used by the ASC web UI.
+workflow save endpoint used by the ASC web UI.
 
 If --workflow-id is omitted, a UUID is generated automatically.
 
-` + webWarningText + `
+
 
 Examples:
   asc web xcode-cloud workflows create --product-id "UUID" --file ./workflow.json --apple-id "user@example.com"
@@ -212,12 +298,12 @@ Examples:
 			pid := strings.TrimSpace(*productID)
 			if pid == "" {
 				fmt.Fprintln(os.Stderr, "Error: --product-id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--product-id")
 			}
 			fileValue := strings.TrimSpace(*file)
 			if fileValue == "" {
 				fmt.Fprintln(os.Stderr, "Error: --file is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--file")
 			}
 
 			payload, err := shared.ReadJSONFilePayload(fileValue)
@@ -231,10 +317,8 @@ Examples:
 				wfID = newUUID()
 			}
 
-			requestCtx, cancel := shared.ContextWithTimeout(ctx)
+			session, requestCtx, cancel, err := resolveWebSessionForCommand(ctx, sessionFlags)
 			defer cancel()
-
-			session, err := resolveWebSessionForCommand(requestCtx, sessionFlags)
 			if err != nil {
 				return err
 			}
@@ -298,16 +382,16 @@ func webXcodeCloudWorkflowEditCommand() *ffcli.Command {
 	return &ffcli.Command{
 		Name:       "edit",
 		ShortUsage: "asc web xcode-cloud workflows edit --product-id ID --workflow-id ID --patch-file ./workflow.patch.json [flags]",
-		ShortHelp:  "[experimental] Edit a workflow with a JSON merge patch.",
-		LongHelp: `EXPERIMENTAL / UNOFFICIAL / DISCOURAGED
+		ShortHelp:  "Edit a workflow with a JSON merge patch.",
+		LongHelp: `WEB SESSION WORKFLOWS
 
 Edit an Xcode Cloud workflow by applying a JSON merge patch to the
-private workflow content returned by the ASC web UI.
+workflow content returned by the ASC web UI.
 Unspecified fields are preserved. For string fields such as description,
-prefer explicit empty values when clearing content because Apple's private
-workflow API does not consistently accept null removals.
+prefer explicit empty values when clearing content because Apple's workflow
+API does not consistently accept null removals.
 
-` + webWarningText + `
+
 
 Examples:
   asc web xcode-cloud workflows edit --product-id "UUID" --workflow-id "WF-UUID" --patch-file ./workflow.patch.json --apple-id "user@example.com"`,
@@ -317,17 +401,17 @@ Examples:
 			pid := strings.TrimSpace(*productID)
 			if pid == "" {
 				fmt.Fprintln(os.Stderr, "Error: --product-id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--product-id")
 			}
 			wfID := strings.TrimSpace(*workflowID)
 			if wfID == "" {
 				fmt.Fprintln(os.Stderr, "Error: --workflow-id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--workflow-id")
 			}
 			patchFileValue := strings.TrimSpace(*patchFile)
 			if patchFileValue == "" {
 				fmt.Fprintln(os.Stderr, "Error: --patch-file is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--patch-file")
 			}
 
 			patchPayload, err := shared.ReadJSONFilePayload(patchFileValue)
@@ -339,10 +423,8 @@ Examples:
 				return fmt.Errorf("xcode-cloud workflows edit: %w", err)
 			}
 
-			requestCtx, cancel := shared.ContextWithTimeout(ctx)
+			session, requestCtx, cancel, err := resolveWebSessionForCommand(ctx, sessionFlags)
 			defer cancel()
-
-			session, err := resolveWebSessionForCommand(requestCtx, sessionFlags)
 			if err != nil {
 				return err
 			}
@@ -407,13 +489,13 @@ func webXcodeCloudWorkflowEnableCommand() *ffcli.Command {
 	return &ffcli.Command{
 		Name:       "enable",
 		ShortUsage: "asc web xcode-cloud workflows enable --product-id ID --workflow-id ID [flags]",
-		ShortHelp:  "[experimental] Enable a workflow.",
-		LongHelp: `EXPERIMENTAL / UNOFFICIAL / DISCOURAGED
+		ShortHelp:  "Enable a workflow.",
+		LongHelp: `WEB SESSION WORKFLOWS
 
 Enable an Xcode Cloud workflow by setting disabled=false.
 If already enabled, this command reports no change and exits successfully.
 
-` + webWarningText + `
+
 
 Examples:
   asc web xcode-cloud workflows enable --product-id "UUID" --workflow-id "WF-UUID" --apple-id "user@example.com"`,
@@ -423,12 +505,12 @@ Examples:
 			pid := strings.TrimSpace(*productID)
 			if pid == "" {
 				fmt.Fprintln(os.Stderr, "Error: --product-id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--product-id")
 			}
 			wfID := strings.TrimSpace(*workflowID)
 			if wfID == "" {
 				fmt.Fprintln(os.Stderr, "Error: --workflow-id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--workflow-id")
 			}
 
 			result, err := executeWorkflowToggle(ctx, sessionFlags, pid, wfID, false, "xcode-cloud workflows enable")
@@ -459,14 +541,14 @@ func webXcodeCloudWorkflowDisableCommand() *ffcli.Command {
 	return &ffcli.Command{
 		Name:       "disable",
 		ShortUsage: "asc web xcode-cloud workflows disable --product-id ID --workflow-id ID --confirm [flags]",
-		ShortHelp:  "[experimental] Disable a workflow.",
-		LongHelp: `EXPERIMENTAL / UNOFFICIAL / DISCOURAGED
+		ShortHelp:  "Disable a workflow.",
+		LongHelp: `WEB SESSION WORKFLOWS
 
 Disable an Xcode Cloud workflow by setting disabled=true.
 Requires --confirm.
 If already disabled, this command reports no change and exits successfully.
 
-` + webWarningText + `
+
 
 Examples:
   asc web xcode-cloud workflows disable --product-id "UUID" --workflow-id "WF-UUID" --confirm --apple-id "user@example.com"`,
@@ -476,16 +558,16 @@ Examples:
 			pid := strings.TrimSpace(*productID)
 			if pid == "" {
 				fmt.Fprintln(os.Stderr, "Error: --product-id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--product-id")
 			}
 			wfID := strings.TrimSpace(*workflowID)
 			if wfID == "" {
 				fmt.Fprintln(os.Stderr, "Error: --workflow-id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--workflow-id")
 			}
 			if !*confirm {
 				fmt.Fprintln(os.Stderr, "Error: --confirm is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--confirm")
 			}
 
 			result, err := executeWorkflowToggle(ctx, sessionFlags, pid, wfID, true, "xcode-cloud workflows disable")
@@ -511,10 +593,8 @@ func executeWorkflowToggle(
 	disabled bool,
 	errorPrefix string,
 ) (*CIWorkflowToggleResult, error) {
-	requestCtx, cancel := shared.ContextWithTimeout(ctx)
+	session, requestCtx, cancel, err := resolveWebSessionForCommand(ctx, sessionFlags)
 	defer cancel()
-
-	session, err := resolveWebSessionForCommand(requestCtx, sessionFlags)
 	if err != nil {
 		return nil, err
 	}

@@ -62,13 +62,13 @@ func WebAnalyticsSourcesCommand() *ffcli.Command {
 	return &ffcli.Command{
 		Name:       "sources",
 		ShortUsage: "asc web analytics sources [flags]",
-		ShortHelp:  "[experimental] Recreate the Acquisition > Sources page.",
-		LongHelp: `EXPERIMENTAL / UNOFFICIAL / DISCOURAGED
+		ShortHelp:  "Recreate the Acquisition > Sources page.",
+		LongHelp: `WEB SESSION WORKFLOWS
 
 	Show the default Acquisition > Sources view: Product Page Views (Unique Devices)
 	grouped by source over the selected date range.
 
-` + webWarningText,
+`,
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
@@ -76,10 +76,8 @@ func WebAnalyticsSourcesCommand() *ffcli.Command {
 			if err != nil {
 				return err
 			}
-			requestCtx, cancel := shared.ContextWithTimeout(ctx)
+			session, requestCtx, cancel, err := resolveWebSessionForCommand(ctx, sessionFlags)
 			defer cancel()
-
-			session, err := resolveWebSessionForCommand(requestCtx, sessionFlags)
 			if err != nil {
 				return err
 			}
@@ -106,7 +104,7 @@ func WebAnalyticsSourcesCommand() *ffcli.Command {
 func WebAnalyticsProductPagesCommand() *ffcli.Command {
 	return newAnalyticsCapabilityCommand(
 		"product-pages",
-		"[experimental] Inspect Product Pages tab availability.",
+		"Inspect Product Pages tab availability.",
 		"Product Pages tab availability",
 		func(appInfo *webcore.AnalyticsAppInfoResult) analyticsPageCapabilityOutput {
 			count := analyticsAppFeatureCount(appInfo, "customProductPage")
@@ -144,14 +142,14 @@ func WebAnalyticsInAppEventsCommand() *ffcli.Command {
 	return &ffcli.Command{
 		Name:       "in-app-events",
 		ShortUsage: "asc web analytics in-app-events [flags]",
-		ShortHelp:  "[experimental] Recreate the Acquisition > In-App Events page.",
-		LongHelp: `EXPERIMENTAL / UNOFFICIAL / DISCOURAGED
+		ShortHelp:  "Recreate the Acquisition > In-App Events page.",
+		LongHelp: `WEB SESSION WORKFLOWS
 
 	Show the In-App Events tab using the app's event list and the default selected
 	event metrics. App Store Connect currently uses the event's lifetime range for
 	the selected event metrics.
 
-` + webWarningText,
+`,
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
@@ -159,10 +157,8 @@ func WebAnalyticsInAppEventsCommand() *ffcli.Command {
 			if err != nil {
 				return err
 			}
-			requestCtx, cancel := shared.ContextWithTimeout(ctx)
+			session, requestCtx, cancel, err := resolveWebSessionForCommand(ctx, sessionFlags)
 			defer cancel()
-
-			session, err := resolveWebSessionForCommand(requestCtx, sessionFlags)
 			if err != nil {
 				return err
 			}
@@ -189,7 +185,7 @@ func WebAnalyticsInAppEventsCommand() *ffcli.Command {
 func WebAnalyticsAppClipsCommand() *ffcli.Command {
 	return newAnalyticsCapabilityCommand(
 		"app-clips",
-		"[experimental] Inspect App Clip tab availability.",
+		"Inspect App Clip tab availability.",
 		"App Clip tab availability",
 		func(appInfo *webcore.AnalyticsAppInfoResult) analyticsPageCapabilityOutput {
 			status := "unavailable"
@@ -225,12 +221,12 @@ func WebAnalyticsCampaignsCommand() *ffcli.Command {
 	return &ffcli.Command{
 		Name:       "campaigns",
 		ShortUsage: "asc web analytics campaigns [flags]",
-		ShortHelp:  "[experimental] Recreate the Acquisition > Campaigns page.",
-		LongHelp: `EXPERIMENTAL / UNOFFICIAL / DISCOURAGED
+		ShortHelp:  "Recreate the Acquisition > Campaigns page.",
+		LongHelp: `WEB SESSION WORKFLOWS
 
-	Show the Campaigns tab using Apple's private sources/list endpoint.
+	Show the Campaigns tab using Apple's sources/list endpoint.
 
-` + webWarningText,
+`,
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
@@ -238,10 +234,8 @@ func WebAnalyticsCampaignsCommand() *ffcli.Command {
 			if err != nil {
 				return err
 			}
-			requestCtx, cancel := shared.ContextWithTimeout(ctx)
+			session, requestCtx, cancel, err := resolveWebSessionForCommand(ctx, sessionFlags)
 			defer cancel()
-
-			session, err := resolveWebSessionForCommand(requestCtx, sessionFlags)
 			if err != nil {
 				return err
 			}
@@ -276,12 +270,12 @@ func WebAnalyticsSalesCommand() *ffcli.Command {
 	return &ffcli.Command{
 		Name:       "sales",
 		ShortUsage: "asc web analytics sales [flags]",
-		ShortHelp:  "[experimental] Recreate the Monetization > Sales page.",
-		LongHelp: `EXPERIMENTAL / UNOFFICIAL / DISCOURAGED
+		ShortHelp:  "Recreate the Monetization > Sales page.",
+		LongHelp: `WEB SESSION WORKFLOWS
 
 	Show the Sales summary cards, revenue cohort cards, and top revenue breakdowns.
 
-` + webWarningText,
+`,
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
@@ -289,10 +283,8 @@ func WebAnalyticsSalesCommand() *ffcli.Command {
 			if err != nil {
 				return err
 			}
-			requestCtx, cancel := shared.ContextWithTimeout(ctx)
+			session, requestCtx, cancel, err := resolveWebSessionForCommand(ctx, sessionFlags)
 			defer cancel()
-
-			session, err := resolveWebSessionForCommand(requestCtx, sessionFlags)
 			if err != nil {
 				return err
 			}
@@ -319,7 +311,7 @@ func WebAnalyticsSalesCommand() *ffcli.Command {
 func WebAnalyticsOffersCommand() *ffcli.Command {
 	return newAnalyticsCapabilityCommand(
 		"offers",
-		"[experimental] Inspect Offers tab capability.",
+		"Inspect Offers tab capability.",
 		"Offers tab capability",
 		func(appInfo *webcore.AnalyticsAppInfoResult) analyticsPageCapabilityOutput {
 			status := "unknown"
@@ -353,12 +345,12 @@ func WebAnalyticsBenchmarksCommand() *ffcli.Command {
 	return &ffcli.Command{
 		Name:       "benchmarks",
 		ShortUsage: "asc web analytics benchmarks [flags]",
-		ShortHelp:  "[experimental] Recreate the Benchmarks summary page.",
-		LongHelp: `EXPERIMENTAL / UNOFFICIAL / DISCOURAGED
+		ShortHelp:  "Recreate the Benchmarks summary page.",
+		LongHelp: `WEB SESSION WORKFLOWS
 
 	Show the latest available benchmark week using Apple's analytics v2 endpoints.
 
-` + webWarningText,
+`,
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
@@ -366,10 +358,8 @@ func WebAnalyticsBenchmarksCommand() *ffcli.Command {
 			if err != nil {
 				return err
 			}
-			requestCtx, cancel := shared.ContextWithTimeout(ctx)
+			session, requestCtx, cancel, err := resolveWebSessionForCommand(ctx, sessionFlags)
 			defer cancel()
-
-			session, err := resolveWebSessionForCommand(requestCtx, sessionFlags)
 			if err != nil {
 				return err
 			}
@@ -407,12 +397,12 @@ func newAnalyticsCapabilityCommand(
 		Name:       name,
 		ShortUsage: "asc web analytics " + name + " [flags]",
 		ShortHelp:  shortHelp,
-		LongHelp: `EXPERIMENTAL / UNOFFICIAL / DISCOURAGED
+		LongHelp: `WEB SESSION WORKFLOWS
 
 Inspect whether this analytics tab is available for the current app and show the
 relevant analytics features or dimensions we observed while mapping the sidebar.
 
-` + webWarningText,
+`,
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
@@ -420,10 +410,8 @@ relevant analytics features or dimensions we observed while mapping the sidebar.
 			if err != nil {
 				return err
 			}
-			requestCtx, cancel := shared.ContextWithTimeout(ctx)
+			session, requestCtx, cancel, err := resolveWebSessionForCommand(ctx, sessionFlags)
 			defer cancel()
-
-			session, err := resolveWebSessionForCommand(requestCtx, sessionFlags)
 			if err != nil {
 				return err
 			}

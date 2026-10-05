@@ -21,7 +21,7 @@ Use these commands deliberately:
 * `asc submit cancel` - cancel an active submission
 
 In 1.0, the old `submit preflight` and `submit create` compatibility commands
-were removed. See [Migrate to 1.0](/migrate-to-1-0) for upgrade mappings.
+were removed.
 
 ## Submission lifecycle
 
@@ -49,6 +49,13 @@ Cancel an active review submission:
 ```bash  theme={null}
 asc submit cancel --id SUBMISSION_ID --confirm
 ```
+
+If App Store Connect refuses with `Resource is not in cancellable state`, the
+command reads the submission once and explains its state and the next step,
+for example that a `READY_FOR_REVIEW` draft was never submitted, or that an
+`UNRESOLVED_ISSUES` submission needs a fix or a Resolution Center reply. If
+that read fails, the command reports the refusal as it did before, with Apple's
+original error text.
 
 ## Canonical publish workflow
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"maps"
@@ -74,7 +75,7 @@ Examples:
 			resolvedAppID := shared.ResolveAppID(*appID)
 			if resolvedAppID == "" {
 				fmt.Fprintln(os.Stderr, "Error: --app is required (or set ASC_APP_ID)")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--app")
 			}
 
 			if *allTerritories && strings.TrimSpace(*territory) != "" {
@@ -98,6 +99,9 @@ Examples:
 
 			scheduleResp, err := getAppPriceScheduleWithTimeout(ctx, client, resolvedAppID)
 			if err != nil {
+				if isAppPriceScheduleNotConfigured(err) {
+					return reportAppPriceScheduleNotConfigured(resolvedAppID, *output.Output, *output.Pretty)
+				}
 				return fmt.Errorf("pricing current: get app price schedule: %w", err)
 			}
 
@@ -108,6 +112,9 @@ Examples:
 
 			baseTerritoryResp, err := getAppPriceScheduleBaseTerritoryWithTimeout(ctx, client, scheduleID)
 			if err != nil {
+				if isAppPriceScheduleNotConfigured(err) {
+					return reportAppPriceScheduleNotConfigured(resolvedAppID, *output.Output, *output.Pretty)
+				}
 				return fmt.Errorf("pricing current: get base territory: %w", err)
 			}
 
@@ -116,10 +123,13 @@ Examples:
 				return fmt.Errorf("pricing current: base territory missing from response")
 			}
 
-			manualEntries, manualValues, manualCurrencies, err := fetchAppSchedulePriceEntries(ctx, func(callCtx context.Context, opts ...asc.AppPriceSchedulePricesOption) (*asc.AppPricesResponse, error) {
+			manualEntries, manualValues, manualCurrencies, err := fetchAppSchedulePriceEntries(ctx, runAppPriceRequestWithTimeout, func(callCtx context.Context, opts ...asc.AppPriceSchedulePricesOption) (*asc.AppPricesResponse, error) {
 				return client.GetAppPriceScheduleManualPrices(callCtx, scheduleID, opts...)
 			})
 			if err != nil {
+				if isAppPriceScheduleNotConfigured(err) {
+					return reportAppPriceScheduleNotConfigured(resolvedAppID, *output.Output, *output.Pretty)
+				}
 				return fmt.Errorf("pricing current: fetch manual prices: %w", err)
 			}
 
@@ -138,10 +148,13 @@ Examples:
 			}
 
 			if needAutomatic {
-				automaticEntries, automaticValues, automaticCurrencies, err := fetchAppSchedulePriceEntries(ctx, func(callCtx context.Context, opts ...asc.AppPriceSchedulePricesOption) (*asc.AppPricesResponse, error) {
+				automaticEntries, automaticValues, automaticCurrencies, err := fetchAppSchedulePriceEntries(ctx, runAppPriceRequestWithTimeout, func(callCtx context.Context, opts ...asc.AppPriceSchedulePricesOption) (*asc.AppPricesResponse, error) {
 					return client.GetAppPriceScheduleAutomaticPrices(callCtx, scheduleID, opts...)
 				})
 				if err != nil {
+					if isAppPriceScheduleNotConfigured(err) {
+						return reportAppPriceScheduleNotConfigured(resolvedAppID, *output.Output, *output.Pretty)
+					}
 					return fmt.Errorf("pricing current: fetch automatic prices: %w", err)
 				}
 				entries = append(entries, automaticEntries...)
@@ -150,7 +163,6 @@ Examples:
 			}
 
 			entries = dedupeAppPriceEntries(entries)
-			now := time.Now().UTC()
 
 			result, err := buildAppCurrentPricingResult(
 				resolvedAppID,
@@ -160,9 +172,13 @@ Examples:
 				currencies,
 				requestedTerritories,
 				*allTerritories,
-				now,
+				shared.PricingNow(),
 			)
 			if err != nil {
+				var noBasePrice noCurrentBasePriceError
+				if errors.As(err, &noBasePrice) {
+					return reportNoCurrentBasePrice(resolvedAppID, noBasePrice, *output.Output, *output.Pretty)
+				}
 				return fmt.Errorf("pricing current: %w", err)
 			}
 
@@ -171,34 +187,108 @@ Examples:
 	}
 }
 
+// isAppPriceScheduleNotConfigured reports whether err is Apple's 404 for an
+// app whose price schedule was never created. Live, GET
+// /v1/apps/{id}/appPriceSchedule still returns a synthetic schedule whose ID is
+// the app ID, and the first schedule sub-resource read (base territory or
+// prices) then fails with "There is no resource of type 'null' with id
+// '{appId}'". The appPriceSchedules shape is accepted as well in case Apple
+// starts rejecting the schedule read itself.
+func isAppPriceScheduleNotConfigured(err error) bool {
+	return asc.IsMissingResourceOfType(err, "appPriceSchedules") || asc.IsMissingResourceOfType(err, "null")
+}
+
+// reportAppPriceScheduleNotConfigured prints the configured=false receipt on
+// stdout and the remediation hint on stderr, then returns the expected-negative
+// error so callers can distinguish "not configured yet" from a failed request.
+func reportAppPriceScheduleNotConfigured(appID, format string, pretty bool) error {
+	if err := shared.PrintOutput(&asc.AppPriceScheduleNotConfiguredResult{AppID: appID, Configured: false}, format, pretty); err != nil {
+		return fmt.Errorf("pricing current: %w", err)
+	}
+	safeAppID := asc.SanitizeTerminalText(appID)
+	fmt.Fprintf(os.Stderr, "App %s has no price schedule configured yet; create it with: %s\n", safeAppID, appPriceScheduleCreateHint(safeAppID, "USA"))
+	return shared.NewNotConfiguredReportedError(fmt.Errorf("pricing current: app %q has no price schedule configured", appID))
+}
+
+// appPriceScheduleNoCurrentBasePrice is the not-configured reason when the
+// price schedule exists but has no price for its base territory today.
+const appPriceScheduleNoCurrentBasePrice = "no_current_base_price"
+
+// noCurrentBasePriceError reports that the base territory has no price on
+// today's pricing date. NextStartDate is the earliest later base price start
+// date, when one exists.
+type noCurrentBasePriceError struct {
+	BaseTerritory string
+	NextStartDate string
+}
+
+func (e noCurrentBasePriceError) Error() string {
+	return fmt.Sprintf("no current price found for base territory %s", e.BaseTerritory)
+}
+
+// reportNoCurrentBasePrice prints the same configured=false receipt and
+// remediation as reportAppPriceScheduleNotConfigured for a schedule that
+// exists but has no current base territory price, so the app cannot be
+// submitted until a price is set.
+func reportNoCurrentBasePrice(appID string, missing noCurrentBasePriceError, format string, pretty bool) error {
+	result := &asc.AppPriceScheduleNotConfiguredResult{
+		AppID:         appID,
+		Configured:    false,
+		BaseTerritory: missing.BaseTerritory,
+		Reason:        appPriceScheduleNoCurrentBasePrice,
+		NextStartDate: missing.NextStartDate,
+	}
+	if err := shared.PrintOutput(result, format, pretty); err != nil {
+		return fmt.Errorf("pricing current: %w", err)
+	}
+	safeAppID := asc.SanitizeTerminalText(appID)
+	safeTerritory := asc.SanitizeTerminalText(missing.BaseTerritory)
+	next := ""
+	if missing.NextStartDate != "" {
+		next = fmt.Sprintf(" (the next base price starts %s)", asc.SanitizeTerminalText(missing.NextStartDate))
+	}
+	fmt.Fprintf(os.Stderr, "App %s has no current price for base territory %s%s; set one with: %s\n", safeAppID, safeTerritory, next, appPriceScheduleCreateHint(safeAppID, safeTerritory))
+	return shared.NewNotConfiguredReportedError(fmt.Errorf("pricing current: app %q has no current price for base territory %s", appID, missing.BaseTerritory))
+}
+
+// appPriceScheduleCreateHint is the remediation command for a missing app
+// price. It omits --start-date, which defaults to today's US Pacific date.
+func appPriceScheduleCreateHint(appID, baseTerritory string) string {
+	return fmt.Sprintf("asc pricing schedule create --app %s --free --base-territory %q", appID, baseTerritory)
+}
+
 type appSchedulePricePageFetcher func(context.Context, ...asc.AppPriceSchedulePricesOption) (*asc.AppPricesResponse, error)
 
 func fetchAppSchedulePriceEntries(
 	ctx context.Context,
+	run AppPriceRequestRunner,
 	fetch appSchedulePricePageFetcher,
 ) ([]appPriceEntry, map[string]appPricePointValue, map[string]string, error) {
 	const limit = 200
 
 	fetchPage := func(nextURL string) (*asc.AppPricesResponse, error) {
-		callCtx, cancel := shared.ContextWithTimeout(ctx)
-		defer cancel()
-
-		if strings.TrimSpace(nextURL) != "" {
-			mergedNextURL, err := shared.MergeNextURLQuery(nextURL, appSchedulePricesQuery(limit))
-			if err != nil {
-				return nil, err
-			}
-			return fetch(callCtx, asc.WithAppPriceSchedulePricesNextURL(mergedNextURL))
-		}
-
-		return fetch(
-			callCtx,
+		opts := []asc.AppPriceSchedulePricesOption{
 			asc.WithAppPriceSchedulePricesInclude([]string{"appPricePoint", "territory"}),
 			asc.WithAppPriceSchedulePricesFields([]string{"manual", "startDate", "endDate", "appPricePoint", "territory"}),
 			asc.WithAppPriceSchedulePricesPricePointFields([]string{"customerPrice", "proceeds", "territory"}),
 			asc.WithAppPriceSchedulePricesTerritoryFields([]string{"currency"}),
 			asc.WithAppPriceSchedulePricesLimit(limit),
-		)
+		}
+		if strings.TrimSpace(nextURL) != "" {
+			mergedNextURL, err := shared.MergeNextURLQuery(nextURL, appSchedulePricesQuery(limit))
+			if err != nil {
+				return nil, err
+			}
+			opts = []asc.AppPriceSchedulePricesOption{asc.WithAppPriceSchedulePricesNextURL(mergedNextURL)}
+		}
+
+		var page *asc.AppPricesResponse
+		err := run(ctx, func(callCtx context.Context) error {
+			var fetchErr error
+			page, fetchErr = fetch(callCtx, opts...)
+			return fetchErr
+		})
+		return page, err
 	}
 
 	firstPage, err := fetchPage("")
@@ -343,9 +433,9 @@ func resolveCurrentTerritoryPrice(
 	values map[string]appPricePointValue,
 	currencies map[string]string,
 	territoryID string,
-	now time.Time,
+	date time.Time,
 ) (appCurrentTerritoryPrice, bool, error) {
-	currentEntry, found := findActiveAppPriceEntry(entries, territoryID, now)
+	currentEntry, found := findActiveAppPriceEntry(entries, territoryID, date)
 	if !found {
 		return appCurrentTerritoryPrice{}, false, nil
 	}
@@ -381,17 +471,21 @@ func buildAppCurrentPricingResult(
 	allTerritories bool,
 	now time.Time,
 ) (*appCurrentPricingResult, error) {
-	baseCurrent, foundBase, err := resolveCurrentTerritoryPrice(entries, values, currencies, baseTerritory, now)
+	today := shared.PricingDate(now)
+	baseCurrent, foundBase, err := resolveCurrentTerritoryPrice(entries, values, currencies, baseTerritory, today)
 	if err != nil {
 		return nil, err
 	}
 	if !foundBase {
-		return nil, fmt.Errorf("no current price found for base territory %s", baseTerritory)
+		return nil, noCurrentBasePriceError{
+			BaseTerritory: baseTerritory,
+			NextStartDate: nextAppPriceStartDate(entries, baseTerritory, today),
+		}
 	}
 
 	targetTerritories := requestedTerritories
 	if allTerritories {
-		targetTerritories = territoriesFromActiveEntries(entries, now)
+		targetTerritories = territoriesFromActiveEntries(entries, today)
 	}
 	if len(targetTerritories) == 0 {
 		targetTerritories = []string{baseTerritory}
@@ -400,7 +494,7 @@ func buildAppCurrentPricingResult(
 	currentPrices := make([]appCurrentTerritoryPrice, 0, len(targetTerritories))
 	missingTerritories := make([]string, 0)
 	for _, territoryID := range targetTerritories {
-		price, found, err := resolveCurrentTerritoryPrice(entries, values, currencies, territoryID, now)
+		price, found, err := resolveCurrentTerritoryPrice(entries, values, currencies, territoryID, today)
 		if err != nil {
 			return nil, err
 		}
@@ -438,13 +532,14 @@ func buildAppCurrentPricingResult(
 	return result, nil
 }
 
-func findActiveAppPriceEntry(entries []appPriceEntry, territoryID string, at time.Time) (appPriceEntry, bool) {
+// findActiveAppPriceEntry returns the territory's price that applies on date,
+// a pricing date from shared.PricingDate.
+func findActiveAppPriceEntry(entries []appPriceEntry, territoryID string, date time.Time) (appPriceEntry, bool) {
 	territoryID = strings.ToUpper(strings.TrimSpace(territoryID))
 	if territoryID == "" {
 		return appPriceEntry{}, false
 	}
 
-	at = dateOnlyUTC(at)
 	var best appPriceEntry
 	found := false
 
@@ -452,7 +547,7 @@ func findActiveAppPriceEntry(entries []appPriceEntry, territoryID string, at tim
 		if entry.TerritoryID != territoryID {
 			continue
 		}
-		if !appPriceEntryActiveOn(entry, at) {
+		if !appPriceEntryActiveOn(entry, date) {
 			continue
 		}
 		if !found || appPriceEntryIsNewer(entry, best) {
@@ -462,6 +557,25 @@ func findActiveAppPriceEntry(entries []appPriceEntry, territoryID string, at tim
 	}
 
 	return best, found
+}
+
+// nextAppPriceStartDate returns the earliest start date after date among the
+// territory's prices, or "" when none starts later.
+func nextAppPriceStartDate(entries []appPriceEntry, territoryID string, date time.Time) string {
+	territoryID = strings.ToUpper(strings.TrimSpace(territoryID))
+	var next *time.Time
+	for _, entry := range entries {
+		if entry.TerritoryID != territoryID || entry.StartAt == nil || !entry.StartAt.After(date) {
+			continue
+		}
+		if next == nil || entry.StartAt.Before(*next) {
+			next = entry.StartAt
+		}
+	}
+	if next == nil {
+		return ""
+	}
+	return next.Format(appPriceDateLayout)
 }
 
 func decodeAppPriceResourceID(resourceID string) (string, string, bool) {
@@ -556,14 +670,14 @@ func uniqueUpperList(values []string) []string {
 	return unique
 }
 
-func territoriesFromActiveEntries(entries []appPriceEntry, at time.Time) []string {
+func territoriesFromActiveEntries(entries []appPriceEntry, date time.Time) []string {
 	territories := make([]string, 0, len(entries))
 	seen := make(map[string]struct{}, len(entries))
 	for _, entry := range entries {
 		if entry.TerritoryID == "" {
 			continue
 		}
-		if !appPriceEntryActiveOn(entry, dateOnlyUTC(at)) {
+		if !appPriceEntryActiveOn(entry, date) {
 			continue
 		}
 		if _, exists := seen[entry.TerritoryID]; exists {

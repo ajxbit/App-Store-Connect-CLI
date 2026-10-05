@@ -4,10 +4,14 @@ import (
 	"context"
 	"errors"
 	"flag"
+	"io"
+	"os"
 	"strings"
 	"testing"
 
 	"github.com/peterbourgon/ff/v3/ffcli"
+
+	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/asc"
 )
 
 func TestPricingPricePointsCommand_MissingApp(t *testing.T) {
@@ -126,7 +130,6 @@ func TestPricingScheduleCreateCommand_MissingFlags(t *testing.T) {
 		{name: "missing app", args: []string{"--price-point", "PP", "--base-territory", "USA", "--start-date", "2024-03-01"}},
 		{name: "missing price point", args: []string{"--app", "APP", "--base-territory", "USA", "--start-date", "2024-03-01"}},
 		{name: "missing base territory", args: []string{"--app", "APP", "--price-point", "PP", "--start-date", "2024-03-01"}},
-		{name: "missing start date", args: []string{"--app", "APP", "--price-point", "PP", "--base-territory", "USA"}},
 	}
 
 	for _, test := range tests {
@@ -195,8 +198,26 @@ func TestPricingScheduleCreateCommand_InvalidDate(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for invalid start date")
 	}
-	if errors.Is(err, flag.ErrHelp) {
-		t.Fatal("expected non-ErrHelp error for invalid start date")
+	if !errors.Is(err, flag.ErrHelp) {
+		t.Fatalf("expected usage error (flag.ErrHelp) for invalid start date, got %v", err)
+	}
+}
+
+func TestPricingScheduleCreateCommand_HelpDocumentsStartDateDefault(t *testing.T) {
+	cmd := PricingScheduleCreateCommand()
+
+	usage := cmd.FlagSet.Lookup("start-date").Usage
+	if !strings.Contains(usage, "default: today in US Pacific time") {
+		t.Fatalf("expected --start-date help to document the US Pacific default, got %q", usage)
+	}
+	if !strings.Contains(cmd.LongHelp, "today's date in US Pacific time") {
+		t.Fatalf("expected long help to document the US Pacific default, got %q", cmd.LongHelp)
+	}
+	if !strings.Contains(usage, "today or later") {
+		t.Fatalf("expected --start-date help to mention Apple requires today or later, got %q", usage)
+	}
+	if !strings.Contains(cmd.LongHelp, "Apple requires the start date to be today or later") {
+		t.Fatalf("expected long help to mention Apple's today-or-later rule, got %q", cmd.LongHelp)
 	}
 }
 
@@ -262,7 +283,6 @@ func TestPricingAvailabilitySetCommand_MissingFlags(t *testing.T) {
 		{name: "missing territory", args: []string{"--app", "APP", "--available", "true", "--available-in-new-territories", "true"}},
 		{name: "invalid territory csv", args: []string{"--app", "APP", "--territory", ",,,", "--available", "true", "--available-in-new-territories", "true"}},
 		{name: "missing available", args: []string{"--app", "APP", "--territory", "USA", "--available-in-new-territories", "true"}},
-		{name: "missing available in new territories", args: []string{"--app", "APP", "--territory", "USA", "--available", "true"}},
 	}
 
 	for _, test := range tests {
@@ -279,6 +299,68 @@ func TestPricingAvailabilitySetCommand_MissingFlags(t *testing.T) {
 	}
 }
 
+func capturePricingStderr(t *testing.T, fn func()) string {
+	t.Helper()
+
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("create stderr pipe: %v", err)
+	}
+	originalStderr := os.Stderr
+	os.Stderr = writer
+	defer func() {
+		os.Stderr = originalStderr
+	}()
+
+	fn()
+	if err := writer.Close(); err != nil {
+		t.Fatalf("close stderr writer: %v", err)
+	}
+	output, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatalf("read stderr: %v", err)
+	}
+	if err := reader.Close(); err != nil {
+		t.Fatalf("close stderr reader: %v", err)
+	}
+	return string(output)
+}
+
+func TestPricingAvailabilityCreateCommand_MissingFlags(t *testing.T) {
+	t.Setenv("ASC_APP_ID", "")
+
+	tests := []struct {
+		name       string
+		args       []string
+		wantStderr string
+	}{
+		{name: "missing app", args: []string{"--territory", "USA", "--available", "true", "--available-in-new-territories", "true"}, wantStderr: "--app is required"},
+		{name: "missing territory", args: []string{"--app", "APP", "--available", "true", "--available-in-new-territories", "true"}, wantStderr: "--territory or --all-territories is required"},
+		{name: "territory and all territories", args: []string{"--app", "APP", "--territory", "USA", "--all-territories", "--available", "true", "--available-in-new-territories", "true"}, wantStderr: "--territory and --all-territories are mutually exclusive"},
+		{name: "invalid territory csv", args: []string{"--app", "APP", "--territory", ",,,", "--available", "true", "--available-in-new-territories", "true"}, wantStderr: "--territory must include at least one value"},
+		{name: "missing available", args: []string{"--app", "APP", "--territory", "USA", "--available-in-new-territories", "true"}, wantStderr: "--available is required"},
+		{name: "missing available in new territories", args: []string{"--app", "APP", "--territory", "USA", "--available", "true"}, wantStderr: "--available-in-new-territories is required"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			cmd := PricingAvailabilityCreateCommand()
+			if err := cmd.FlagSet.Parse(test.args); err != nil {
+				t.Fatalf("failed to parse flags: %v", err)
+			}
+
+			stderr := capturePricingStderr(t, func() {
+				if err := cmd.Exec(context.Background(), []string{}); !errors.Is(err, flag.ErrHelp) {
+					t.Fatalf("expected flag.ErrHelp, got %v", err)
+				}
+			})
+			if !strings.Contains(stderr, test.wantStderr) {
+				t.Fatalf("expected stderr to contain %q, got %q", test.wantStderr, stderr)
+			}
+		})
+	}
+}
+
 func TestPricingAvailabilitySetCommand_HasAvailableInNewTerritoriesFlag(t *testing.T) {
 	cmd := PricingAvailabilitySetCommand()
 
@@ -287,17 +369,83 @@ func TestPricingAvailabilitySetCommand_HasAvailableInNewTerritoriesFlag(t *testi
 	}
 }
 
-func TestPricingAvailabilityCommand_UsesExistingAvailabilitySurface(t *testing.T) {
+func TestPricingAvailabilityCommand_RegistersCreate(t *testing.T) {
 	cmd := PricingAvailabilityCommand()
 
 	for _, subcommand := range cmd.Subcommands {
 		if subcommand.Name == "create" {
-			t.Fatal("did not expect pricing availability create to be registered")
+			if !strings.Contains(cmd.LongHelp, "pricing availability create") {
+				t.Fatalf("expected availability help to mention create, got %q", cmd.LongHelp)
+			}
+			return
 		}
 	}
 
-	if !strings.Contains(cmd.LongHelp, `"asc web apps availability create"`) {
-		t.Fatalf("expected pricing availability help to point at web bootstrap flow, got %q", cmd.LongHelp)
+	t.Fatal("expected pricing availability create to be registered")
+}
+
+func TestPricingAvailabilityCommand_RegistersRemoveFromSale(t *testing.T) {
+	cmd := PricingAvailabilityCommand()
+
+	for _, subcommand := range cmd.Subcommands {
+		if subcommand.Name == "remove-from-sale" {
+			if !strings.Contains(cmd.LongHelp, "pricing availability remove-from-sale") {
+				t.Fatalf("expected availability help to mention remove-from-sale, got %q", cmd.LongHelp)
+			}
+			return
+		}
+	}
+
+	t.Fatal("expected pricing availability remove-from-sale to be registered")
+}
+
+func TestPricingAvailabilityCommand_RegistersPlatforms(t *testing.T) {
+	cmd := PricingAvailabilityCommand()
+	for _, subcommand := range cmd.Subcommands {
+		if subcommand.Name == "platforms" {
+			if !strings.Contains(cmd.LongHelp, `pricing availability platforms --app "123456789"`) {
+				t.Fatalf("expected availability help to mention platforms, got %q", cmd.LongHelp)
+			}
+			return
+		}
+	}
+	t.Fatal("expected pricing availability platforms to be registered")
+}
+
+func TestPricingAvailabilityRemoveFromSaleCommand_AllPlatformsIsRegistered(t *testing.T) {
+	command := PricingAvailabilityRemoveFromSaleCommand()
+	allPlatforms := command.FlagSet.Lookup("all-platforms")
+	if allPlatforms == nil {
+		t.Fatal("expected --all-platforms flag")
+	}
+}
+
+func TestPricingAvailabilityRemoveFromSaleCommand_MissingConfirmBeforeAuth(t *testing.T) {
+	t.Setenv("ASC_APP_ID", "")
+	called := false
+	originalFactory := pricingAvailabilityClientFactory
+	pricingAvailabilityClientFactory = func() (*asc.Client, error) {
+		called = true
+		return nil, errors.New("unexpected auth")
+	}
+	t.Cleanup(func() { pricingAvailabilityClientFactory = originalFactory })
+
+	cmd := PricingAvailabilityRemoveFromSaleCommand()
+	if err := cmd.FlagSet.Parse([]string{"--app", "APP"}); err != nil {
+		t.Fatalf("failed to parse flags: %v", err)
+	}
+
+	stderr := capturePricingStderr(t, func() {
+		err := cmd.Exec(context.Background(), nil)
+		if !errors.Is(err, flag.ErrHelp) {
+			t.Fatalf("expected flag.ErrHelp, got %v", err)
+		}
+	})
+	if called {
+		t.Fatal("client factory called before --confirm validation")
+	}
+	if !strings.Contains(stderr, "--confirm is required") {
+		t.Fatalf("expected confirmation diagnostic, got %q", stderr)
 	}
 }
 
@@ -325,8 +473,10 @@ func TestPricingCommands_DefaultOutputJSON(t *testing.T) {
 		{"schedule manual-prices", PricingScheduleManualPricesCommand},
 		{"schedule automatic-prices", PricingScheduleAutomaticPricesCommand},
 		{"availability get", PricingAvailabilityGetCommand},
+		{"availability create", PricingAvailabilityCreateCommand},
 		{"availability territory-availabilities", PricingAvailabilityTerritoryAvailabilitiesCommand},
 		{"availability set", PricingAvailabilitySetCommand},
+		{"availability remove-from-sale", PricingAvailabilityRemoveFromSaleCommand},
 	}
 
 	for _, tc := range commands {
@@ -335,6 +485,7 @@ func TestPricingCommands_DefaultOutputJSON(t *testing.T) {
 			f := cmd.FlagSet.Lookup("output")
 			if f == nil {
 				t.Fatalf("expected --output flag to be defined")
+				return
 			}
 			if f.DefValue != "json" {
 				t.Fatalf("expected --output default to be 'json', got %q", f.DefValue)

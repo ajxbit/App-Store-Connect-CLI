@@ -14,20 +14,22 @@ func TestAgeRatingCommandShape(t *testing.T) {
 	cmd := AgeRatingCommand()
 	if cmd == nil {
 		t.Fatal("expected age-rating command")
+		return
 	}
 	if cmd.Name != "age-rating" {
 		t.Fatalf("unexpected command name: %q", cmd.Name)
 	}
-	if len(cmd.Subcommands) != 2 {
-		t.Fatalf("expected 2 subcommands, got %d", len(cmd.Subcommands))
+	if len(cmd.Subcommands) != 3 {
+		t.Fatalf("expected 3 subcommands, got %d", len(cmd.Subcommands))
 	}
 	if got := AgeRatingCommand(); got == nil {
 		t.Fatal("expected Command wrapper to return command")
 	}
 	usage := cmd.UsageFunc(cmd)
 	for _, visible := range []string{
-		"\n  view  View an age rating declaration.",
-		"\n  edit  Update an age rating declaration.",
+		"\n  view   View an age rating declaration.",
+		"\n  edit   Update an age rating declaration.",
+		"\n  audit  Audit social-media age rating responses across apps.",
 	} {
 		if !strings.Contains(usage, visible) {
 			t.Fatalf("expected age-rating help to include canonical verb %q, got %q", strings.TrimSpace(visible), usage)
@@ -36,6 +38,16 @@ func TestAgeRatingCommandShape(t *testing.T) {
 	for _, hidden := range []string{"\n  get\t", "\n  set\t"} {
 		if strings.Contains(usage, hidden) {
 			t.Fatalf("expected age-rating help to hide legacy verb %q, got %q", strings.TrimSpace(hidden), usage)
+		}
+	}
+}
+
+func TestAgeRatingAuditFlagsAreRegistered(t *testing.T) {
+	cmd := AgeRatingAuditCommand()
+	for _, name := range []string{"app", "paginate"} {
+		flag := cmd.FlagSet.Lookup(name)
+		if flag == nil {
+			t.Fatalf("expected --%s flag", name)
 		}
 	}
 }
@@ -78,8 +90,10 @@ func TestAgeRatingValidationErrors(t *testing.T) {
 func TestAgeRatingHelpers(t *testing.T) {
 	// Bool fields parse correctly
 	attrs, err := buildAgeRatingAttributes(map[string]string{
-		"advertising": "false",
-		"gambling":    "true",
+		"advertising":                 "false",
+		"gambling":                    "true",
+		"social-media":                "true",
+		"social-media-age-restricted": "false",
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -89,6 +103,12 @@ func TestAgeRatingHelpers(t *testing.T) {
 	}
 	if attrs.Gambling == nil || *attrs.Gambling != true {
 		t.Fatal("expected gambling=true")
+	}
+	if attrs.SocialMedia == nil || attrs.SocialMedia.Value == nil || !*attrs.SocialMedia.Value {
+		t.Fatal("expected social-media=true")
+	}
+	if attrs.SocialMediaAgeRestricted == nil || attrs.SocialMediaAgeRestricted.Value == nil || *attrs.SocialMediaAgeRestricted.Value {
+		t.Fatal("expected social-media-age-restricted=false")
 	}
 
 	// Invalid bool value returns error
@@ -162,6 +182,66 @@ func TestAgeRatingHelpers(t *testing.T) {
 	}
 }
 
+func TestValidateAgeRatingDependenciesRejectsTransitiveUGCContradiction(t *testing.T) {
+	trueValue := true
+	falseValue := false
+
+	err := validateAgeRatingDependencies(asc.AgeRatingDeclarationAttributes{
+		AgeAssurance:             &trueValue,
+		SocialMediaAgeRestricted: &asc.NullableBool{Value: &trueValue},
+		UserGeneratedContent:     &falseValue,
+	})
+	if err == nil || !strings.Contains(err.Error(), "--social-media-age-restricted true cannot be combined with --user-generated-content false") {
+		t.Fatalf("expected transitive user-generated-content dependency error, got %v", err)
+	}
+}
+
+func TestValidateAgeRatingDependenciesAllowsPartialUpdates(t *testing.T) {
+	trueValue := true
+	falseValue := false
+
+	tests := []struct {
+		name  string
+		attrs asc.AgeRatingDeclarationAttributes
+	}{
+		{
+			name:  "social media may rely on stored user generated content",
+			attrs: asc.AgeRatingDeclarationAttributes{SocialMedia: &asc.NullableBool{Value: &trueValue}},
+		},
+		{
+			name: "age restriction may rely on stored prerequisites",
+			attrs: asc.AgeRatingDeclarationAttributes{
+				SocialMediaAgeRestricted: &asc.NullableBool{Value: &trueValue},
+			},
+		},
+		{
+			name: "all prerequisites explicitly enabled",
+			attrs: asc.AgeRatingDeclarationAttributes{
+				AgeAssurance:             &trueValue,
+				SocialMedia:              &asc.NullableBool{Value: &trueValue},
+				SocialMediaAgeRestricted: &asc.NullableBool{Value: &trueValue},
+				UserGeneratedContent:     &trueValue,
+			},
+		},
+		{
+			name: "unrelated false fields",
+			attrs: asc.AgeRatingDeclarationAttributes{
+				AgeAssurance:         &falseValue,
+				SocialMedia:          &asc.NullableBool{Value: &falseValue},
+				UserGeneratedContent: &falseValue,
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if err := validateAgeRatingDependencies(test.attrs); err != nil {
+				t.Fatalf("unexpected dependency error: %v", err)
+			}
+		})
+	}
+}
+
 func TestApplyAllNoneDefaultsSetsAllContentDescriptors(t *testing.T) {
 	values := map[string]string{}
 	applyAllNoneDefaults(values)
@@ -172,15 +252,17 @@ func TestApplyAllNoneDefaultsSetsAllContentDescriptors(t *testing.T) {
 	}
 
 	boolChecks := map[string]*bool{
-		"advertising":               attrs.Advertising,
-		"gambling":                  attrs.Gambling,
-		"health-or-wellness-topics": attrs.HealthOrWellnessTopics,
-		"loot-box":                  attrs.LootBox,
-		"messaging-and-chat":        attrs.MessagingAndChat,
-		"parental-controls":         attrs.ParentalControls,
-		"age-assurance":             attrs.AgeAssurance,
-		"unrestricted-web-access":   attrs.UnrestrictedWebAccess,
-		"user-generated-content":    attrs.UserGeneratedContent,
+		"advertising":                 attrs.Advertising,
+		"gambling":                    attrs.Gambling,
+		"health-or-wellness-topics":   attrs.HealthOrWellnessTopics,
+		"loot-box":                    attrs.LootBox,
+		"messaging-and-chat":          attrs.MessagingAndChat,
+		"parental-controls":           attrs.ParentalControls,
+		"age-assurance":               attrs.AgeAssurance,
+		"social-media":                nullableBoolValue(attrs.SocialMedia),
+		"social-media-age-restricted": nullableBoolValue(attrs.SocialMediaAgeRestricted),
+		"unrestricted-web-access":     attrs.UnrestrictedWebAccess,
+		"user-generated-content":      attrs.UserGeneratedContent,
 	}
 	for name, value := range boolChecks {
 		if value == nil || *value {

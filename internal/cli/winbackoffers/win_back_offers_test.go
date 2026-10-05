@@ -1,26 +1,88 @@
 package winbackoffers
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
-func TestWinBackOffersCommandConstructors(t *testing.T) {
-	top := WinBackOffersCommand()
-	if top == nil {
-		t.Fatal("expected win-back-offers command")
+func TestWinBackOffersCreateHelpDescribesPricePointIDs(t *testing.T) {
+	cmd := WinBackOffersCreateCommand()
+	priceFlag := cmd.FlagSet.Lookup("price")
+	if priceFlag == nil {
+		t.Fatal("expected --price flag")
 	}
-	if top.Name == "" {
-		t.Fatal("expected command name")
+	if got := priceFlag.Usage; got != "Subscription price point ID(s), comma-separated (required for paid offer modes)" {
+		t.Fatalf("unexpected --price usage: %q", got)
 	}
-	if len(top.Subcommands) == 0 {
-		t.Fatal("expected subcommands")
+	if !strings.Contains(cmd.LongHelp, `--price "SUBSCRIPTION_PRICE_POINT_ID"`) {
+		t.Fatalf("expected long help to describe subscription price point IDs, got %q", cmd.LongHelp)
+	}
+	territoryFlag := cmd.FlagSet.Lookup("territory")
+	if territoryFlag == nil {
+		t.Fatal("expected --territory flag")
+	}
+	if !strings.Contains(territoryFlag.Usage, "FREE_TRIAL") {
+		t.Fatalf("unexpected --territory usage: %q", territoryFlag.Usage)
+	}
+	if !strings.Contains(cmd.LongHelp, `--offer-mode FREE_TRIAL`) || !strings.Contains(cmd.LongHelp, `--territory "USA,FRA"`) {
+		t.Fatalf("expected long help to include a FREE_TRIAL example, got %q", cmd.LongHelp)
+	}
+}
+
+func TestTerritoryFromPricePointID(t *testing.T) {
+	tests := []struct {
+		name             string
+		id               string
+		want             string
+		wantErrSubstring string
+	}{
+		{
+			// base64 of {"s":"6755496237","t":"USA","p":"10101"}
+			name: "valid price point ID",
+			id:   "eyJzIjoiNjc1NTQ5NjIzNyIsInQiOiJVU0EiLCJwIjoiMTAxMDEifQ",
+			want: "USA",
+		},
+		{
+			name: "valid price point ID with padding",
+			id:   "eyJzIjoiNjc1NTQ5NjIzNyIsInQiOiJVU0EiLCJwIjoiMTAxMDEifQ==",
+			want: "USA",
+		},
+		{
+			name:             "not base64",
+			id:               "not-a-price-point!!",
+			wantErrSubstring: "is not a subscription price point ID",
+		},
+		{
+			name:             "base64 of non-JSON",
+			id:               "aGVsbG8",
+			wantErrSubstring: "does not decode to a subscription price point ID",
+		},
+		{
+			// base64 of {"s":"1"}; decodes but lacks a territory.
+			name:             "missing territory field",
+			id:               "eyJzIjoiMSJ9",
+			wantErrSubstring: "does not decode to a subscription price point ID",
+		},
 	}
 
-	if got := WinBackOffersCommand(); got == nil {
-		t.Fatal("expected Command wrapper to return command")
-	}
-	if got := WinBackOffersPricesCommand(); got == nil {
-		t.Fatal("expected prices command")
-	}
-	if got := WinBackOffersRelationshipsCommand(); got == nil {
-		t.Fatal("expected relationships command")
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := territoryFromPricePointID(test.id)
+			if test.wantErrSubstring != "" {
+				if err == nil {
+					t.Fatalf("expected error, got territory %q", got)
+				}
+				if !strings.Contains(err.Error(), test.wantErrSubstring) {
+					t.Fatalf("expected error to contain %q, got %v", test.wantErrSubstring, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got != test.want {
+				t.Fatalf("expected territory %q, got %q", test.want, got)
+			}
+		})
 	}
 }

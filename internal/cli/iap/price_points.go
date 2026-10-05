@@ -43,7 +43,7 @@ Examples:
 func IAPPricePointsListCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("price-points list", flag.ExitOnError)
 
-	iapID := fs.String("iap-id", "", "In-app purchase ID, product ID, or exact current name")
+	iapID := shared.BindResourceIDFlag(fs, "iap-id", "inAppPurchases", "In-app purchase ID, product ID, or exact current name")
 	appID := addIAPLookupAppFlag(fs)
 	territory := fs.String("territory", "", "Territory input (accepts alpha-2, alpha-3, or exact English country name)")
 	price := fs.String("price", "", "Filter by exact customer price (e.g., 4.99)")
@@ -72,10 +72,10 @@ Examples:
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
 			if *limit != 0 && (*limit < 1 || *limit > 200) {
-				return fmt.Errorf("iap price-points list: --limit must be between 1 and 200")
+				return shared.UsageError("iap price-points list: --limit must be between 1 and 200")
 			}
 			if err := shared.ValidateNextURL(*next); err != nil {
-				return fmt.Errorf("iap price-points list: %w", err)
+				return shared.UsageErrorf("iap price-points list: %v", err)
 			}
 
 			priceFilter := shared.PriceFilter{
@@ -90,7 +90,7 @@ Examples:
 			iapValue := strings.TrimSpace(*iapID)
 			if iapValue == "" && strings.TrimSpace(*next) == "" {
 				fmt.Fprintln(os.Stderr, "Error: --iap-id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--iap-id")
 			}
 
 			client, err := shared.GetASCClient()

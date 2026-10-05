@@ -2,6 +2,7 @@ package itunes
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -10,6 +11,8 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+
+	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/asc"
 )
 
 // AppRatings contains rating statistics for an app in a single country.
@@ -34,6 +37,19 @@ type GlobalRatings struct {
 	CountryCount  int           `json:"countryCount"`
 	Histogram     map[int]int64 `json:"histogram,omitempty"`
 	ByCountry     []AppRatings  `json:"byCountry"`
+}
+
+type allRatingsLookupError struct {
+	appID string
+	cause error
+}
+
+func (e *allRatingsLookupError) Error() string {
+	return fmt.Sprintf("app not found in any country: %s", e.appID)
+}
+
+func (e *allRatingsLookupError) Unwrap() error {
+	return e.cause
 }
 
 // GetRatings fetches rating statistics for an app in a specific country.
@@ -64,7 +80,14 @@ func (c *Client) GetRatings(ctx context.Context, appID, country string) (*AppRat
 	}
 
 	// Histogram scraping is best-effort and must remain non-fatal.
-	_ = c.fetchHistogram(ctx, appID, normalizedCountry, ratings)
+	if err := c.fetchHistogram(ctx, appID, normalizedCountry, ratings); err != nil {
+		// A best-effort auxiliary request may fail for storefront reasons, but
+		// it must not turn an explicit caller cancellation into a successful
+		// ratings response.
+		if errors.Is(err, context.Canceled) {
+			return nil, err
+		}
+	}
 	return ratings, nil
 }
 
@@ -74,7 +97,7 @@ func (c *Client) fetchHistogram(ctx context.Context, appID, country string, rati
 		return fmt.Errorf("unknown country code: %s", country)
 	}
 
-	req, err := c.newRequest(ctx, http.MethodGet, fmt.Sprintf("/%s/customer-reviews/id%s", country, appID), nil)
+	req, err := c.newRequest(ctx, fmt.Sprintf("/%s/customer-reviews/id%s", country, appID), nil)
 	if err != nil {
 		return fmt.Errorf("failed to create histogram request: %w", err)
 	}
@@ -84,54 +107,63 @@ func (c *Client) fetchHistogram(ctx context.Context, appID, country string, rati
 	req.Header.Set("X-Apple-Store-Front", storefront+",12")
 	req.Header.Set("Accept", "text/html")
 
-	resp, err := c.httpClient().Do(req)
-	if err != nil {
-		return fmt.Errorf("histogram request failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("histogram request returned status %d", resp.StatusCode)
-	}
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return fmt.Errorf("failed to read histogram response: %w", err)
-	}
-
-	re := regexp.MustCompile(`<span class="total">([0-9,]+)</span>`)
-	matches := re.FindAllStringSubmatch(string(body), 5)
-	stars := []int{5, 4, 3, 2, 1}
-	for i, match := range matches {
-		if i >= len(stars) || len(match) < 2 {
-			continue
+	return c.do(ctx, "histogram", req, func(resp *http.Response) error {
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return fmt.Errorf("failed to read histogram response: %w", err)
 		}
-		raw := strings.ReplaceAll(match[1], ",", "")
-		count, _ := strconv.ParseInt(raw, 10, 64)
-		ratings.Histogram[stars[i]] = count
-	}
 
-	return nil
+		re := regexp.MustCompile(`<span class="total">([0-9,]+)</span>`)
+		matches := re.FindAllStringSubmatch(string(body), 5)
+		stars := []int{5, 4, 3, 2, 1}
+		for i, match := range matches {
+			if i >= len(stars) || len(match) < 2 {
+				continue
+			}
+			raw := strings.ReplaceAll(match[1], ",", "")
+			count, _ := strconv.ParseInt(raw, 10, 64)
+			ratings.Histogram[stars[i]] = count
+		}
+
+		return nil
+	})
 }
 
 // GetAllRatings fetches rating statistics for an app across all supported countries.
-func (c *Client) GetAllRatings(ctx context.Context, appID string, workers int) (*GlobalRatings, error) {
+func (c *Client) GetAllRatings(
+	ctx context.Context,
+	appID string,
+	workers int,
+	newCountryContext func(context.Context) (context.Context, context.CancelFunc),
+) (*GlobalRatings, error) {
 	if workers < 1 {
 		workers = 10
 	}
+	if newCountryContext == nil {
+		return nil, fmt.Errorf("country context factory is required")
+	}
+
+	workCtx, cancelWork := context.WithCancel(ctx)
+	defer cancelWork()
 
 	countries := AllCountries()
 
 	var (
-		mu        sync.Mutex
-		wg        sync.WaitGroup
-		results   []*AppRatings
-		appName   string
-		appIDInt  int64
-		total     int64
-		weighted  float64
-		found     bool
-		histogram = make(map[int]int64)
+		mu                 sync.Mutex
+		wg                 sync.WaitGroup
+		deadlineOnce       sync.Once
+		countryDeadlineErr error
+		retryableStop      bool
+		retryDelayStopErr  error
+		httpFailureCount   int
+		httpFailures       = make(map[int]error)
+		results            []*AppRatings
+		appName            string
+		appIDInt           int64
+		total              int64
+		weighted           float64
+		found              bool
+		histogram          = make(map[int]int64)
 	)
 
 	sem := make(chan struct{}, workers)
@@ -142,14 +174,60 @@ func (c *Client) GetAllRatings(ctx context.Context, appID string, workers int) (
 			defer wg.Done()
 
 			select {
-			case <-ctx.Done():
+			case <-workCtx.Done():
 				return
 			case sem <- struct{}{}:
 				defer func() { <-sem }()
 			}
+			if workCtx.Err() != nil {
+				return
+			}
 
-			ratings, err := c.GetRatings(ctx, appID, country)
+			countryCtx, countryCancel := newCountryContext(workCtx)
+			ratings, err := c.GetRatings(countryCtx, appID, country)
+			countryErr := countryCtx.Err()
+			countryCancel()
 			if err != nil {
+				// A preserved retryable storefront status may arrive after the child
+				// deadline; keep it instead of misclassifying it as a deadline failure.
+				var statusError interface{ HTTPStatusCode() int }
+				if errors.As(err, &statusError) && isRetryablePublicStatus(statusError.HTTPStatusCode()) {
+					isRetryDelayStop := asc.IsRetryDelayExceeded(err)
+					stopQueuedWork := isRetryDelayStop || errors.Is(err, context.DeadlineExceeded) || errors.Is(countryErr, context.DeadlineExceeded)
+					mu.Lock()
+					httpFailureCount++
+					status := statusError.HTTPStatusCode()
+					if _, exists := httpFailures[status]; !exists {
+						httpFailures[status] = err
+					}
+					if stopQueuedWork {
+						retryableStop = true
+					}
+					if isRetryDelayStop && retryDelayStopErr == nil {
+						retryDelayStopErr = err
+					}
+					mu.Unlock()
+					if stopQueuedWork {
+						cancelWork()
+					}
+					return
+				}
+				if errors.Is(err, context.DeadlineExceeded) || errors.Is(countryErr, context.DeadlineExceeded) {
+					deadlineOnce.Do(func() {
+						countryDeadlineErr = context.DeadlineExceeded
+						cancelWork()
+					})
+					return
+				}
+				if errors.As(err, &statusError) {
+					mu.Lock()
+					httpFailureCount++
+					status := statusError.HTTPStatusCode()
+					if _, exists := httpFailures[status]; !exists {
+						httpFailures[status] = err
+					}
+					mu.Unlock()
+				}
 				return
 			}
 
@@ -179,7 +257,16 @@ func (c *Client) GetAllRatings(ctx context.Context, appID string, workers int) (
 	if ctx.Err() != nil {
 		return nil, ctx.Err()
 	}
+	if retryableStop {
+		return nil, &allRatingsLookupError{appID: appID, cause: ratingsRetryableStopCause(httpFailures, retryDelayStopErr)}
+	}
+	if countryDeadlineErr != nil {
+		return nil, countryDeadlineErr
+	}
 	if !found {
+		if httpFailureCount == len(countries) {
+			return nil, &allRatingsLookupError{appID: appID, cause: preferredRatingsHTTPError(httpFailures)}
+		}
 		return nil, fmt.Errorf("app not found in any country: %s", appID)
 	}
 	if len(results) == 0 {
@@ -217,4 +304,31 @@ func (c *Client) GetAllRatings(ctx context.Context, appID string, workers int) (
 		Histogram:     histogram,
 		ByCountry:     byCountry,
 	}, nil
+}
+
+func ratingsRetryableStopCause(failures map[int]error, retryDelayStopErr error) error {
+	preferred := preferredRatingsHTTPError(failures)
+	if retryDelayStopErr == nil {
+		return preferred
+	}
+	if preferred == nil {
+		return retryDelayStopErr
+	}
+	return errors.Join(preferred, retryDelayStopErr)
+}
+
+func preferredRatingsHTTPError(failures map[int]error) error {
+	selectedStatus := 0
+	var selected error
+	for status, err := range failures {
+		// Server failures take precedence over client failures because they best
+		// represent a full-storefront outage. Within a class, use the lowest
+		// status so the result is stable regardless of goroutine completion order.
+		if selected == nil || (status >= 500 && selectedStatus < 500) ||
+			(status/100 == selectedStatus/100 && status < selectedStatus) {
+			selectedStatus = status
+			selected = err
+		}
+	}
+	return selected
 }

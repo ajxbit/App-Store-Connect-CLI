@@ -85,8 +85,8 @@ func TestAuditKeywordsReportsLocaleAndCrossLocaleFindings(t *testing.T) {
 	if report.Locales[0].Warnings == 0 {
 		t.Fatalf("expected en-US warnings, got %+v", report.Locales[0])
 	}
-	if report.Locales[0].RemainingBytes <= 0 {
-		t.Fatalf("expected remaining bytes, got %+v", report.Locales[0])
+	if report.Locales[0].RemainingCharacters <= 0 {
+		t.Fatalf("expected remaining characters, got %+v", report.Locales[0])
 	}
 }
 

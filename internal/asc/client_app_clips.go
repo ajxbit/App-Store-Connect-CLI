@@ -190,6 +190,13 @@ type AppClipAdvancedExperienceImageCreateAttributes struct {
 	FileName string `json:"fileName"`
 }
 
+// AppClipAdvancedExperienceLocalizationCreateAttributes describes inline localization attributes.
+type AppClipAdvancedExperienceLocalizationCreateAttributes struct {
+	Language AppClipAdvancedExperienceLanguage `json:"language"`
+	Title    string                            `json:"title"`
+	Subtitle string                            `json:"subtitle,omitempty"`
+}
+
 // AppClipAdvancedExperienceImageUpdateAttributes describes image update attributes.
 type AppClipAdvancedExperienceImageUpdateAttributes struct {
 	SourceFileChecksum *string `json:"sourceFileChecksum,omitempty"`
@@ -241,6 +248,13 @@ type AppClipAdvancedExperienceRelationships struct {
 	AppClip       *Relationship     `json:"appClip,omitempty"`
 	HeaderImage   *Relationship     `json:"headerImage,omitempty"`
 	Localizations *RelationshipList `json:"localizations,omitempty"`
+}
+
+// AppClipAdvancedExperienceCreateRelationships describes required create relationships.
+type AppClipAdvancedExperienceCreateRelationships struct {
+	AppClip       Relationship     `json:"appClip"`
+	HeaderImage   Relationship     `json:"headerImage"`
+	Localizations RelationshipList `json:"localizations"`
 }
 
 // AppClipHeaderImageRelationships describes header image relationships.
@@ -304,14 +318,22 @@ type AppClipDefaultExperienceLocalizationUpdateRequest struct {
 
 // AppClipAdvancedExperienceCreateData is the payload for creating an advanced experience.
 type AppClipAdvancedExperienceCreateData struct {
-	Type          ResourceType                              `json:"type"`
-	Attributes    AppClipAdvancedExperienceCreateAttributes `json:"attributes"`
-	Relationships *AppClipAdvancedExperienceRelationships   `json:"relationships"`
+	Type          ResourceType                                 `json:"type"`
+	Attributes    AppClipAdvancedExperienceCreateAttributes    `json:"attributes"`
+	Relationships AppClipAdvancedExperienceCreateRelationships `json:"relationships"`
 }
 
 // AppClipAdvancedExperienceCreateRequest is the create request payload.
 type AppClipAdvancedExperienceCreateRequest struct {
-	Data AppClipAdvancedExperienceCreateData `json:"data"`
+	Data     AppClipAdvancedExperienceCreateData                 `json:"data"`
+	Included []AppClipAdvancedExperienceLocalizationInlineCreate `json:"included,omitempty"`
+}
+
+// AppClipAdvancedExperienceLocalizationInlineCreate describes an inline localization resource.
+type AppClipAdvancedExperienceLocalizationInlineCreate struct {
+	Type       ResourceType                                          `json:"type"`
+	ID         string                                                `json:"id,omitempty"`
+	Attributes AppClipAdvancedExperienceLocalizationCreateAttributes `json:"attributes"`
 }
 
 // AppClipAdvancedExperienceUpdateData is the payload for updating an advanced experience.
@@ -420,6 +442,14 @@ type BetaAppClipInvocationLocalizationCreateAttributes struct {
 	Locale string `json:"locale"`
 }
 
+// BetaAppClipInvocationLocalizationInlineCreate describes an inline localization create payload.
+type BetaAppClipInvocationLocalizationInlineCreate struct {
+	Type          ResourceType                                      `json:"type"`
+	ID            string                                            `json:"id,omitempty"`
+	Attributes    BetaAppClipInvocationLocalizationCreateAttributes `json:"attributes"`
+	Relationships *BetaAppClipInvocationLocalizationRelationships   `json:"relationships,omitempty"`
+}
+
 // BetaAppClipInvocationLocalizationUpdateAttributes describes localization update attributes.
 type BetaAppClipInvocationLocalizationUpdateAttributes struct {
 	Title *string `json:"title,omitempty"`
@@ -445,7 +475,8 @@ type BetaAppClipInvocationCreateData struct {
 
 // BetaAppClipInvocationCreateRequest is the create request payload.
 type BetaAppClipInvocationCreateRequest struct {
-	Data BetaAppClipInvocationCreateData `json:"data"`
+	Data     BetaAppClipInvocationCreateData                 `json:"data"`
+	Included []BetaAppClipInvocationLocalizationInlineCreate `json:"included,omitempty"`
 }
 
 // BetaAppClipInvocationUpdateData is the payload for updating an invocation.
@@ -560,16 +591,10 @@ type AppClipDefaultExperienceLocalizationDeleteResult struct {
 	Deleted bool   `json:"deleted"`
 }
 
-// AppClipAdvancedExperienceDeleteResult represents advanced experience deletion.
-type AppClipAdvancedExperienceDeleteResult struct {
+// AppClipAdvancedExperienceRemoveResult represents advanced experience removal.
+type AppClipAdvancedExperienceRemoveResult struct {
 	ID      string `json:"id"`
-	Deleted bool   `json:"deleted"`
-}
-
-// AppClipAdvancedExperienceImageDeleteResult represents advanced image deletion.
-type AppClipAdvancedExperienceImageDeleteResult struct {
-	ID      string `json:"id"`
-	Deleted bool   `json:"deleted"`
+	Removed bool   `json:"removed"`
 }
 
 // AppClipHeaderImageDeleteResult represents header image deletion.
@@ -1265,54 +1290,76 @@ func (c *Client) GetAppClipAdvancedExperience(ctx context.Context, experienceID 
 }
 
 // CreateAppClipAdvancedExperience creates an advanced experience.
-func (c *Client) CreateAppClipAdvancedExperience(ctx context.Context, appClipID string, attrs AppClipAdvancedExperienceCreateAttributes, headerImageID string, localizationIDs []string) (*AppClipAdvancedExperienceResponse, error) {
+func (c *Client) CreateAppClipAdvancedExperience(ctx context.Context, appClipID string, attrs AppClipAdvancedExperienceCreateAttributes, headerImageID string, localizationIDs []string, inlineLocalizations []AppClipAdvancedExperienceLocalizationCreateAttributes) (*AppClipAdvancedExperienceResponse, error) {
 	appClipID = strings.TrimSpace(appClipID)
 	if appClipID == "" {
 		return nil, fmt.Errorf("appClipID is required")
 	}
 
-	relationships := &AppClipAdvancedExperienceRelationships{
-		AppClip: &Relationship{
-			Data: ResourceData{
-				Type: ResourceTypeAppClips,
-				ID:   appClipID,
-			},
-		},
-	}
-
 	headerImageID = strings.TrimSpace(headerImageID)
-	if headerImageID != "" {
-		relationships.HeaderImage = &Relationship{
-			Data: ResourceData{
-				Type: ResourceTypeAppClipAdvancedExperienceImages,
-				ID:   headerImageID,
-			},
-		}
+	if headerImageID == "" {
+		return nil, fmt.Errorf("headerImageID is required")
 	}
 
-	if len(localizationIDs) > 0 {
-		list := make([]ResourceData, 0, len(localizationIDs))
-		for _, id := range localizationIDs {
-			id = strings.TrimSpace(id)
-			if id == "" {
-				continue
-			}
-			list = append(list, ResourceData{
-				Type: ResourceTypeAppClipAdvancedExperienceLocalizations,
-				ID:   id,
-			})
+	localizations := make([]ResourceData, 0, len(localizationIDs)+len(inlineLocalizations))
+	for _, id := range localizationIDs {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue
 		}
-		if len(list) > 0 {
-			relationships.Localizations = &RelationshipList{Data: list}
+		localizations = append(localizations, ResourceData{
+			Type: ResourceTypeAppClipAdvancedExperienceLocalizations,
+			ID:   id,
+		})
+	}
+
+	included := make([]AppClipAdvancedExperienceLocalizationInlineCreate, 0, len(inlineLocalizations))
+	for i, localization := range inlineLocalizations {
+		language := AppClipAdvancedExperienceLanguage(strings.TrimSpace(string(localization.Language)))
+		if language == "" {
+			return nil, fmt.Errorf("inline localization %d: language is required", i+1)
 		}
+		title := strings.TrimSpace(localization.Title)
+		if title == "" {
+			return nil, fmt.Errorf("inline localization %d: title is required", i+1)
+		}
+
+		localID := fmt.Sprintf("${localization-%d}", i+1)
+		localizations = append(localizations, ResourceData{
+			Type: ResourceTypeAppClipAdvancedExperienceLocalizations,
+			ID:   localID,
+		})
+		included = append(included, AppClipAdvancedExperienceLocalizationInlineCreate{
+			Type: ResourceTypeAppClipAdvancedExperienceLocalizations,
+			ID:   localID,
+			Attributes: AppClipAdvancedExperienceLocalizationCreateAttributes{
+				Language: language,
+				Title:    title,
+				Subtitle: strings.TrimSpace(localization.Subtitle),
+			},
+		})
+	}
+	if len(localizations) == 0 {
+		return nil, fmt.Errorf("at least one localization is required")
 	}
 
 	payload := AppClipAdvancedExperienceCreateRequest{
 		Data: AppClipAdvancedExperienceCreateData{
-			Type:          ResourceTypeAppClipAdvancedExperiences,
-			Attributes:    attrs,
-			Relationships: relationships,
+			Type:       ResourceTypeAppClipAdvancedExperiences,
+			Attributes: attrs,
+			Relationships: AppClipAdvancedExperienceCreateRelationships{
+				AppClip: Relationship{Data: ResourceData{
+					Type: ResourceTypeAppClips,
+					ID:   appClipID,
+				}},
+				HeaderImage: Relationship{Data: ResourceData{
+					Type: ResourceTypeAppClipAdvancedExperienceImages,
+					ID:   headerImageID,
+				}},
+				Localizations: RelationshipList{Data: localizations},
+			},
 		},
+		Included: included,
 	}
 
 	body, err := BuildRequestBody(payload)
@@ -1413,14 +1460,16 @@ func (c *Client) UpdateAppClipAdvancedExperience(ctx context.Context, experience
 	return &response, nil
 }
 
-// DeleteAppClipAdvancedExperience deletes an advanced experience by ID.
+// DeleteAppClipAdvancedExperience removes an advanced experience by ID.
 func (c *Client) DeleteAppClipAdvancedExperience(ctx context.Context, experienceID string) error {
 	experienceID = strings.TrimSpace(experienceID)
 	if experienceID == "" {
 		return fmt.Errorf("experienceID is required")
 	}
-	path := fmt.Sprintf("/v1/appClipAdvancedExperiences/%s", experienceID)
-	_, err := c.do(ctx, http.MethodDelete, path, nil)
+	removed := true
+	_, err := c.UpdateAppClipAdvancedExperience(ctx, experienceID, &AppClipAdvancedExperienceUpdateAttributes{
+		Removed: &removed,
+	}, "", "", nil)
 	return err
 }
 
@@ -1506,17 +1555,6 @@ func (c *Client) UpdateAppClipAdvancedExperienceImage(ctx context.Context, image
 	}
 
 	return &response, nil
-}
-
-// DeleteAppClipAdvancedExperienceImage deletes an image by ID.
-func (c *Client) DeleteAppClipAdvancedExperienceImage(ctx context.Context, imageID string) error {
-	imageID = strings.TrimSpace(imageID)
-	if imageID == "" {
-		return fmt.Errorf("imageID is required")
-	}
-	path := fmt.Sprintf("/v1/appClipAdvancedExperienceImages/%s", imageID)
-	_, err := c.do(ctx, http.MethodDelete, path, nil)
-	return err
 }
 
 // UploadAppClipAdvancedExperienceImage performs the full upload flow for an image.
@@ -1848,7 +1886,7 @@ func (c *Client) GetBetaAppClipInvocation(ctx context.Context, invocationID stri
 }
 
 // CreateBetaAppClipInvocation creates a beta App Clip invocation.
-func (c *Client) CreateBetaAppClipInvocation(ctx context.Context, buildBundleID string, attrs BetaAppClipInvocationCreateAttributes, localizationIDs []string) (*BetaAppClipInvocationResponse, error) {
+func (c *Client) CreateBetaAppClipInvocation(ctx context.Context, buildBundleID string, attrs BetaAppClipInvocationCreateAttributes, localizationIDs []string, inlineLocalizations []BetaAppClipInvocationLocalizationCreateAttributes) (*BetaAppClipInvocationResponse, error) {
 	buildBundleID = strings.TrimSpace(buildBundleID)
 	if buildBundleID == "" {
 		return nil, fmt.Errorf("buildBundleID is required")
@@ -1862,22 +1900,49 @@ func (c *Client) CreateBetaAppClipInvocation(ctx context.Context, buildBundleID 
 			},
 		},
 	}
-	if len(localizationIDs) > 0 {
-		list := make([]ResourceData, 0, len(localizationIDs))
-		for _, id := range localizationIDs {
-			id = strings.TrimSpace(id)
-			if id == "" {
-				continue
-			}
-			list = append(list, ResourceData{
-				Type: ResourceTypeBetaAppClipInvocationLocalizations,
-				ID:   id,
-			})
+
+	localizationData := make([]ResourceData, 0, len(localizationIDs)+len(inlineLocalizations))
+	for _, id := range localizationIDs {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue
 		}
-		if len(list) > 0 {
-			relationships.BetaAppClipInvocationLocalizations = &RelationshipList{Data: list}
-		}
+		localizationData = append(localizationData, ResourceData{
+			Type: ResourceTypeBetaAppClipInvocationLocalizations,
+			ID:   id,
+		})
 	}
+
+	included := make([]BetaAppClipInvocationLocalizationInlineCreate, 0, len(inlineLocalizations))
+	for idx, localization := range inlineLocalizations {
+		localeValue := strings.TrimSpace(localization.Locale)
+		titleValue := strings.TrimSpace(localization.Title)
+		if localeValue == "" {
+			return nil, fmt.Errorf("inline localization %d: locale is required", idx+1)
+		}
+		if titleValue == "" {
+			return nil, fmt.Errorf("inline localization %d: title is required", idx+1)
+		}
+
+		resourceID := fmt.Sprintf("${localization-%d}", idx+1)
+		localizationData = append(localizationData, ResourceData{
+			Type: ResourceTypeBetaAppClipInvocationLocalizations,
+			ID:   resourceID,
+		})
+		included = append(included, BetaAppClipInvocationLocalizationInlineCreate{
+			Type: ResourceTypeBetaAppClipInvocationLocalizations,
+			ID:   resourceID,
+			Attributes: BetaAppClipInvocationLocalizationCreateAttributes{
+				Locale: localeValue,
+				Title:  titleValue,
+			},
+		})
+	}
+
+	if len(localizationData) == 0 {
+		return nil, fmt.Errorf("at least one localization is required")
+	}
+	relationships.BetaAppClipInvocationLocalizations = &RelationshipList{Data: localizationData}
 
 	payload := BetaAppClipInvocationCreateRequest{
 		Data: BetaAppClipInvocationCreateData{
@@ -1885,6 +1950,9 @@ func (c *Client) CreateBetaAppClipInvocation(ctx context.Context, buildBundleID 
 			Attributes:    attrs,
 			Relationships: relationships,
 		},
+	}
+	if len(included) > 0 {
+		payload.Included = included
 	}
 
 	body, err := BuildRequestBody(payload)

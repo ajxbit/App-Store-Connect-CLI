@@ -1,9 +1,11 @@
 package asc
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"strings"
 )
 
@@ -169,29 +171,268 @@ type AppInfoLocalizationAttributes struct {
 	PrivacyPolicyText string `json:"privacyPolicyText,omitempty"`
 }
 
+type localizationFieldsUpdateData struct {
+	Type       ResourceType              `json:"type"`
+	ID         string                    `json:"id"`
+	Attributes map[string]NullableString `json:"attributes"`
+}
+
+type localizationFieldsUpdateRequest struct {
+	Data localizationFieldsUpdateData `json:"data"`
+}
+
+// nullableLocalizationFields converts set-only field values into nullable
+// attributes so string callers keep their existing wire format.
+func nullableLocalizationFields(fields map[string]string) map[string]NullableString {
+	if fields == nil {
+		return nil
+	}
+	attributes := make(map[string]NullableString, len(fields))
+	for field, value := range fields {
+		attributes[field] = NullableString{Value: &value}
+	}
+	return attributes
+}
+
 // AppInfoAttributes describes app info resources.
 type AppInfoAttributes map[string]any
 
 // BetaGroupAttributes describes a beta group resource.
 type BetaGroupAttributes struct {
-	Name                   string `json:"name"`
-	CreatedDate            string `json:"createdDate,omitempty"`
-	IsInternalGroup        bool   `json:"isInternalGroup,omitempty"`
-	HasAccessToAllBuilds   bool   `json:"hasAccessToAllBuilds,omitempty"`
-	PublicLinkEnabled      bool   `json:"publicLinkEnabled,omitempty"`
-	PublicLinkLimitEnabled bool   `json:"publicLinkLimitEnabled,omitempty"`
-	PublicLinkLimit        int    `json:"publicLinkLimit,omitempty"`
-	PublicLink             string `json:"publicLink,omitempty"`
-	FeedbackEnabled        bool   `json:"feedbackEnabled,omitempty"`
+	Name                                 string `json:"name"`
+	CreatedDate                          string `json:"createdDate,omitempty"`
+	IsInternalGroup                      bool   `json:"isInternalGroup,omitempty"`
+	HasAccessToAllBuilds                 bool   `json:"hasAccessToAllBuilds,omitempty"`
+	PublicLinkEnabled                    bool   `json:"publicLinkEnabled,omitempty"`
+	PublicLinkID                         string `json:"publicLinkId,omitempty"`
+	PublicLinkLimitEnabled               bool   `json:"publicLinkLimitEnabled,omitempty"`
+	PublicLinkLimit                      int    `json:"publicLinkLimit,omitempty"`
+	PublicLink                           string `json:"publicLink,omitempty"`
+	FeedbackEnabled                      bool   `json:"feedbackEnabled,omitempty"`
+	IOSBuildsAvailableForAppleSiliconMac *bool  `json:"iosBuildsAvailableForAppleSiliconMac,omitempty"`
+	IOSBuildsAvailableForAppleVision     *bool  `json:"iosBuildsAvailableForAppleVision,omitempty"`
+
+	attributesDecoded                         bool
+	attributesNull                            bool
+	nameJSON                                  json.RawMessage
+	createdDateJSON                           json.RawMessage
+	isInternalGroupJSON                       json.RawMessage
+	hasAccessToAllBuildsJSON                  json.RawMessage
+	publicLinkEnabledJSON                     json.RawMessage
+	publicLinkIDJSON                          json.RawMessage
+	publicLinkLimitEnabledJSON                json.RawMessage
+	publicLinkLimitJSON                       json.RawMessage
+	publicLinkJSON                            json.RawMessage
+	feedbackEnabledJSON                       json.RawMessage
+	iosBuildsAvailableForAppleSiliconMacJSON  json.RawMessage
+	iosBuildsAvailableForAppleVisionJSON      json.RawMessage
+	nameValue                                 string
+	createdDateValue                          string
+	isInternalGroupValue                      bool
+	hasAccessToAllBuildsValue                 bool
+	publicLinkEnabledValue                    bool
+	publicLinkIDValue                         string
+	publicLinkLimitEnabledValue               bool
+	publicLinkLimitValue                      int
+	publicLinkValue                           string
+	feedbackEnabledValue                      bool
+	iosBuildsAvailableForAppleSiliconMacValue *bool
+	iosBuildsAvailableForAppleVisionValue     *bool
+}
+
+// UnmarshalJSON retains sparse field presence without changing the public,
+// value-shaped BetaGroupAttributes API.
+func (a *BetaGroupAttributes) UnmarshalJSON(data []byte) error {
+	type alias BetaGroupAttributes
+	var decoded alias
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return err
+	}
+	*a = BetaGroupAttributes(decoded)
+	a.attributesDecoded = true
+	a.attributesNull = bytes.Equal(bytes.TrimSpace(data), []byte("null"))
+	a.nameJSON = fields["name"]
+	a.createdDateJSON = fields["createdDate"]
+	a.isInternalGroupJSON = fields["isInternalGroup"]
+	a.hasAccessToAllBuildsJSON = fields["hasAccessToAllBuilds"]
+	a.publicLinkEnabledJSON = fields["publicLinkEnabled"]
+	a.publicLinkIDJSON = fields["publicLinkId"]
+	a.publicLinkLimitEnabledJSON = fields["publicLinkLimitEnabled"]
+	a.publicLinkLimitJSON = fields["publicLinkLimit"]
+	a.publicLinkJSON = fields["publicLink"]
+	a.feedbackEnabledJSON = fields["feedbackEnabled"]
+	a.iosBuildsAvailableForAppleSiliconMacJSON = fields["iosBuildsAvailableForAppleSiliconMac"]
+	a.iosBuildsAvailableForAppleVisionJSON = fields["iosBuildsAvailableForAppleVision"]
+	a.nameValue = a.Name
+	a.createdDateValue = a.CreatedDate
+	a.isInternalGroupValue = a.IsInternalGroup
+	a.hasAccessToAllBuildsValue = a.HasAccessToAllBuilds
+	a.publicLinkEnabledValue = a.PublicLinkEnabled
+	a.publicLinkIDValue = a.PublicLinkID
+	a.publicLinkLimitEnabledValue = a.PublicLinkLimitEnabled
+	a.publicLinkLimitValue = a.PublicLinkLimit
+	a.publicLinkValue = a.PublicLink
+	a.feedbackEnabledValue = a.FeedbackEnabled
+	a.iosBuildsAvailableForAppleSiliconMacValue = cloneBool(a.IOSBuildsAvailableForAppleSiliconMac)
+	a.iosBuildsAvailableForAppleVisionValue = cloneBool(a.IOSBuildsAvailableForAppleVision)
+	return nil
+}
+
+// MarshalJSON preserves fields Apple supplied in sparse responses while still
+// serializing values changed by callers after decoding.
+func (a BetaGroupAttributes) MarshalJSON() ([]byte, error) {
+	if !a.attributesDecoded {
+		type alias BetaGroupAttributes
+		return json.Marshal(alias(a))
+	}
+	if a.attributesNull {
+		return []byte("null"), nil
+	}
+
+	type attributesJSON struct {
+		Name                                 json.RawMessage `json:"name,omitempty"`
+		CreatedDate                          json.RawMessage `json:"createdDate,omitempty"`
+		IsInternalGroup                      json.RawMessage `json:"isInternalGroup,omitempty"`
+		HasAccessToAllBuilds                 json.RawMessage `json:"hasAccessToAllBuilds,omitempty"`
+		PublicLinkEnabled                    json.RawMessage `json:"publicLinkEnabled,omitempty"`
+		PublicLinkID                         json.RawMessage `json:"publicLinkId,omitempty"`
+		PublicLinkLimitEnabled               json.RawMessage `json:"publicLinkLimitEnabled,omitempty"`
+		PublicLinkLimit                      json.RawMessage `json:"publicLinkLimit,omitempty"`
+		PublicLink                           json.RawMessage `json:"publicLink,omitempty"`
+		FeedbackEnabled                      json.RawMessage `json:"feedbackEnabled,omitempty"`
+		IOSBuildsAvailableForAppleSiliconMac json.RawMessage `json:"iosBuildsAvailableForAppleSiliconMac,omitempty"`
+		IOSBuildsAvailableForAppleVision     json.RawMessage `json:"iosBuildsAvailableForAppleVision,omitempty"`
+	}
+	fields := attributesJSON{}
+	var err error
+	if len(a.nameJSON) > 0 || a.Name != "" {
+		fields.Name, err = sparseAttributeJSON(a.nameJSON, a.nameValue, a.Name)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if len(a.createdDateJSON) > 0 || a.CreatedDate != "" {
+		fields.CreatedDate, err = sparseAttributeJSON(a.createdDateJSON, a.createdDateValue, a.CreatedDate)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if len(a.isInternalGroupJSON) > 0 || a.IsInternalGroup {
+		fields.IsInternalGroup, err = sparseAttributeJSON(a.isInternalGroupJSON, a.isInternalGroupValue, a.IsInternalGroup)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if len(a.hasAccessToAllBuildsJSON) > 0 || a.HasAccessToAllBuilds {
+		fields.HasAccessToAllBuilds, err = sparseAttributeJSON(a.hasAccessToAllBuildsJSON, a.hasAccessToAllBuildsValue, a.HasAccessToAllBuilds)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if len(a.publicLinkEnabledJSON) > 0 || a.PublicLinkEnabled {
+		fields.PublicLinkEnabled, err = sparseAttributeJSON(a.publicLinkEnabledJSON, a.publicLinkEnabledValue, a.PublicLinkEnabled)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if len(a.publicLinkIDJSON) > 0 || a.PublicLinkID != "" {
+		fields.PublicLinkID, err = sparseAttributeJSON(a.publicLinkIDJSON, a.publicLinkIDValue, a.PublicLinkID)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if len(a.publicLinkLimitEnabledJSON) > 0 || a.PublicLinkLimitEnabled {
+		fields.PublicLinkLimitEnabled, err = sparseAttributeJSON(a.publicLinkLimitEnabledJSON, a.publicLinkLimitEnabledValue, a.PublicLinkLimitEnabled)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if len(a.publicLinkLimitJSON) > 0 || a.PublicLinkLimit != 0 {
+		fields.PublicLinkLimit, err = sparseAttributeJSON(a.publicLinkLimitJSON, a.publicLinkLimitValue, a.PublicLinkLimit)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if len(a.publicLinkJSON) > 0 || a.PublicLink != "" {
+		fields.PublicLink, err = sparseAttributeJSON(a.publicLinkJSON, a.publicLinkValue, a.PublicLink)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if len(a.feedbackEnabledJSON) > 0 || a.FeedbackEnabled {
+		fields.FeedbackEnabled, err = sparseAttributeJSON(a.feedbackEnabledJSON, a.feedbackEnabledValue, a.FeedbackEnabled)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if len(a.iosBuildsAvailableForAppleSiliconMacJSON) > 0 || a.IOSBuildsAvailableForAppleSiliconMac != nil {
+		fields.IOSBuildsAvailableForAppleSiliconMac, err = sparseAttributeJSON(a.iosBuildsAvailableForAppleSiliconMacJSON, a.iosBuildsAvailableForAppleSiliconMacValue, a.IOSBuildsAvailableForAppleSiliconMac)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if len(a.iosBuildsAvailableForAppleVisionJSON) > 0 || a.IOSBuildsAvailableForAppleVision != nil {
+		fields.IOSBuildsAvailableForAppleVision, err = sparseAttributeJSON(a.iosBuildsAvailableForAppleVisionJSON, a.iosBuildsAvailableForAppleVisionValue, a.IOSBuildsAvailableForAppleVision)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return json.Marshal(fields)
 }
 
 // BetaTesterAttributes describes a beta tester resource.
 type BetaTesterAttributes struct {
-	FirstName  string          `json:"firstName,omitempty"`
-	LastName   string          `json:"lastName,omitempty"`
-	Email      string          `json:"email,omitempty"`
-	InviteType BetaInviteType  `json:"inviteType,omitempty"`
-	State      BetaTesterState `json:"state,omitempty"`
+	FirstName  string                `json:"firstName,omitempty"`
+	LastName   string                `json:"lastName,omitempty"`
+	Email      string                `json:"email,omitempty"`
+	InviteType BetaInviteType        `json:"inviteType,omitempty"`
+	State      BetaTesterState       `json:"state,omitempty"`
+	AppDevices []BetaTesterAppDevice `json:"-"`
+}
+
+// UnmarshalJSON keeps absent appDevices nil while retaining explicit arrays.
+func (a *BetaTesterAttributes) UnmarshalJSON(data []byte) error {
+	type betaTesterAttributesAlias BetaTesterAttributes
+	*a = BetaTesterAttributes{}
+	aux := struct {
+		*betaTesterAttributesAlias
+		AppDevices []BetaTesterAppDevice `json:"appDevices"`
+	}{
+		betaTesterAttributesAlias: (*betaTesterAttributesAlias)(a),
+	}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	a.AppDevices = aux.AppDevices
+	return nil
+}
+
+// MarshalJSON preserves absent and explicit empty appDevices values.
+func (a BetaTesterAttributes) MarshalJSON() ([]byte, error) {
+	type betaTesterAttributesAlias BetaTesterAttributes
+	var appDevices *[]BetaTesterAppDevice
+	if a.AppDevices != nil {
+		appDevices = &a.AppDevices
+	}
+	return json.Marshal(struct {
+		betaTesterAttributesAlias
+		AppDevices *[]BetaTesterAppDevice `json:"appDevices,omitempty"`
+	}{
+		betaTesterAttributesAlias: betaTesterAttributesAlias(a),
+		AppDevices:                appDevices,
+	})
+}
+
+// BetaTesterAppDevice describes a device on which a tester installed the app.
+type BetaTesterAppDevice struct {
+	Model           string `json:"model,omitempty"`
+	Platform        string `json:"platform,omitempty"`
+	OSVersion       string `json:"osVersion,omitempty"`
+	AppBuildVersion string `json:"appBuildVersion,omitempty"`
 }
 
 // BetaInviteType represents the invitation type for a beta tester.
@@ -340,9 +581,20 @@ type AppInfoLocalizationRelationships struct {
 
 // BetaGroupCreateData is the data portion of a beta group create request.
 type BetaGroupCreateData struct {
-	Type          ResourceType            `json:"type"`
-	Attributes    BetaGroupAttributes     `json:"attributes"`
-	Relationships *BetaGroupRelationships `json:"relationships"`
+	Type          ResourceType              `json:"type"`
+	Attributes    BetaGroupCreateAttributes `json:"attributes"`
+	Relationships *BetaGroupRelationships   `json:"relationships"`
+}
+
+// BetaGroupCreateAttributes describes attributes accepted when creating a beta group.
+type BetaGroupCreateAttributes struct {
+	Name                   string `json:"name"`
+	IsInternalGroup        *bool  `json:"isInternalGroup,omitempty"`
+	HasAccessToAllBuilds   *bool  `json:"hasAccessToAllBuilds,omitempty"`
+	PublicLinkEnabled      *bool  `json:"publicLinkEnabled,omitempty"`
+	PublicLinkLimitEnabled *bool  `json:"publicLinkLimitEnabled,omitempty"`
+	PublicLinkLimit        *int   `json:"publicLinkLimit,omitempty"`
+	FeedbackEnabled        *bool  `json:"feedbackEnabled,omitempty"`
 }
 
 // BetaGroupCreateRequest is a request to create a beta group.
@@ -656,14 +908,14 @@ func (c *Client) GetBetaGroupTesters(ctx context.Context, groupID string, opts .
 
 // CreateBetaGroup creates a beta group for an app.
 func (c *Client) CreateBetaGroup(ctx context.Context, appID, name string) (*BetaGroupResponse, error) {
-	return c.CreateBetaGroupWithAttributes(ctx, appID, BetaGroupAttributes{
+	return c.CreateBetaGroupWithAttributes(ctx, appID, BetaGroupCreateAttributes{
 		Name: name,
 	})
 }
 
 // CreateBetaGroupWithAttributes creates a beta group for an app with explicit attributes.
 // Note: some attributes (e.g., isInternalGroup) are create-only in the ASC API.
-func (c *Client) CreateBetaGroupWithAttributes(ctx context.Context, appID string, attrs BetaGroupAttributes) (*BetaGroupResponse, error) {
+func (c *Client) CreateBetaGroupWithAttributes(ctx context.Context, appID string, attrs BetaGroupCreateAttributes) (*BetaGroupResponse, error) {
 	payload := BetaGroupCreateRequest{
 		Data: BetaGroupCreateData{
 			Type:       ResourceTypeBetaGroups,
@@ -1253,6 +1505,37 @@ func (c *Client) UpdateAppStoreVersionLocalization(ctx context.Context, localiza
 	return &response, nil
 }
 
+// UpdateAppStoreVersionLocalizationFields updates exactly the supplied fields,
+// preserving explicit empty strings while leaving omitted fields unchanged.
+func (c *Client) UpdateAppStoreVersionLocalizationFields(ctx context.Context, localizationID string, fields map[string]string) (*AppStoreVersionLocalizationResponse, error) {
+	return c.UpdateAppStoreVersionLocalizationNullableFields(ctx, localizationID, nullableLocalizationFields(fields))
+}
+
+// UpdateAppStoreVersionLocalizationNullableFields updates exactly the supplied
+// fields, sending JSON null for fields whose value is nil so callers can clear
+// nullable attributes while leaving omitted fields unchanged.
+func (c *Client) UpdateAppStoreVersionLocalizationNullableFields(ctx context.Context, localizationID string, fields map[string]NullableString) (*AppStoreVersionLocalizationResponse, error) {
+	payload := localizationFieldsUpdateRequest{Data: localizationFieldsUpdateData{
+		Type:       ResourceTypeAppStoreVersionLocalizations,
+		ID:         localizationID,
+		Attributes: fields,
+	}}
+	body, err := BuildRequestBody(payload)
+	if err != nil {
+		return nil, err
+	}
+	path := fmt.Sprintf("/v1/appStoreVersionLocalizations/%s", localizationID)
+	data, err := c.do(ctx, http.MethodPatch, path, body)
+	if err != nil {
+		return nil, err
+	}
+	var response AppStoreVersionLocalizationResponse
+	if err := json.Unmarshal(data, &response); err != nil {
+		return nil, fmt.Errorf("failed to parse response: %w", err)
+	}
+	return &response, nil
+}
+
 // DeleteAppStoreVersionLocalization deletes a localization by ID.
 func (c *Client) DeleteAppStoreVersionLocalization(ctx context.Context, localizationID string) error {
 	path := fmt.Sprintf("/v1/appStoreVersionLocalizations/%s", localizationID)
@@ -1556,14 +1839,53 @@ func (c *Client) UpdateAppInfoLocalization(ctx context.Context, localizationID s
 	return &response, nil
 }
 
+// UpdateAppInfoLocalizationFields updates exactly the supplied fields,
+// preserving explicit empty strings while leaving omitted fields unchanged.
+func (c *Client) UpdateAppInfoLocalizationFields(ctx context.Context, localizationID string, fields map[string]string) (*AppInfoLocalizationResponse, error) {
+	return c.UpdateAppInfoLocalizationNullableFields(ctx, localizationID, nullableLocalizationFields(fields))
+}
+
+// UpdateAppInfoLocalizationNullableFields updates exactly the supplied fields,
+// sending JSON null for fields whose value is nil so callers can clear nullable
+// attributes while leaving omitted fields unchanged.
+func (c *Client) UpdateAppInfoLocalizationNullableFields(ctx context.Context, localizationID string, fields map[string]NullableString) (*AppInfoLocalizationResponse, error) {
+	payload := localizationFieldsUpdateRequest{Data: localizationFieldsUpdateData{
+		Type:       ResourceTypeAppInfoLocalizations,
+		ID:         localizationID,
+		Attributes: fields,
+	}}
+	body, err := BuildRequestBody(payload)
+	if err != nil {
+		return nil, err
+	}
+	path := fmt.Sprintf("/v1/appInfoLocalizations/%s", localizationID)
+	data, err := c.do(ctx, http.MethodPatch, path, body)
+	if err != nil {
+		return nil, err
+	}
+	var response AppInfoLocalizationResponse
+	if err := json.Unmarshal(data, &response); err != nil {
+		return nil, fmt.Errorf("failed to parse response: %w", err)
+	}
+	return &response, nil
+}
+
 // GetAppInfoLocalization retrieves an app info localization by ID.
-func (c *Client) GetAppInfoLocalization(ctx context.Context, localizationID string) (*AppInfoLocalizationResponse, error) {
+func (c *Client) GetAppInfoLocalization(ctx context.Context, localizationID string, opts ...AppInfoLocalizationOption) (*AppInfoLocalizationResponse, error) {
+	query := &appInfoLocalizationQuery{}
+	for _, opt := range opts {
+		opt(query)
+	}
+
 	localizationID = strings.TrimSpace(localizationID)
 	if localizationID == "" {
 		return nil, fmt.Errorf("localizationID is required")
 	}
 
 	path := fmt.Sprintf("/v1/appInfoLocalizations/%s", localizationID)
+	if queryString := buildAppInfoLocalizationQuery(query); queryString != "" {
+		path += "?" + queryString
+	}
 	data, err := c.do(ctx, "GET", path, nil)
 	if err != nil {
 		return nil, err
@@ -1590,8 +1912,21 @@ func (c *Client) DeleteAppInfoLocalization(ctx context.Context, localizationID s
 }
 
 // GetAppInfos retrieves app info records for an app.
-func (c *Client) GetAppInfos(ctx context.Context, appID string) (*AppInfosResponse, error) {
+func (c *Client) GetAppInfos(ctx context.Context, appID string, opts ...AppInfoOption) (*AppInfosResponse, error) {
+	query := &appInfoQuery{}
+	for _, opt := range opts {
+		opt(query)
+	}
+
 	path := fmt.Sprintf("/v1/apps/%s/appInfos", appID)
+	if query.nextURL != "" {
+		if err := validateNextURL(query.nextURL); err != nil {
+			return nil, fmt.Errorf("appInfos: %w", err)
+		}
+		path = query.nextURL
+	} else if queryString := buildAppInfoQuery(query); queryString != "" {
+		path += "?" + queryString
+	}
 	data, err := c.do(ctx, "GET", path, nil)
 	if err != nil {
 		return nil, err

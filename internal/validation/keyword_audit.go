@@ -7,7 +7,7 @@ import (
 	"unicode"
 )
 
-const keywordAuditUnderfilledRemainingBytes = 25
+const keywordAuditUnderfilledRemainingCharacters = 25
 
 // KeywordAuditInput describes the inputs for a keyword audit report.
 type KeywordAuditInput struct {
@@ -27,28 +27,29 @@ type KeywordAuditLocale struct {
 	AppInfoLocalizationID string `json:"appInfoLocalizationId,omitempty"`
 	KeywordField          string `json:"keywordField,omitempty"`
 	KeywordCount          int    `json:"keywordCount"`
-	UsedBytes             int    `json:"usedBytes"`
-	RemainingBytes        int    `json:"remainingBytes"`
-	Name                  string `json:"name,omitempty"`
-	Subtitle              string `json:"subtitle,omitempty"`
-	Errors                int    `json:"errors"`
-	Warnings              int    `json:"warnings"`
-	Infos                 int    `json:"infos"`
+	// Legacy JSON field names are retained for compatibility with existing audit consumers.
+	UsedCharacters      int    `json:"usedBytes"`
+	RemainingCharacters int    `json:"remainingBytes"`
+	Name                string `json:"name,omitempty"`
+	Subtitle            string `json:"subtitle,omitempty"`
+	Errors              int    `json:"errors"`
+	Warnings            int    `json:"warnings"`
+	Infos               int    `json:"infos"`
 }
 
 // KeywordAuditCheck represents one keyword-audit finding.
 type KeywordAuditCheck struct {
-	ID             string   `json:"id"`
-	Severity       Severity `json:"severity"`
-	Message        string   `json:"message"`
-	Remediation    string   `json:"remediation,omitempty"`
-	Locale         string   `json:"locale,omitempty"`
-	Field          string   `json:"field,omitempty"`
-	Keyword        string   `json:"keyword,omitempty"`
-	MatchedTerm    string   `json:"matchedTerm,omitempty"`
-	RelatedLocales []string `json:"relatedLocales,omitempty"`
-	UsedBytes      int      `json:"usedBytes,omitempty"`
-	RemainingBytes int      `json:"remainingBytes,omitempty"`
+	ID                  string   `json:"id"`
+	Severity            Severity `json:"severity"`
+	Message             string   `json:"message"`
+	Remediation         string   `json:"remediation,omitempty"`
+	Locale              string   `json:"locale,omitempty"`
+	Field               string   `json:"field,omitempty"`
+	Keyword             string   `json:"keyword,omitempty"`
+	MatchedTerm         string   `json:"matchedTerm,omitempty"`
+	RelatedLocales      []string `json:"relatedLocales,omitempty"`
+	UsedCharacters      int      `json:"usedBytes,omitempty"`
+	RemainingCharacters int      `json:"remainingBytes,omitempty"`
 }
 
 // KeywordAuditReport is the top-level keyword-audit output.
@@ -106,10 +107,10 @@ func AuditKeywords(input KeywordAuditInput, strict bool) KeywordAuditReport {
 
 		scan := scanKeywordField(loc.Keywords)
 		normalized, duplicates := normalizeKeywordAuditTokens(scan.tokens)
-		usedBytes := KeywordFieldLength(loc.Keywords)
-		remainingBytes := LimitKeywords - usedBytes
-		if remainingBytes < 0 {
-			remainingBytes = 0
+		usedCharacters := KeywordFieldLength(loc.Keywords)
+		remainingCharacters := LimitKeywords - usedCharacters
+		if remainingCharacters < 0 {
+			remainingCharacters = 0
 		}
 
 		summary := &KeywordAuditLocale{
@@ -117,8 +118,8 @@ func AuditKeywords(input KeywordAuditInput, strict bool) KeywordAuditReport {
 			VersionLocalizationID: strings.TrimSpace(loc.ID),
 			KeywordField:          loc.Keywords,
 			KeywordCount:          len(normalized),
-			UsedBytes:             usedBytes,
-			RemainingBytes:        remainingBytes,
+			UsedCharacters:        usedCharacters,
+			RemainingCharacters:   remainingCharacters,
 		}
 		if appInfo, ok := appInfoByLocale[locale]; ok {
 			summary.AppInfoLocalizationID = strings.TrimSpace(appInfo.ID)
@@ -129,14 +130,14 @@ func AuditKeywords(input KeywordAuditInput, strict bool) KeywordAuditReport {
 
 		if issue := KeywordFieldLengthIssue(loc.Keywords); issue != nil {
 			report.Checks = append(report.Checks, KeywordAuditCheck{
-				ID:             "metadata.keywords.length",
-				Severity:       SeverityError,
-				Locale:         locale,
-				Field:          "keywords",
-				Message:        fmt.Sprintf("keywords exceed %d %s", issue.Limit, issue.Unit),
-				Remediation:    fmt.Sprintf("Shorten keywords to %d %s or fewer", issue.Limit, issue.Unit),
-				UsedBytes:      issue.Length,
-				RemainingBytes: 0,
+				ID:                  "metadata.keywords.length",
+				Severity:            SeverityError,
+				Locale:              locale,
+				Field:               "keywords",
+				Message:             fmt.Sprintf("keywords exceed %d %s", issue.Limit, issue.Unit),
+				Remediation:         fmt.Sprintf("Shorten keywords to %d %s or fewer", issue.Limit, issue.Unit),
+				UsedCharacters:      issue.Length,
+				RemainingCharacters: 0,
 			})
 		}
 
@@ -173,16 +174,16 @@ func AuditKeywords(input KeywordAuditInput, strict bool) KeywordAuditReport {
 			})
 		}
 
-		if summary.RemainingBytes >= keywordAuditUnderfilledRemainingBytes {
+		if summary.RemainingCharacters >= keywordAuditUnderfilledRemainingCharacters {
 			report.Checks = append(report.Checks, KeywordAuditCheck{
-				ID:             "metadata.keywords.underfilled",
-				Severity:       SeverityInfo,
-				Locale:         locale,
-				Field:          "keywords",
-				Message:        fmt.Sprintf("keyword field leaves %d bytes unused", summary.RemainingBytes),
-				Remediation:    "Consider using more of the keyword budget if the missing space is intentional and safe",
-				UsedBytes:      summary.UsedBytes,
-				RemainingBytes: summary.RemainingBytes,
+				ID:                  "metadata.keywords.underfilled",
+				Severity:            SeverityInfo,
+				Locale:              locale,
+				Field:               "keywords",
+				Message:             fmt.Sprintf("keyword field leaves %d characters unused", summary.RemainingCharacters),
+				Remediation:         "Consider using more of the keyword budget if the missing space is intentional and safe",
+				UsedCharacters:      summary.UsedCharacters,
+				RemainingCharacters: summary.RemainingCharacters,
 			})
 		}
 

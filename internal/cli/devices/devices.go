@@ -2,6 +2,7 @@ package devices
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -18,6 +19,8 @@ import (
 )
 
 const defaultLocalUDIDCommandTimeout = 10 * time.Second
+
+var errExistingDeviceFound = errors.New("existing device found")
 
 var (
 	localUDIDGOOS           = runtime.GOOS
@@ -39,9 +42,10 @@ func DevicesCommand() *ffcli.Command {
 
 Examples:
   asc devices list
-  asc devices get --id "DEVICE_ID"
+  asc devices view --id "DEVICE_ID"
   asc devices local-udid
   asc devices register --name "iPhone 15" --udid "UDID" --platform IOS
+  asc devices register-batch --file "./devices.txt" --confirm
   asc devices update --id "DEVICE_ID" --status DISABLED`,
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
@@ -50,6 +54,7 @@ Examples:
 			DevicesGetCommand(),
 			DevicesLocalUDIDCommand(),
 			DevicesRegisterCommand(),
+			DevicesRegisterBatchCommand(),
 			DevicesUpdateCommand(),
 		},
 		Exec: func(ctx context.Context, args []string) error {
@@ -92,28 +97,28 @@ Examples:
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
 			if *limit != 0 && (*limit < 1 || *limit > 200) {
-				return fmt.Errorf("devices list: --limit must be between 1 and 200")
+				return shared.UsageErrorf("devices list: --limit must be between 1 and 200")
 			}
 			if err := shared.ValidateNextURL(*next); err != nil {
-				return fmt.Errorf("devices list: %w", err)
+				return shared.UsageErrorf("devices list: %v", err)
 			}
 			if err := shared.ValidateSort(*sort, "id", "-id", "name", "-name", "platform", "-platform", "status", "-status", "udid", "-udid"); err != nil {
-				return fmt.Errorf("devices list: %w", err)
+				return shared.UsageErrorf("devices list: %v", err)
 			}
 
 			platformValues, err := normalizeDevicePlatforms(shared.SplitCSV(*platform))
 			if err != nil {
-				return fmt.Errorf("devices list: %w", err)
+				return fmt.Errorf("devices list: %w", shared.UsageError(err.Error()))
 			}
 
 			statusValue, err := normalizeDeviceStatus(*status)
 			if err != nil {
-				return fmt.Errorf("devices list: %w", err)
+				return shared.UsageErrorf("devices list: %v", err)
 			}
 
 			fieldsValue, err := normalizeDeviceFields(*fields)
 			if err != nil {
-				return fmt.Errorf("devices list: %w", err)
+				return shared.UsageErrorf("devices list: %v", err)
 			}
 
 			client, err := shared.GetASCClient()
@@ -171,40 +176,40 @@ Examples:
 	}
 }
 
-// DevicesGetCommand returns the devices get subcommand.
+// DevicesGetCommand returns the devices view subcommand.
 func DevicesGetCommand() *ffcli.Command {
-	fs := flag.NewFlagSet("get", flag.ExitOnError)
+	fs := flag.NewFlagSet("view", flag.ExitOnError)
 
-	id := fs.String("id", "", "Device ID")
+	id := shared.BindResourceIDFlag(fs, "id", "devices", "Device ID")
 	fields := fs.String("fields", "", "Fields to include: addedDate, deviceClass, model, name, platform, status, udid")
 	output := shared.BindOutputFlags(fs)
 
 	return &ffcli.Command{
-		Name:       "get",
-		ShortUsage: "asc devices get --id DEVICE_ID",
-		ShortHelp:  "Get a device by ID.",
-		LongHelp: `Get a device by ID.
+		Name:       "view",
+		ShortUsage: "asc devices view --id DEVICE_ID",
+		ShortHelp:  "View a device by ID.",
+		LongHelp: `View a device by ID.
 
 Examples:
-  asc devices get --id "DEVICE_ID"
-  asc devices get --id "DEVICE_ID" --fields "name,udid,platform,status"`,
+  asc devices view --id "DEVICE_ID"
+  asc devices view --id "DEVICE_ID" --fields "name,udid,platform,status"`,
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
 			idValue := strings.TrimSpace(*id)
 			if idValue == "" {
 				fmt.Fprintln(os.Stderr, "Error: --id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--id")
 			}
 
 			fieldsValue, err := normalizeDeviceFields(*fields)
 			if err != nil {
-				return fmt.Errorf("devices get: %w", err)
+				return fmt.Errorf("devices view: %w", err)
 			}
 
 			client, err := shared.GetASCClient()
 			if err != nil {
-				return fmt.Errorf("devices get: %w", err)
+				return fmt.Errorf("devices view: %w", err)
 			}
 
 			requestCtx, cancel := shared.ContextWithTimeout(ctx)
@@ -212,7 +217,7 @@ Examples:
 
 			device, err := client.GetDevice(requestCtx, idValue, fieldsValue)
 			if err != nil {
-				return fmt.Errorf("devices get: failed to fetch: %w", err)
+				return fmt.Errorf("devices view: failed to fetch: %w", err)
 			}
 
 			return shared.PrintOutput(device, *output.Output, *output.Pretty)
@@ -258,8 +263,16 @@ func DevicesRegisterCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("register", flag.ExitOnError)
 
 	name := fs.String("name", "", "Device name")
-	udid := fs.String("udid", "", "Device UDID (required unless --udid-from-system)")
+	udid := fs.String("udid", "", "Device UDID (required unless --udid-from-system or --via-url)")
 	udidFromSystem := fs.Bool("udid-from-system", false, "Use local macOS hardware UUID as UDID (macOS only)")
+	viaURL := fs.Bool("via-url", false, "Collect a remote device UDID from a registration URL")
+	listen := fs.String("listen", "127.0.0.1:0", "Loopback address for the registration server")
+	publicURL := fs.String("public-url", "", "Externally reachable URL printed in the profile and QR code")
+	ttl := fs.Duration("ttl", 30*time.Minute, "How long to wait for device callbacks")
+	outputFile := fs.String("output-file", "", "Collect-only TSV for register-batch when --confirm is not set")
+	confirm := fs.Bool("confirm", false, "Register collected devices in App Store Connect")
+	maxDevices := fs.Int("max-devices", 0, "With --via-url, end the session after N (at least 1) new devices are registered or collected; unbounded when unset")
+	stream := fs.Bool("stream", false, "With --via-url, write one JSON receipt line per device arrival before the final summary (requires --output json)")
 	platform := fs.String("platform", "", "Device platform: "+strings.Join(devicePlatformList(), ", "))
 	output := shared.BindOutputFlags(fs)
 
@@ -271,14 +284,105 @@ func DevicesRegisterCommand() *ffcli.Command {
 
 Examples:
   asc devices register --name "iPhone 15" --udid "UDID" --platform IOS
-  asc devices register --name "My Mac" --udid-from-system --platform MAC_OS`,
+  asc devices register --name "My Mac" --udid-from-system --platform MAC_OS
+  asc devices register --via-url --output-file ./devices.tsv
+  asc devices register --via-url --confirm --stream --output json --public-url "https://tunnel.example"
+  asc devices register --via-url --confirm --max-devices 5 --public-url "https://tunnel.example"`,
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
 			nameValue := strings.TrimSpace(*name)
+			if !*viaURL {
+				var unused string
+				fs.Visit(func(f *flag.Flag) {
+					switch f.Name {
+					case "listen", "public-url", "ttl", "output-file", "confirm", "stream", "max-devices":
+						if unused == "" {
+							unused = f.Name
+						}
+					}
+				})
+				if unused != "" {
+					return shared.UsageErrorf("--%s requires --via-url", unused)
+				}
+			}
+			if *viaURL {
+				if len(args) > 0 {
+					return shared.UsageError("devices register --via-url does not accept positional arguments")
+				}
+				format, err := shared.ValidateOutputFormat(*output.Output, *output.Pretty)
+				if err != nil {
+					return err
+				}
+				if *stream {
+					if format != "json" {
+						return shared.UsageError("--stream requires --output json")
+					}
+					if *output.Pretty {
+						return shared.UsageError("--stream cannot be combined with --pretty")
+					}
+				}
+				maxDevicesSet := false
+				fs.Visit(func(f *flag.Flag) {
+					if f.Name == "max-devices" {
+						maxDevicesSet = true
+					}
+				})
+				if maxDevicesSet && *maxDevices < 1 {
+					return shared.UsageError("--max-devices must be at least 1")
+				}
+				options := deviceURLServeOptions{
+					Name:           nameValue,
+					Listen:         strings.TrimSpace(*listen),
+					ListenExplicit: listenExplicit(fs),
+					PublicURL:      strings.TrimSpace(*publicURL),
+					TTL:            *ttl,
+					Confirm:        *confirm,
+					OutputFile:     strings.TrimSpace(*outputFile),
+					MaxDevices:     *maxDevices,
+				}
+				if err := validateDeviceURLServeOptions(options); err != nil {
+					return err
+				}
+				if strings.TrimSpace(*udid) != "" || *udidFromSystem {
+					return shared.UsageError("--via-url cannot be combined with --udid or --udid-from-system")
+				}
+				platformValue := strings.TrimSpace(*platform)
+				if platformValue == "" {
+					platformValue = "IOS"
+				}
+				platformValue, err = normalizeDevicePlatform(platformValue)
+				if err != nil {
+					return fmt.Errorf("devices register: %w", shared.UsageError(err.Error()))
+				}
+				if !*confirm && strings.TrimSpace(*outputFile) == "" {
+					fmt.Fprintln(os.Stderr, "Error: --output-file is required without --confirm")
+					return shared.MissingRequiredUsageError("--output-file")
+				}
+				var client *asc.Client
+				if *confirm {
+					created, err := shared.GetASCClient()
+					if err != nil {
+						return fmt.Errorf("devices register: %w", err)
+					}
+					client = created
+				}
+				options.Platform = platformValue
+				options.Client = client
+				if *stream {
+					options.Stream = os.Stdout
+				}
+				result, err := serveDeviceRegistration(ctx, options)
+				if result != nil {
+					if printErr := shared.PrintOutput(result, *output.Output, *output.Pretty); printErr != nil && err == nil {
+						return printErr
+					}
+				}
+				return err
+			}
 			if nameValue == "" {
 				fmt.Fprintln(os.Stderr, "Error: --name is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--name")
 			}
 
 			udidValue := strings.TrimSpace(*udid)
@@ -295,7 +399,7 @@ Examples:
 			}
 			if udidValue == "" {
 				fmt.Fprintln(os.Stderr, "Error: --udid is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--udid")
 			}
 
 			platformValue := strings.TrimSpace(*platform)
@@ -304,7 +408,7 @@ Examples:
 			}
 			if platformValue == "" {
 				fmt.Fprintln(os.Stderr, "Error: --platform is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--platform")
 			}
 			if *udidFromSystem && strings.ToUpper(platformValue) != "MAC_OS" {
 				fmt.Fprintln(os.Stderr, "Error: --udid-from-system requires --platform MAC_OS")
@@ -313,7 +417,7 @@ Examples:
 
 			platformValue, err := normalizeDevicePlatform(platformValue)
 			if err != nil {
-				return fmt.Errorf("devices register: %w", err)
+				return fmt.Errorf("devices register: %w", shared.UsageError(err.Error()))
 			}
 
 			client, err := shared.GetASCClient()
@@ -323,6 +427,14 @@ Examples:
 
 			requestCtx, cancel := shared.ContextWithTimeout(ctx)
 			defer cancel()
+
+			existingDevice, err := findExistingDeviceByNormalizedUDID(requestCtx, client, udidValue, platformValue)
+			if err != nil {
+				return fmt.Errorf("devices register: failed to check existing devices: %w", err)
+			}
+			if existingDevice != nil {
+				return shared.PrintOutput(existingDevice, *output.Output, *output.Pretty)
+			}
 
 			attrs := asc.DeviceCreateAttributes{
 				Name:     nameValue,
@@ -340,11 +452,56 @@ Examples:
 	}
 }
 
+func findExistingDeviceByNormalizedUDID(ctx context.Context, client *asc.Client, udidValue, platformValue string) (*asc.DeviceResponse, error) {
+	targetUDID := normalizeDeviceUDIDForComparison(udidValue)
+	if targetUDID == "" {
+		return nil, nil
+	}
+
+	firstPage, err := client.GetDevices(
+		ctx,
+		asc.WithDevicesPlatforms([]string{platformValue}),
+		asc.WithDevicesFields([]string{"name", "udid", "platform", "status"}),
+		asc.WithDevicesLimit(200),
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	var found *asc.DeviceResponse
+	err = asc.PaginateEach(ctx, firstPage, func(ctx context.Context, nextURL string) (asc.PaginatedResponse, error) {
+		return client.GetDevices(ctx, asc.WithDevicesNextURL(nextURL))
+	}, func(page asc.PaginatedResponse) error {
+		devices, ok := page.(*asc.DevicesResponse)
+		if !ok || devices == nil {
+			return nil
+		}
+		for _, device := range devices.Data {
+			if normalizeDeviceUDIDForComparison(device.Attributes.UDID) == targetUDID {
+				found = &asc.DeviceResponse{Data: device}
+				return errExistingDeviceFound
+			}
+		}
+		return nil
+	})
+	if err != nil && !errors.Is(err, errExistingDeviceFound) {
+		return nil, err
+	}
+	return found, nil
+}
+
+func normalizeDeviceUDIDForComparison(value string) string {
+	value = strings.TrimSpace(value)
+	value = strings.ReplaceAll(value, "-", "")
+	value = strings.ReplaceAll(value, ":", "")
+	return strings.ToUpper(value)
+}
+
 // DevicesUpdateCommand returns the devices update subcommand.
 func DevicesUpdateCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("update", flag.ExitOnError)
 
-	id := fs.String("id", "", "Device ID")
+	id := shared.BindResourceIDFlag(fs, "id", "devices", "Device ID")
 	name := fs.String("name", "", "Device name")
 	status := fs.String("status", "", "Device status: ENABLED, DISABLED")
 	output := shared.BindOutputFlags(fs)
@@ -364,14 +521,14 @@ Examples:
 			idValue := strings.TrimSpace(*id)
 			if idValue == "" {
 				fmt.Fprintln(os.Stderr, "Error: --id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--id")
 			}
 
 			nameValue := strings.TrimSpace(*name)
 			statusRaw := strings.TrimSpace(*status)
 			if nameValue == "" && statusRaw == "" {
 				fmt.Fprintln(os.Stderr, "Error: at least one update flag is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("")
 			}
 
 			statusValue, err := normalizeDeviceStatus(statusRaw)
@@ -411,11 +568,11 @@ func normalizeDevicePlatform(value string) (string, error) {
 	if trimmed == "" {
 		return "", nil
 	}
-	normalized := strings.ToUpper(trimmed)
-	if slices.Contains(devicePlatformList(), normalized) {
-		return normalized, nil
+	platform, err := shared.NormalizeBundleIDPlatform(trimmed)
+	if err != nil {
+		return "", err
 	}
-	return "", fmt.Errorf("--platform must be one of: %s", strings.Join(devicePlatformList(), ", "))
+	return string(platform), nil
 }
 
 func normalizeDevicePlatforms(values []string) ([]string, error) {
@@ -471,7 +628,7 @@ func normalizeDeviceFields(value string) ([]string, error) {
 }
 
 func devicePlatformList() []string {
-	return []string{"IOS", "MAC_OS", "TV_OS", "VISION_OS"}
+	return shared.BundleIDPlatformList()
 }
 
 func deviceStatusList() []string {

@@ -144,7 +144,7 @@ func TestRunMetadataPushRejectsOverLimitKeywordBytesBeforeAuthResolution(t *test
 	if err := os.MkdirAll(versionDir, 0o755); err != nil {
 		t.Fatalf("mkdir version dir: %v", err)
 	}
-	body := `{"keywords":"` + strings.Repeat("語", 34) + `"}`
+	body := `{"keywords":"` + strings.Repeat("語", 101) + `"}`
 	if err := os.WriteFile(filepath.Join(versionDir, "ja.json"), []byte(body), 0o644); err != nil {
 		t.Fatalf("write version file: %v", err)
 	}
@@ -176,8 +176,8 @@ func TestRunMetadataPushRejectsOverLimitKeywordBytesBeforeAuthResolution(t *test
 	if stdout != "" {
 		t.Fatalf("expected empty stdout, got %q", stdout)
 	}
-	if !strings.Contains(stderr, "keywords exceed 100 bytes") {
-		t.Fatalf("expected keyword byte-limit error, got %q", stderr)
+	if !strings.Contains(stderr, "keywords exceed 100 characters") {
+		t.Fatalf("expected keyword character-limit error, got %q", stderr)
 	}
 	if requestCount != 0 {
 		t.Fatalf("expected no HTTP requests, got %d", requestCount)
@@ -351,7 +351,7 @@ func TestMetadataPushDryRunDoesNotWarnForCompleteCreate(t *testing.T) {
 				Header:     http.Header{"Content-Type": []string{"application/json"}},
 			}, nil
 		case "/v1/apps/app-1/appStoreVersions":
-			if strings.Contains(req.URL.RawQuery, "filter%5BappStoreState%5D") {
+			if strings.Contains(req.URL.RawQuery, "filter%5BappStoreState%5D") || req.URL.Query().Get("filter[appVersionState]") == "READY_FOR_DISTRIBUTION" {
 				body := `{"data":[],"links":{"next":""}}`
 				return &http.Response{
 					StatusCode: http.StatusOK,
@@ -1214,7 +1214,7 @@ func TestMetadataPushApplyWarnsWhenUpdateRequiresWhatsNew(t *testing.T) {
 				Header:     http.Header{"Content-Type": []string{"application/json"}},
 			}, nil
 		case "/v1/apps/app-1/appStoreVersions":
-			if strings.Contains(req.URL.RawQuery, "filter%5BappStoreState%5D") {
+			if strings.Contains(req.URL.RawQuery, "filter%5BappStoreState%5D") || req.URL.Query().Get("filter[appVersionState]") == "READY_FOR_DISTRIBUTION" {
 				body := `{"data":[{"type":"appStoreVersions","id":"released-version","attributes":{"versionString":"1.0","platform":"IOS","appStoreState":"READY_FOR_SALE"}}],"links":{"next":""}}`
 				return &http.Response{
 					StatusCode: http.StatusOK,
@@ -1575,7 +1575,7 @@ func TestMetadataPushRejectsAmbiguousVersionWithoutPlatform(t *testing.T) {
 	if stdout != "" {
 		t.Fatalf("expected empty stdout, got %q", stdout)
 	}
-	if !strings.Contains(stderr, `Error: --platform is required when multiple app store versions match --version "1.2.3"`) {
+	if !strings.Contains(stderr, `Error: 2 app store versions match version "1.2.3"; pass --platform with one of:`) {
 		t.Fatalf("expected ambiguous-version error, got %q", stderr)
 	}
 }
@@ -1653,7 +1653,7 @@ func TestMetadataPushRejectsAmbiguousAppInfoWithActionableRemediation(t *testing
 	if stdout != "" {
 		t.Fatalf("expected empty stdout, got %q", stdout)
 	}
-	if !strings.Contains(stderr, `Error: multiple app infos found for app "app-1"`) {
+	if !strings.Contains(stderr, `Error: 2 app infos match app "app-1"; pass --app-info with one of:`) {
 		t.Fatalf("expected ambiguous app-info error, got %q", stderr)
 	}
 	if !strings.Contains(stderr, `asc apps info list --app "app-1"`) {
@@ -1857,6 +1857,7 @@ func TestMetadataPushApplyFailsOnPartialMutation(t *testing.T) {
 	setupAuth(t)
 	t.Setenv("ASC_CONFIG_PATH", filepath.Join(t.TempDir(), "nonexistent.json"))
 	t.Setenv("ASC_APP_ID", "")
+	t.Chdir(t.TempDir())
 
 	dir := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(dir, "app-info"), 0o755); err != nil {
@@ -1949,17 +1950,25 @@ func TestMetadataPushApplyFailsOnPartialMutation(t *testing.T) {
 		runErr = root.Run(context.Background())
 	})
 
-	if runErr == nil {
-		t.Fatal("expected apply failure error")
+	if _, ok := errors.AsType[ReportedError](runErr); !ok {
+		t.Fatalf("expected reported partial failure, got %T: %v", runErr, runErr)
 	}
 	if patchCount != 2 {
 		t.Fatalf("expected two patch attempts before failure, got %d", patchCount)
 	}
-	if !strings.Contains(runErr.Error(), "metadata push: update version localization en-US") {
-		t.Fatalf("expected wrapped version-localization failure, got %v", runErr)
+	if !strings.Contains(runErr.Error(), "metadata push: 1 localization(s) failed") {
+		t.Fatalf("expected batch failure summary, got %v", runErr)
 	}
-	if stdout != "" {
-		t.Fatalf("expected empty stdout on failure, got %q", stdout)
+	var result struct {
+		Succeeded           int    `json:"succeeded"`
+		Failed              int    `json:"failed"`
+		FailureArtifactPath string `json:"failureArtifactPath"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &result); err != nil {
+		t.Fatalf("parse partial output: %v\nstdout=%q", err, stdout)
+	}
+	if result.Succeeded != 1 || result.Failed != 1 || result.FailureArtifactPath == "" {
+		t.Fatalf("unexpected partial summary: %+v", result)
 	}
 	if stderr != "" {
 		t.Fatalf("expected empty stderr on failure, got %q", stderr)

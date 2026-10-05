@@ -13,8 +13,6 @@ import (
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/cli/shared"
 )
 
-const legacyLocalizationIDWarning = "Warning: `--id` is deprecated. Use `--localization-id`."
-
 type testNotesBuildSelectorFlags struct {
 	buildSelectorFlags
 }
@@ -32,12 +30,12 @@ func BuildsTestNotesCommand() *ffcli.Command {
 Build selector modes:
   --build-id BUILD_ID
   --app APP --latest [--version VER] [--platform PLATFORM]
-  --app APP --build-number NUM [--version VER] [--platform PLATFORM]
+  --app APP --build-number NUM --platform PLATFORM [--version VER]
 
 Examples:
   asc builds test-notes list --build-id "BUILD_ID"
   asc builds test-notes view --app "123456789" --latest --locale "en-US"
-  asc builds test-notes create --app "123456789" --build-number "42" --version "1.2.3" --locale "en-US" --whats-new "Test instructions"
+  asc builds test-notes create --app "123456789" --build-number "42" --platform IOS --version "1.2.3" --locale "en-US" --whats-new "Test instructions"
   asc builds test-notes update --build-id "BUILD_ID" --locale "en-US" --whats-new "Updated instructions"
   asc builds test-notes delete --build-id "BUILD_ID" --locale "en-US" --confirm`,
 		FlagSet:   fs,
@@ -45,7 +43,6 @@ Examples:
 		Subcommands: []*ffcli.Command{
 			BuildsTestNotesListCommand(),
 			BuildsTestNotesViewCommand(),
-			RemovedBuildsTestNotesGetCommand(),
 			BuildsTestNotesCreateCommand(),
 			BuildsTestNotesUpdateCommand(),
 			BuildsTestNotesDeleteCommand(),
@@ -69,31 +66,28 @@ func BuildsTestNotesListCommand() *ffcli.Command {
 
 	return &ffcli.Command{
 		Name:       "list",
-		ShortUsage: "asc builds test-notes list [--build-id BUILD_ID | --app APP --latest [--version VER] [--platform PLATFORM] | --app APP --build-number NUM [--version VER] [--platform PLATFORM]] [flags]",
+		ShortUsage: "asc builds test-notes list [--build-id BUILD_ID | --app APP --latest [--version VER] [--platform PLATFORM] | --app APP --build-number NUM --platform PLATFORM [--version VER]] [flags]",
 		ShortHelp:  "List What to Test notes for a build.",
 		LongHelp: `List What to Test notes for a build.
 
 Build selector modes (one of):
   --build-id BUILD_ID
   --app APP --latest [--version VER] [--platform PLATFORM]
-  --app APP --build-number NUM [--version VER] [--platform PLATFORM]
+  --app APP --build-number NUM --platform PLATFORM [--version VER]
 
 Examples:
   asc builds test-notes list --build-id "BUILD_ID"
   asc builds test-notes list --app "123456789" --latest --locale "en-US,ja"
-  asc builds test-notes list --app "123456789" --build-number "42"
+  asc builds test-notes list --app "123456789" --build-number "42" --platform IOS
   asc builds test-notes list --build-id "BUILD_ID" --paginate`,
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
-			if err := selectors.applyLegacyAliases(); err != nil {
-				return err
-			}
 			if *limit != 0 && (*limit < 1 || *limit > 200) {
-				return fmt.Errorf("builds test-notes list: --limit must be between 1 and 200")
+				return shared.UsageError("builds test-notes list: --limit must be between 1 and 200")
 			}
 			if err := shared.ValidateNextURL(*next); err != nil {
-				return fmt.Errorf("builds test-notes list: %w", err)
+				return shared.UsageErrorf("builds test-notes list: %v", err)
 			}
 
 			locales := shared.SplitCSV(*locale)
@@ -104,6 +98,8 @@ Examples:
 				if err := validateResolveBuildOptions(selectors.resolveOptions()); err != nil {
 					return fmt.Errorf("builds test-notes list: %w", err)
 				}
+			} else if err := selectors.validateNextPageSelectorFlags(); err != nil {
+				return fmt.Errorf("builds test-notes list: %w", err)
 			}
 
 			client, err := shared.GetASCClient()
@@ -130,7 +126,8 @@ Examples:
 				paginateOpts := append(opts, asc.WithBetaBuildLocalizationsLimit(200))
 				requestCtx, cancel := shared.ContextWithTimeout(ctx)
 				defer cancel()
-				resp, err := shared.PaginateWithSpinner(requestCtx,
+				resp, err := shared.PaginateWithSpinner(
+					requestCtx,
 					func(ctx context.Context) (asc.PaginatedResponse, error) {
 						return client.ListBetaBuildLocalizations(ctx, paginateOpts...)
 					},
@@ -161,8 +158,7 @@ func BuildsTestNotesViewCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("view", flag.ExitOnError)
 
 	selectors := bindTestNotesBuildSelectorFlags(fs)
-	localizationID := fs.String("localization-id", "", "Localization ID (low-level escape hatch)")
-	legacyLocalizationID := bindHiddenLocalizationIDFlag(fs)
+	localizationID := shared.BindResourceIDFlag(fs, "localization-id", "betaBuildLocalizations", "Localization ID (low-level escape hatch)")
 	locale := fs.String("locale", "", "Locale (e.g., en-US, required with build selectors)")
 	output := shared.BindOutputFlags(fs)
 
@@ -177,22 +173,15 @@ Selector modes:
   --locale LOCALE with one of:
     --build-id BUILD_ID
     --app APP --latest [--version VER] [--platform PLATFORM]
-    --app APP --build-number NUM [--version VER] [--platform PLATFORM]
+    --app APP --build-number NUM --platform PLATFORM [--version VER]
 
 Examples:
   asc builds test-notes view --build-id "BUILD_ID" --locale "en-US"
   asc builds test-notes view --app "123456789" --latest --locale "en-US"
-  asc builds test-notes view --app "123456789" --build-number "42" --version "1.2.3" --locale "en-US"`,
+  asc builds test-notes view --app "123456789" --build-number "42" --platform IOS --version "1.2.3" --locale "en-US"`,
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
-			if err := selectors.applyLegacyAliases(); err != nil {
-				return err
-			}
-			if err := applyLegacyLocalizationIDAlias(localizationID, legacyLocalizationID); err != nil {
-				return err
-			}
-
 			id := strings.TrimSpace(*localizationID)
 			localeValue := strings.TrimSpace(*locale)
 			if err := validateTestNotesLocalizationTarget(id, localeValue, selectors); err != nil {
@@ -224,20 +213,6 @@ Examples:
 	}
 }
 
-func RemovedBuildsTestNotesGetCommand() *ffcli.Command {
-	cmd := BuildsTestNotesViewCommand()
-	cmd.Name = "get"
-	cmd.ShortUsage = "asc builds test-notes get [flags]"
-	cmd.ShortHelp = "DEPRECATED: removed; use `asc builds test-notes view`."
-	cmd.LongHelp = "Removed legacy command. Use `asc builds test-notes view` instead."
-	cmd.UsageFunc = shared.DeprecatedUsageFunc
-	cmd.Exec = func(ctx context.Context, args []string) error {
-		fmt.Fprintln(os.Stderr, "Error: `asc builds test-notes get` was removed. Use `asc builds test-notes view` instead.")
-		return flag.ErrHelp
-	}
-	return cmd
-}
-
 // BuildsTestNotesCreateCommand returns the create subcommand.
 func BuildsTestNotesCreateCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("create", flag.ExitOnError)
@@ -249,30 +224,26 @@ func BuildsTestNotesCreateCommand() *ffcli.Command {
 
 	return &ffcli.Command{
 		Name:       "create",
-		ShortUsage: "asc builds test-notes create [--build-id BUILD_ID | --app APP --latest [--version VER] [--platform PLATFORM] | --app APP --build-number NUM [--version VER] [--platform PLATFORM]] [flags]",
+		ShortUsage: "asc builds test-notes create [--build-id BUILD_ID | --app APP --latest [--version VER] [--platform PLATFORM] | --app APP --build-number NUM --platform PLATFORM [--version VER]] [flags]",
 		ShortHelp:  "Create What to Test notes for a build.",
 		LongHelp: `Create What to Test notes for a build.
 
 Build selector modes (one of):
   --build-id BUILD_ID
   --app APP --latest [--version VER] [--platform PLATFORM]
-  --app APP --build-number NUM [--version VER] [--platform PLATFORM]
+  --app APP --build-number NUM --platform PLATFORM [--version VER]
 
 Examples:
   asc builds test-notes create --build-id "BUILD_ID" --locale "en-US" --whats-new "Test instructions"
   asc builds test-notes create --app "123456789" --latest --locale "en-US" --whats-new "Test instructions"
-  asc builds test-notes create --app "123456789" --build-number "42" --version "1.2.3" --locale "en-US" --whats-new "Test instructions"`,
+  asc builds test-notes create --app "123456789" --build-number "42" --platform IOS --version "1.2.3" --locale "en-US" --whats-new "Test instructions"`,
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
-			if err := selectors.applyLegacyAliases(); err != nil {
-				return err
-			}
-
 			localeValue := strings.TrimSpace(*locale)
 			if localeValue == "" {
 				fmt.Fprintln(os.Stderr, "Error: --locale is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--locale")
 			}
 			if err := shared.ValidateBuildLocalizationLocale(localeValue); err != nil {
 				return fmt.Errorf("builds test-notes create: %w", err)
@@ -284,7 +255,11 @@ Examples:
 			whatsNewValue := strings.TrimSpace(*whatsNew)
 			if whatsNewValue == "" {
 				fmt.Fprintln(os.Stderr, "Error: --whats-new is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--whats-new")
+			}
+			whatsNewValue, normalizeErr := shared.NormalizeTestNotesForCommand(os.Stderr, whatsNewValue)
+			if normalizeErr != nil {
+				return fmt.Errorf("builds test-notes create: %w", normalizeErr)
 			}
 
 			client, err := shared.GetASCClient()
@@ -296,15 +271,10 @@ Examples:
 				return fmt.Errorf("builds test-notes create: %w", err)
 			}
 
-			attrs := asc.BetaBuildLocalizationAttributes{
-				Locale:   localeValue,
-				WhatsNew: whatsNewValue,
-			}
-
 			requestCtx, cancel := shared.ContextWithTimeout(ctx)
 			defer cancel()
 
-			resp, err := client.CreateBetaBuildLocalization(requestCtx, buildResp.Data.ID, attrs)
+			resp, err := shared.UpsertBetaBuildLocalization(requestCtx, client, buildResp.Data.ID, localeValue, whatsNewValue, shared.UpsertBetaBuildLocalizationOptions{Diagnostics: os.Stderr})
 			if err != nil {
 				return fmt.Errorf("builds test-notes create: %w", err)
 			}
@@ -319,8 +289,7 @@ func BuildsTestNotesUpdateCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("update", flag.ExitOnError)
 
 	selectors := bindTestNotesBuildSelectorFlags(fs)
-	localizationID := fs.String("localization-id", "", "Localization ID (low-level escape hatch)")
-	legacyLocalizationID := bindHiddenLocalizationIDFlag(fs)
+	localizationID := shared.BindResourceIDFlag(fs, "localization-id", "betaBuildLocalizations", "Localization ID (low-level escape hatch)")
 	locale := fs.String("locale", "", "Locale (e.g., en-US, required with build selectors)")
 	whatsNew := fs.String("whats-new", "", "What to Test notes")
 	output := shared.BindOutputFlags(fs)
@@ -336,21 +305,14 @@ Selector modes:
   --locale LOCALE with one of:
     --build-id BUILD_ID
     --app APP --latest [--version VER] [--platform PLATFORM]
-    --app APP --build-number NUM [--version VER] [--platform PLATFORM]
+    --app APP --build-number NUM --platform PLATFORM [--version VER]
 
 Examples:
   asc builds test-notes update --build-id "BUILD_ID" --locale "en-US" --whats-new "Updated notes"
-  asc builds test-notes update --app "123456789" --build-number "42" --version "1.2.3" --locale "en-US" --whats-new "Updated notes"`,
+  asc builds test-notes update --app "123456789" --build-number "42" --platform IOS --version "1.2.3" --locale "en-US" --whats-new "Updated notes"`,
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
-			if err := selectors.applyLegacyAliases(); err != nil {
-				return err
-			}
-			if err := applyLegacyLocalizationIDAlias(localizationID, legacyLocalizationID); err != nil {
-				return err
-			}
-
 			id := strings.TrimSpace(*localizationID)
 			localeValue := strings.TrimSpace(*locale)
 			if err := validateTestNotesLocalizationTarget(id, localeValue, selectors); err != nil {
@@ -360,7 +322,11 @@ Examples:
 			whatsNewValue := strings.TrimSpace(*whatsNew)
 			if whatsNewValue == "" {
 				fmt.Fprintln(os.Stderr, "Error: at least one update flag is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--whats-new")
+			}
+			whatsNewValue, normalizeErr := shared.NormalizeTestNotesForCommand(os.Stderr, whatsNewValue)
+			if normalizeErr != nil {
+				return fmt.Errorf("builds test-notes update: %w", normalizeErr)
 			}
 
 			client, err := shared.GetASCClient()
@@ -398,8 +364,7 @@ func BuildsTestNotesDeleteCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("delete", flag.ExitOnError)
 
 	selectors := bindTestNotesBuildSelectorFlags(fs)
-	localizationID := fs.String("localization-id", "", "Localization ID (low-level escape hatch)")
-	legacyLocalizationID := bindHiddenLocalizationIDFlag(fs)
+	localizationID := shared.BindResourceIDFlag(fs, "localization-id", "betaBuildLocalizations", "Localization ID (low-level escape hatch)")
 	locale := fs.String("locale", "", "Locale (e.g., en-US, required with build selectors)")
 	confirm := fs.Bool("confirm", false, "Confirm deletion")
 	output := shared.BindOutputFlags(fs)
@@ -415,21 +380,14 @@ Selector modes:
   --locale LOCALE with one of:
     --build-id BUILD_ID
     --app APP --latest [--version VER] [--platform PLATFORM]
-    --app APP --build-number NUM [--version VER] [--platform PLATFORM]
+    --app APP --build-number NUM --platform PLATFORM [--version VER]
 
 Examples:
   asc builds test-notes delete --build-id "BUILD_ID" --locale "en-US" --confirm
-  asc builds test-notes delete --app "123456789" --build-number "42" --version "1.2.3" --locale "en-US" --confirm`,
+  asc builds test-notes delete --app "123456789" --build-number "42" --platform IOS --version "1.2.3" --locale "en-US" --confirm`,
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
-			if err := selectors.applyLegacyAliases(); err != nil {
-				return err
-			}
-			if err := applyLegacyLocalizationIDAlias(localizationID, legacyLocalizationID); err != nil {
-				return err
-			}
-
 			id := strings.TrimSpace(*localizationID)
 			localeValue := strings.TrimSpace(*locale)
 			if err := validateTestNotesLocalizationTarget(id, localeValue, selectors); err != nil {
@@ -437,7 +395,7 @@ Examples:
 			}
 			if !*confirm {
 				fmt.Fprintln(os.Stderr, "Error: --confirm is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--confirm")
 			}
 
 			client, err := shared.GetASCClient()
@@ -478,7 +436,7 @@ func bindTestNotesBuildSelectorFlags(fs *flag.FlagSet) testNotesBuildSelectorFla
 			latestUsage:      "Resolve the latest matching build for --app context",
 			versionUsage:     "App version string (e.g., 1.2.3)",
 			buildNumberUsage: "Build number (CFBundleVersion)",
-			platformUsage:    "Platform: IOS, MAC_OS, TV_OS, VISION_OS",
+			platformUsage:    "Platform (required with --build-number): IOS, MAC_OS, TV_OS, VISION_OS",
 		}),
 	}
 }
@@ -503,17 +461,6 @@ func (f testNotesBuildSelectorFlags) resolveBuild(ctx context.Context, client *a
 	defer cancel()
 
 	return ResolveBuild(requestCtx, client, opts)
-}
-
-func bindHiddenLocalizationIDFlag(fs *flag.FlagSet) *trackedStringFlag {
-	value := &trackedStringFlag{}
-	fs.Var(value, "id", "DEPRECATED: use --localization-id")
-	shared.HideFlagFromHelp(fs.Lookup("id"))
-	return value
-}
-
-func applyLegacyLocalizationIDAlias(localizationID *string, legacyLocalizationID *trackedStringFlag) error {
-	return applyLegacyStringAlias(localizationID, legacyLocalizationID, "--id", "--localization-id", legacyLocalizationIDWarning)
 }
 
 func validateTestNotesLocalizationTarget(localizationID, locale string, selectors testNotesBuildSelectorFlags) error {
@@ -552,11 +499,27 @@ func resolveTestNotesLocalization(ctx context.Context, client *asc.Client, selec
 	if err != nil {
 		return nil, fmt.Errorf("failed to resolve localization: %w", err)
 	}
-	if len(localizations.Data) == 0 {
+	if localizations == nil {
+		return nil, fmt.Errorf("empty localization response")
+	}
+	pageHasNext := strings.TrimSpace(localizations.Links.Next) != ""
+	if len(localizations.Data) == 0 && !pageHasNext {
 		return nil, fmt.Errorf("no localization found for build %q and locale %q", buildResp.Data.ID, locale)
 	}
-	if len(localizations.Data) > 1 {
-		return nil, fmt.Errorf("multiple localizations found for build %q and locale %q; use --localization-id", buildResp.Data.ID, locale)
+	if len(localizations.Data) > 1 || pageHasNext {
+		ambiguous := &shared.AmbiguousSelectionError{
+			Kind:        "build localization",
+			Description: fmt.Sprintf("build %q and locale %q", buildResp.Data.ID, strings.TrimSpace(locale)),
+			Flag:        "--localization-id",
+			Candidates: shared.LocalizationCandidates(localizations.Data, func(attributes asc.BetaBuildLocalizationAttributes) string {
+				return attributes.Locale
+			}),
+			Hint: "Use --localization-id instead of the build and locale selectors.",
+		}
+		if pageHasNext {
+			return nil, shared.MarkAmbiguousSelectionSample(ambiguous)
+		}
+		return nil, ambiguous
 	}
 
 	match := localizations.Data[0]

@@ -203,7 +203,22 @@ func normalizeSubscriptionCustomerEligibilities(value string) ([]asc.Subscriptio
 	return eligibilities, nil
 }
 
-func parseSubscriptionOfferCodePrices(value string) ([]asc.SubscriptionOfferCodePrice, error) {
+func parseSubscriptionOfferCodePrices(value string, mode asc.SubscriptionOfferMode) ([]asc.SubscriptionOfferCodePrice, error) {
+	if mode == asc.SubscriptionOfferModeFreeTrial {
+		if strings.Contains(value, ":") {
+			return nil, fmt.Errorf("--prices for FREE_TRIAL must use TERRITORY entries without price point IDs")
+		}
+		territoryIDs, err := shared.NormalizeASCTerritoryCSV(value)
+		if err != nil {
+			return nil, err
+		}
+		prices := make([]asc.SubscriptionOfferCodePrice, 0, len(territoryIDs))
+		for _, territoryID := range territoryIDs {
+			prices = append(prices, asc.SubscriptionOfferCodePrice{TerritoryID: territoryID})
+		}
+		return prices, nil
+	}
+
 	entries, err := shared.ParseASCTerritoryValueCSV(value)
 	if err != nil {
 		return nil, err
@@ -223,6 +238,115 @@ func parseSubscriptionOfferCodePrices(value string) ([]asc.SubscriptionOfferCode
 	return prices, nil
 }
 
+func parseSubscriptionPromotionalOfferPrices(value string) ([]asc.SubscriptionPromotionalOfferPrice, error) {
+	if strings.Contains(value, ":") {
+		return parseSubscriptionPromotionalOfferInlinePrices(value)
+	}
+
+	territoryIDs, territoryErr := shared.NormalizeASCTerritoryCSV(value)
+	if territoryErr == nil && len(territoryIDs) > 0 {
+		prices := make([]asc.SubscriptionPromotionalOfferPrice, 0, len(territoryIDs))
+		for _, territoryID := range territoryIDs {
+			prices = append(prices, asc.SubscriptionPromotionalOfferPrice{TerritoryID: territoryID})
+		}
+		return prices, nil
+	}
+
+	priceIDs := shared.SplitCSV(value)
+	if containsSubscriptionPromotionalOfferTerritory(priceIDs) {
+		return nil, fmt.Errorf("--prices must not mix existing price IDs with inline TERRITORY or TERRITORY:PRICE_POINT_ID entries")
+	}
+	prices := make([]asc.SubscriptionPromotionalOfferPrice, 0, len(priceIDs))
+	for _, priceID := range priceIDs {
+		prices = append(prices, asc.SubscriptionPromotionalOfferPrice{ID: priceID})
+	}
+	return prices, nil
+}
+
+func containsSubscriptionPromotionalOfferTerritory(parts []string) bool {
+	for start := range parts {
+		for end := start + 1; end <= len(parts); end++ {
+			territoryIDs, err := shared.NormalizeASCTerritoryCSV(strings.Join(parts[start:end], ","))
+			if err == nil && len(territoryIDs) == 1 {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func parseSubscriptionPromotionalOfferInlinePrices(value string) ([]asc.SubscriptionPromotionalOfferPrice, error) {
+	parts := shared.SplitCSV(value)
+	prices := make([]asc.SubscriptionPromotionalOfferPrice, 0, len(parts))
+
+	for start := 0; start < len(parts); {
+		compoundEnd := start
+		for compoundEnd < len(parts) && !strings.Contains(parts[compoundEnd], ":") {
+			compoundEnd++
+		}
+
+		if compoundEnd == len(parts) {
+			territoryIDs, err := shared.NormalizeASCTerritoryCSV(strings.Join(parts[start:], ","))
+			if err != nil {
+				return nil, fmt.Errorf("--prices must not mix existing price IDs with TERRITORY:PRICE_POINT_ID entries: %w", err)
+			}
+			for _, territoryID := range territoryIDs {
+				prices = append(prices, asc.SubscriptionPromotionalOfferPrice{TerritoryID: territoryID})
+			}
+			break
+		}
+
+		var candidateErr error
+		mixedReferences := false
+		matched := false
+		for compoundStart := start; compoundStart <= compoundEnd; compoundStart++ {
+			var territoryIDs []string
+			if compoundStart > start {
+				var err error
+				territoryIDs, err = shared.NormalizeASCTerritoryCSV(strings.Join(parts[start:compoundStart], ","))
+				if err != nil {
+					if parsed, parseErr := shared.ParseASCTerritoryValueCSV(strings.Join(parts[compoundStart:compoundEnd+1], ",")); parseErr == nil && len(parsed) == 1 {
+						mixedReferences = true
+					}
+					continue
+				}
+			}
+
+			parsed, err := shared.ParseASCTerritoryValueCSV(strings.Join(parts[compoundStart:compoundEnd+1], ","))
+			if err != nil {
+				candidateErr = err
+				continue
+			}
+			if len(parsed) != 1 {
+				continue
+			}
+
+			for _, territoryID := range territoryIDs {
+				prices = append(prices, asc.SubscriptionPromotionalOfferPrice{TerritoryID: territoryID})
+			}
+			prices = append(prices, asc.SubscriptionPromotionalOfferPrice{
+				TerritoryID:  parsed[0].TerritoryID,
+				PricePointID: parsed[0].Value,
+			})
+			matched = true
+			break
+		}
+
+		if !matched {
+			if mixedReferences {
+				return nil, fmt.Errorf("--prices must not mix existing price IDs with inline TERRITORY or TERRITORY:PRICE_POINT_ID entries")
+			}
+			if candidateErr == nil {
+				candidateErr = fmt.Errorf("--prices must use TERRITORY or TERRITORY:PRICE_POINT_ID entries")
+			}
+			return nil, candidateErr
+		}
+		start = compoundEnd + 1
+	}
+
+	return prices, nil
+}
+
 func openSubscriptionImageFile(path string) (*os.File, os.FileInfo, error) {
 	if err := asc.ValidateImageFile(path); err != nil {
 		return nil, nil, err
@@ -237,4 +361,34 @@ func openSubscriptionImageFile(path string) (*os.File, os.FileInfo, error) {
 		return nil, nil, err
 	}
 	return file, info, nil
+}
+
+// validateSubscriptionReviewScreenshotFile rejects an App Review screenshot
+// whose format or dimensions App Store Connect would refuse. It prints no
+// warnings; the upload prints them for the bytes it actually sends.
+func validateSubscriptionReviewScreenshotFile(path string) error {
+	file, _, err := openSubscriptionImageFile(path)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	_, err = asc.CheckReviewScreenshotImage(path, file)
+	return err
+}
+
+// snapshotSubscriptionReviewScreenshot copies an App Review screenshot into a
+// private snapshot. Callers check, hash, and upload only the snapshot, so a
+// file replaced or rewritten after the check cannot reach App Store Connect
+// unchecked or under a different checksum.
+func snapshotSubscriptionReviewScreenshot(path string) (*os.File, os.FileInfo, func(), error) {
+	file, info, err := openSubscriptionImageFile(path)
+	if err != nil {
+		return nil, nil, func() {}, err
+	}
+	defer file.Close()
+	snapshot, cleanup, err := shared.SnapshotImageFile(file, info.Size())
+	if err != nil {
+		return nil, nil, func() {}, err
+	}
+	return snapshot, info, cleanup, nil
 }

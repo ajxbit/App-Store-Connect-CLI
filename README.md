@@ -1,12 +1,11 @@
 # App Store Connect CLI
 
 <p align="center">
-  <a href="https://github.com/rudrankriyam/App-Store-Connect-CLI/releases/latest"><img src="https://img.shields.io/github/v/release/rudrankriyam/App-Store-Connect-CLI?style=for-the-badge&color=blue" alt="Latest Release"></a>
-  <a href="https://github.com/rudrankriyam/App-Store-Connect-CLI/stargazers"><img src="https://img.shields.io/github/stars/rudrankriyam/App-Store-Connect-CLI?style=for-the-badge" alt="GitHub Stars"></a>
-  <img src="https://img.shields.io/badge/Go-1.26+-00ADD8?style=for-the-badge&logo=go" alt="Go Version">
+  <a href="https://github.com/rorkai/App-Store-Connect-CLI/releases/latest"><img src="https://img.shields.io/github/v/release/rorkai/App-Store-Connect-CLI?style=for-the-badge&color=blue" alt="Latest Release"></a>
+  <a href="https://github.com/rorkai/App-Store-Connect-CLI/stargazers"><img src="https://img.shields.io/github/stars/rorkai/app-store-connect-cli?style=for-the-badge" alt="GitHub Stars"></a>
+  <img src="https://img.shields.io/github/go-mod/go-version/rorkai/App-Store-Connect-CLI?filename=go.mod&style=for-the-badge&logo=go" alt="Go version from go.mod">
   <img src="https://img.shields.io/badge/License-MIT-yellow?style=for-the-badge" alt="License">
   <img src="https://img.shields.io/badge/Homebrew-compatible-blue?style=for-the-badge" alt="Homebrew">
-  <a href="https://github.com/rudrankriyam/App-Store-Connect-CLI/releases" title="GitHub release assets (all-time) + Homebrew installs (365d), see docs/badges/README.md"><img src="https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2Frudrankriyam%2FApp-Store-Connect-CLI%2Fmain%2Fdocs%2Fbadges%2Finstalls-total.json&amp;style=for-the-badge&amp;color=brightgreen" alt="Estimated total downloads"></a>
 </p>
 
 <p align="center">
@@ -22,6 +21,7 @@ Automate iOS, macOS, tvOS, and visionOS release workflows from your terminal, ID
 - [Sponsors](#sponsors)
 - [Quick Start](#quick-start)
 - [Troubleshooting](#troubleshooting)
+- [Privacy and telemetry](#privacy-and-telemetry)
 - [Support](#support)
 - [Wall of Apps](#wall-of-apps)
 - [Common Workflows](#common-workflows)
@@ -33,23 +33,28 @@ Automate iOS, macOS, tvOS, and visionOS release workflows from your terminal, ID
 ## asc skills
 
 Agent Skills for automating `asc` workflows including builds, TestFlight, metadata sync, submissions, and signing:
-https://github.com/rudrankriyam/app-store-connect-cli-skills
+https://github.com/rorkai/app-store-connect-cli-skills
 
-## Sponsors
+Install them globally so they are available across projects:
 
-<p align="center">
-  <a href="https://rork.com/">
-    <img src="docs/images/rork-logo.svg" alt="Rork logo" width="180">
-  </a>
-  &nbsp;&nbsp;&nbsp;&nbsp;
-  <a href="https://x.com/vibecodeapp_">
-    <img src="docs/images/vibecode-logo-trimmed.png" alt="Vibecode logo" width="90">
-  </a>
-</p>
+```bash
+asc install-skills
+```
 
-[Rork](https://rork.com/) helps you build real mobile apps by chatting with AI, going from idea to phone in minutes and to the App Store in hours.
+`asc install-skills` checks out reviewed commit
+`f52c4f04323bb2dfb21ca8be82e6494e9cd0b4d8` and copies its 25 skills directly
+into the standard global agent-skills directory. It verifies the complete pack
+and every installed file before succeeding, preserves unrelated skills and
+unrelated lock entries, and pins the 25 ASC lock entries to the same reviewed
+commit so external checks cannot update them from a mutable branch. It rolls
+back the pack if any replacement fails. Only
+`git` is required; the command does not execute Node.js, `npx`, an npm package,
+or repository scripts.
 
-[Vibecode](https://x.com/vibecodeapp_) helps you build mobile apps and web apps with AI, turning ideas into working products in seconds.
+```bash
+git --version
+asc install-skills
+```
 
 ## Quick Start
 
@@ -70,10 +75,23 @@ brew install asc
 curl -fsSL https://asccli.sh/install | bash
 ```
 
-Windows users can download the signed release binaries directly from the
-[GitHub releases page](https://github.com/rudrankriyam/App-Store-Connect-CLI/releases/latest).
+```powershell
+# Windows (WinGet, once the package is accepted)
+winget install asc
+
+# Exact fallback when scripting
+winget install --id Rorkai.ASC --exact
+```
+
+The WinGet package is tracked in
+[GitHub Discussion #1552](https://github.com/rorkai/App-Store-Connect-CLI/discussions/1552).
+Until it appears in `winget search asc`, Windows users can download the signed
+release binaries directly from the
+[GitHub releases page](https://github.com/rorkai/App-Store-Connect-CLI/releases/latest).
 
 For source builds and contributor setup, see [CONTRIBUTING.md](CONTRIBUTING.md).
+Released binaries are self-contained and do not require a Go installation;
+source builds use the toolchain version declared by `go.mod`.
 
 ### 2. Authenticate
 
@@ -84,6 +102,16 @@ asc auth login \
   --issuer-id "DEF456" \
   --private-key /path/to/AuthKey.p8 \
   --network
+```
+
+Individual API keys have no issuer ID. Omit `--issuer-id` and pass `--key-type individual`:
+
+```bash
+asc auth login \
+  --name "MyIndividualKey" \
+  --key-id "ABC123" \
+  --key-type individual \
+  --private-key /path/to/AuthKey.p8
 ```
 
 Generate API keys at:
@@ -133,14 +161,10 @@ And explicit flags always win:
 asc apps list --output json
 ```
 
-### Stability labels
+### Compatibility
 
-`asc` uses visible lifecycle labels so you can judge support expectations before
-depending on a command in CI or scripts:
-
-- No label: stable public CLI contract for normal use
-- `[experimental]`: useful, but still evolving; expect sharper edges and faster iteration
-- `DEPRECATED:` or deprecation warnings: compatibility path kept during migration, but not the long-term home
+Commands are supported as documented. Deprecation warnings identify the
+available migration path and the command's long-term replacement.
 
 ## Troubleshooting
 
@@ -151,12 +175,26 @@ depending on a command in CI or scripts:
 - Confirm the installed version: `asc version`
 - If Homebrew is behind the latest GitHub release, use the install script from `https://asccli.sh/install`
 
+### WinGet
+
+- Refresh WinGet sources first: `winget source update`
+- Prefer the short install once available: `winget install asc`
+- If the short name ever becomes ambiguous, use the package identifier: `winget install --id Rorkai.ASC --exact`
+- Confirm the installed command resolves: `Get-Command asc` and `asc version`
+
 ### Authentication
 
 - Validate the active profile: `asc auth status --validate`
 - Run the auth health check: `asc auth doctor`
 - If keychain access is blocked, retry with `ASC_BYPASS_KEYCHAIN=1` or re-run `asc auth login --bypass-keychain`
 - Use `asc auth login --local --bypass-keychain ...` when you want repo-local credentials in `./.asc/config.json`
+
+### Apple service health
+
+- Check Apple's developer services without credentials: `asc system-status`
+- Narrow unexpected API or upload failures: `asc system-status --service "App Store Connect"`
+- Poll only when requested: `asc system-status --watch --poll-interval 30s`
+- Use `--issues-only` for a concise incident view; summary counts still cover all matched services
 
 ### Output
 
@@ -165,10 +203,38 @@ depending on a command in CI or scripts:
 - Use `--pretty` with JSON when you want readable output in terminals or bug reports
 - Set a personal default with `ASC_DEFAULT_OUTPUT`, but remember `--output` always wins
 
+## Privacy and telemetry
+
+`asc` sends pseudonymous command-level usage telemetry by default to help
+maintainers understand which commands are used and where reliability work is
+needed. Local events include a random installation ID, which lets events from
+one installation be grouped over time; it is not derived from an Apple account
+or machine identifier.
+
+Telemetry includes the CLI version, operating system and architecture,
+registered command path, duration, runtime context, invocation source, a
+bounded outcome class, and the HTTP status when an API request fails. It may
+include a sanitized public flag name. It does **not** include raw arguments,
+stderr, error messages, flag values, response bodies, credentials, private
+keys, Apple account, team, or issuer IDs, app or bundle IDs, usernames,
+hostnames, repository names, or file paths.
+
+Review or change telemetry at any time:
+
+```bash
+asc telemetry status
+asc telemetry disable
+asc telemetry reset-id
+```
+
+`ASC_TELEMETRY_DISABLED=1` and `DO_NOT_TRACK=1` also disable telemetry. See the
+[telemetry reference](commands/telemetry.mdx) for the exact event payload,
+runtime handling, collector endpoint, and all controls.
+
 ## Support
 
-- Use [GitHub Discussions](https://github.com/rudrankriyam/App-Store-Connect-CLI/discussions) for install help, authentication setup, workflow advice, and "how do I...?" questions
-- Use [GitHub Issues](https://github.com/rudrankriyam/App-Store-Connect-CLI/issues) for reproducible bugs and concrete feature requests
+- Use [GitHub Discussions](https://github.com/rorkai/App-Store-Connect-CLI/discussions) for install help, authentication setup, workflow advice, and "how do I...?" questions
+- Use [GitHub Issues](https://github.com/rorkai/App-Store-Connect-CLI/issues) for reproducible bugs and concrete feature requests
 - See [SUPPORT.md](SUPPORT.md) for the support policy and bug-report checklist
 - Before filing an auth or API bug, retry with `ASC_BYPASS_KEYCHAIN=1`; if it is safe to do so, include redacted output from `ASC_DEBUG=api asc ...` or `asc --api-debug ...`
 
@@ -201,17 +267,31 @@ asc builds list --app "123456789" --output table
 asc testflight groups list --app "123456789" --output table
 ```
 
+For macOS TestFlight distribution, upload the exported `.pkg` first, then add
+the processed build to a beta group:
+
+```bash
+asc builds upload --app "123456789" --pkg "./build/MyMacApp.pkg" --version "1.2.3" --build-number "42" --wait --output json
+asc builds add-groups --app "123456789" --build-number "42" --version "1.2.3" --platform MAC_OS --group "Internal Testers"
+```
+
+`--app` is the App Store Connect app ID. If you use local Xcode build flags such
+as `--archive-path`, also pass exactly one of `--workspace` or `--project` plus
+`--scheme`; otherwise use a pre-exported `.ipa` or `.pkg` upload. Add
+`--submit --confirm` to `asc builds add-groups` when distributing to an external
+TestFlight group that needs beta app review submission.
+
 ### Release (high-level App Store publish flow)
 
 ```bash
 # Optional: preview the staging plan before submission
-asc release stage --app "123456789" --version "1.2.3" --build "BUILD_ID" --copy-metadata-from "1.2.2" --dry-run
+asc release stage --app "123456789" --version "1.2.3" --build-id "BUILD_ID" --copy-metadata-from "1.2.2" --dry-run
 
 # Canonical upload + attach + submit command
 asc publish appstore --app "123456789" --ipa "/path/to/MyApp.ipa" --version "1.2.3" --submit --confirm
 
-# Monitor status after submission
-asc status --app "123456789" --watch
+# Wait for the App Review decision (exit 0 approved, 1 rejected, 7 still pending at --timeout)
+asc status --app "123456789" --until review-done --timeout 2h
 ```
 
 Lower-level submission lifecycle commands (for debugging or partial workflows):
@@ -223,6 +303,43 @@ asc submit status --version-id "VERSION_ID"
 asc submit cancel --version-id "VERSION_ID" --confirm
 ```
 
+Readiness validation also warns when localized app names, subtitles,
+descriptions, keywords, promotional text, or What's New copy still contains an
+unmistakable template marker such as `Lorem ipsum`, `TODO`, `TBD`, or `FIXME`.
+`Lorem ipsum` matches in any letter case. `TODO`, `TBD`, and `FIXME` match only
+in uppercase because their lowercase spellings can be ordinary product wording.
+The warning includes the locale, field, matched text, resource ID, and a
+remediation step. It is advisory by default and becomes blocking only with
+`--strict`:
+
+```bash
+asc validate --app "123456789" --version "1.2.3" --output json
+asc validate --app "123456789" --version "1.2.3" --strict
+```
+
+Add the `--deep` mode when a release needs checks that Apple
+exposes only through its signed-in web app:
+
+```bash
+asc web auth login --apple-id "user@example.com"
+asc validate --app "123456789" --version "1.2.3" --deep
+```
+
+Deep validation reuses the file-backed cache without opening a login, Keychain,
+password, or 2FA prompt. It checks App Privacy publication, relevant agreements,
+and the first auto-renewable subscription attachment; availability and required
+App Review fields still come from the public API. Paid-agreement relevance also
+uses the app's current public price so an upfront-paid app isn't mistaken for a
+free one. The private Apple endpoints can change without notice, so an
+unavailable or changed response is `unverified`, not a false blocker. Add
+`--strict` if CI must fail when a requested deep check can't be verified.
+
+This lint intentionally does not judge platform names, roadmap language, or
+beta/demo wording because those phrases can be legitimate product copy and
+cannot be classified reliably offline. It also leaves shorter Lorem Ipsum
+product wording and ordinary localized `TODO` copy without marker punctuation
+unflagged; only template-like residue is reported.
+
 ### Review status and blockers
 
 ```bash
@@ -233,7 +350,9 @@ asc review doctor --app "123456789"
 ### Metadata and localization
 
 ```bash
-asc localizations list --app "123456789"
+asc localizations list --app "123456789" --type app-info
+asc metadata init --dir "./metadata" --version "1.2.3" --locale "en-US"
+# Fill in the values to apply and delete keys to leave unchanged; empty values are rejected.
 asc metadata apply --app "123456789" --version "1.2.3" --dir "./metadata" --dry-run
 asc metadata keywords audit --app "123456789" --version "1.2.3" --blocked-terms-file "./blocked-terms.txt"
 asc apps info view --app "123456789" --output json --pretty
@@ -249,36 +368,96 @@ and optional blocked terms from repeated `--blocked-term` flags or a text file.
 ```bash
 asc screenshots plan --app "123456789" --version "1.2.3" --review-output-dir "./screenshots/review"
 asc screenshots apply --app "123456789" --version "1.2.3" --review-output-dir "./screenshots/review" --confirm
-asc screenshots list --version-localization "LOC_ID"
-asc video-previews list --app "123456789"
+asc screenshots list --version-localization "VERSION_LOCALIZATION_ID"
+asc video-previews list --version-localization "VERSION_LOCALIZATION_ID"
 ```
+
+Uploading screenshots for a single locale:
+
+```bash
+asc apps list
+asc versions list --app "APP_ID"
+asc localizations list --version "VERSION_ID" --output json --locale "en-US" | jsonpp
+asc screenshots upload --version-localization "VERSION_LOCALIZATION_ID" --path "./screenshots/en-US" --device-type "IPHONE_65" --replace --confirm --max-screenshots 10
+```
+
+`VERSION_LOCALIZATION_ID` is the App Store version localization resource ID
+from `data[].id`, not the locale code from `attributes.locale`.
+
+For local capture coverage across multiple devices, locales, appearances, and
+content fixtures, use a matrix plan. Targets must already be
+booted simulators; the command writes raw artifacts and an offline review
+report, without uploading to App Store Connect:
+
+```bash
+asc screenshots matrix --plan .asc/screenshots-matrix.json --max-concurrency 2 --output json --pretty
+```
+
+See [docs/design/screenshots-matrix.md](docs/design/screenshots-matrix.md) for
+the JSONC schema, isolated output layout, retry behavior, and review contract.
 
 ### Signing and bundle IDs
 
 ```bash
-asc certificates list
-asc profiles list
-asc bundle-ids list
+asc bundle-ids capabilities list --bundle "BUNDLE_ID"
+asc signing fetch --bundle-id com.example.app --profile-type IOS_APP_STORE --output .asc/signing
+asc signing sync pull --repo git@github.com:team/signing.git --password-file ~/.config/asc/signing-sync-password --output-dir .asc/signing/pulled
 ```
+
+`signing fetch` downloads public certificates and provisioning profiles. A
+usable signing identity also needs the matching private key; `signing sync`
+can verify that local identity and share it through an encrypted store (Git by
+default). When the team has no active certificate, `signing fetch
+--create-missing --create-missing-certificate` creates the key, certificate,
+profile, and `.p12` in one pass. `signing keychain` installs and manages a
+dedicated keychain, and `xcode signing plan --profile` maps downloaded profiles
+onto Xcode targets; [docs/CI_CD.md](docs/CI_CD.md) lists the fresh-runner
+sequence. For multi-target release testing, `signing reconcile` plans exact
+device/profile changes. `signing run` provides a temporary macOS keychain only
+for single-target archives. Multi-target exports must import the identity into
+a job-scoped keychain and install every reconciled profile for the job-exclusive
+macOS user. See the
+[signing guide](guides/code-signing.mdx) for setup, CI, rotation, security
+boundaries, and troubleshooting.
 
 ### Workflow automation
 
 ```bash
-asc workflow validate
+asc workflow validate --output json
 asc workflow run --dry-run testflight_beta VERSION:1.2.3
+```
+
+### Raw API requests
+
+```bash
+asc api GET /v1/apps --query limit=5
+asc api GET /v1/apps/APP_ID/relationships/builds --paginate
+asc api PATCH /v1/apps/APP_ID --confirm --body-file update.json
 ```
 
 ### Verified local Xcode -> TestFlight workflow
 
-See [docs/WORKFLOWS.md](docs/WORKFLOWS.md) for a copyable `.asc/workflow.json`
-and `ExportOptions.plist` that use `asc builds next-build-number`, `asc xcode archive`,
-`asc xcode export`, and `asc publish testflight --group ... --wait`.
+See [docs/WORKFLOWS.md](docs/WORKFLOWS.md) for local compile validation with
+`asc xcode build` and a copyable `.asc/deployment.json`, `.asc/workflow.json`,
+and `ExportOptions.plist` that use `asc builds next-build-number`,
+`asc xcode inject`, `asc xcode archive`, `asc xcode export --timeout 10m`, and
+`asc publish testflight --group ... --wait`.
+Add `--submit --confirm` when
+distributing to an external TestFlight group that needs beta app review submission.
+
+The `asc xcode test` command provides local unit/UI test execution
+with structured results and preserved `.xcresult` bundles; see the same workflow
+guide for an invocation.
 
 ```bash
-asc workflow validate
+asc workflow validate --output json
+asc xcode inject --manifest .asc/deployment.json --set version=1.2.3 --set build_number=42 --dry-run --output json
+asc xcode build --project App.xcodeproj --scheme App --destination 'platform=iOS Simulator,name=iPhone 17 Pro Max,OS=27.0' --no-code-signing --output json
 asc workflow run --dry-run testflight_beta VERSION:1.2.3
 asc workflow run testflight_beta VERSION:1.2.3
 ```
+
+Replace the example Xcode destination with a simulator installed on the host.
 
 ### Xcode Cloud workflows and build runs
 
@@ -290,8 +469,45 @@ asc xcode-cloud run --workflow-id "WORKFLOW_ID" --pull-request-id "PR_ID"
 asc xcode-cloud run --source-run-id "BUILD_RUN_ID" --clean
 
 # Fetch a single build run by ID
-asc xcode-cloud build-runs get --id "BUILD_RUN_ID"
+asc xcode-cloud build-runs view --id "BUILD_RUN_ID"
 ```
+
+### Apple Ads campaign management
+
+Apple Ads uses separate OAuth credentials from App Store Connect:
+
+```bash
+asc ads auth login --name "Marketing" --client-id "SEARCHADS_CLIENT_ID" --team-id "SEARCHADS_TEAM_ID" --key-id "KEY_ID" --private-key ./ads-key.pem --ad-account "987654"
+asc ads auth discover --output json
+asc ads campaigns find --ad-account "987654" --file query.json --output json
+asc ads reports apps campaigns --ad-account "987654" --file report.json --output json
+```
+
+See [guides/apple-ads-playbooks.mdx](guides/apple-ads-playbooks.mdx) for
+operator playbooks covering credential safety, org inspection, read-only smoke
+tests, reporting, raw API usage, and guarded mutations.
+
+### StoreKit server APIs
+
+The App Store Server API and Retention Messaging use a dedicated In-App
+Purchase API key, separate from App Store Connect API credentials:
+
+```bash
+asc storekit auth login --name Production --key-id "KEY_ID" --issuer-id "ISSUER_ID" --private-key ./SubscriptionKey.p8 --bundle-id com.example.app
+asc storekit auth doctor --environment sandbox --network
+asc storekit transactions history --transaction-id "2000000000000001" --environment production --paginate
+asc storekit subscriptions status --transaction-id "2000000000000001" --environment production --output table
+asc storekit notifications history --start 2026-09-01 --end 2026-09-08 --only-failures --environment production
+asc storekit retention-messaging messages list --environment sandbox --output json
+```
+
+JSON output prints Apple's response unmodified. `--decode` adds decoded JWS
+payloads without verifying Apple's signature, so don't grant entitlements from
+decoded output alone.
+
+See [docs/architecture/storekit-retention-messaging.md](docs/architecture/storekit-retention-messaging.md)
+for the endpoint map, message and image requirements, environment variables,
+and the full sandbox verification sequence.
 
 ## Commands and Reference
 
@@ -316,8 +532,12 @@ For full command families, flags, and discovery patterns, see:
 ## Documentation
 
 - [docs/CI_CD.md](docs/CI_CD.md) - CI/CD integration guides (GitHub Actions, GitLab, Bitrise, CircleCI)
+- [commands/signing.mdx](commands/signing.mdx) - signing identities, encrypted sync, CI, and release-testing profiles
 - [docs/COMMANDS.md](docs/COMMANDS.md) - Command families and reference navigation
+- [docs/PARITY.md](docs/PARITY.md) - Remaining parity areas and intentional non-goals
 - [docs/WORKFLOWS.md](docs/WORKFLOWS.md) - Reusable workflow patterns, including local Xcode to TestFlight
+- [guides/apple-ads-playbooks.mdx](guides/apple-ads-playbooks.mdx) - Apple Ads operator playbooks
+- [docs/architecture/storekit-retention-messaging.md](docs/architecture/storekit-retention-messaging.md) - Retention Messaging setup and sandbox verification
 - [docs/API_NOTES.md](docs/API_NOTES.md) - API quirks and behaviors
 - [docs/CONTRIBUTING.md](docs/CONTRIBUTING.md) - CLI development and testing notes
 - [docs/TESTING.md](docs/TESTING.md) - Testing patterns and conventions
@@ -326,11 +546,14 @@ For full command families, flags, and discovery patterns, see:
 
 ## Acknowledgements
 
-Local screenshot framing uses Koubou (pinned to `0.18.1`) for deterministic device-frame rendering.
+Local screenshot framing uses Koubou (pinned to `0.20.0`) for deterministic device-frame rendering.
 GitHub: https://github.com/bitomule/koubou
 
 Simulator UI automation for screenshot capture and interactions uses AXe CLI.
 GitHub: https://github.com/cameroncooke/AXe
+
+The keyword difficulty methodology used by `asc optimize keywords score` is adapted from semihcihan's App Store Optimization CLI (MIT licensed).
+GitHub: https://github.com/semihcihan/App-Store-Optimization-CLI
 
 ## Contributing
 
@@ -339,10 +562,6 @@ Contributions are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for details.
 ## License
 
 MIT License - see [LICENSE](LICENSE) for details.
-
-## Star History
-
-[![Star History Chart](https://api.star-history.com/svg?repos=rudrankriyam/App-Store-Connect-CLI&type=Date)](https://star-history.com/#rudrankriyam/App-Store-Connect-CLI&Date)
 
 ---
 

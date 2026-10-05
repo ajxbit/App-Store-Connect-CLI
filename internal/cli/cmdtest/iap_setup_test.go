@@ -46,12 +46,15 @@ type iapSetupOutput struct {
 	} `json:"steps"`
 }
 
+const iapSetupLegacyLocalizationWarning = "Warning: localization flags on `asc iap setup` use the deprecated v1 localization resource. After setup, create or resolve an IAP version, then use `asc iap versions localizations create --version-id \"IAP_VERSION_ID\" --name \"NAME\" --locale \"LOCALE\"`.\n"
+
 func TestIAPHelpShowsSetupCommand(t *testing.T) {
 	root := RootCommand("1.2.3")
 
 	iapCmd := findSubcommand(root, "iap")
 	if iapCmd == nil {
 		t.Fatal("expected iap command")
+		return
 	}
 	iapUsage := iapCmd.UsageFunc(iapCmd)
 	if !usageListsSubcommand(iapUsage, "setup") {
@@ -61,6 +64,7 @@ func TestIAPHelpShowsSetupCommand(t *testing.T) {
 	setupCmd := findSubcommand(root, "iap", "setup")
 	if setupCmd == nil {
 		t.Fatal("expected iap setup command")
+		return
 	}
 	setupUsage := setupCmd.UsageFunc(setupCmd)
 	if !strings.Contains(setupUsage, "--reference-name") {
@@ -581,8 +585,8 @@ func TestIAPSetupCreateLocalizationAndPricingSuccess(t *testing.T) {
 		}
 	})
 
-	if stderr != "" {
-		t.Fatalf("expected empty stderr, got %q", stderr)
+	if stderr != iapSetupLegacyLocalizationWarning {
+		t.Fatalf("stderr = %q, want exact deprecation warning %q", stderr, iapSetupLegacyLocalizationWarning)
 	}
 	if requestCount != 8 {
 		t.Fatalf("expected create, localization, resolution, schedule, and verify reads, got %d requests", requestCount)
@@ -945,8 +949,8 @@ func TestIAPSetupRefreshesContextsAcrossLocalizationCreationAndVerification(t *t
 		}
 	})
 
-	if stderr != "" {
-		t.Fatalf("expected empty stderr, got %q", stderr)
+	if stderr != iapSetupLegacyLocalizationWarning {
+		t.Fatalf("stderr = %q, want exact deprecation warning %q", stderr, iapSetupLegacyLocalizationWarning)
 	}
 	if requestCount != 4 {
 		t.Fatalf("expected create, localization create, and verify reads, got %d requests", requestCount)

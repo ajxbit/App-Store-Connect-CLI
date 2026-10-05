@@ -2,9 +2,11 @@ package localizations
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
+	"regexp"
 	"strings"
 
 	"github.com/peterbourgon/ff/v3/ffcli"
@@ -29,8 +31,8 @@ Examples:
   asc localizations supported-locales --version "VERSION_ID"
   asc localizations search-keywords list --localization-id "LOCALIZATION_ID"
   asc localizations preview-sets list --localization-id "LOCALIZATION_ID"
-  asc localizations preview-sets get --id "PREVIEW_SET_ID"
-  asc localizations screenshot-sets get --id "SCREENSHOT_SET_ID"
+  asc localizations preview-sets view --id "PREVIEW_SET_ID"
+  asc localizations screenshot-sets view --id "SCREENSHOT_SET_ID"
   asc localizations download --version "VERSION_ID" --path "./localizations"
   asc localizations upload --version "VERSION_ID" --path "./localizations"`,
 		FlagSet:   fs,
@@ -56,10 +58,13 @@ Examples:
 func LocalizationsListCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("list", flag.ExitOnError)
 
-	versionID := fs.String("version", "", "App Store version ID")
+	versionID := shared.BindResourceIDFlag(fs, "version", "appStoreVersions", "App Store version ID, or a version string such as 1.2.3 with --app; defaults to the --app's active editable version, then a developer-removed version, else its live version")
 	appID := fs.String("app", "", "App Store Connect app ID (or ASC_APP_ID env)")
-	appInfoID := fs.String("app-info", "", "App Info ID (optional override)")
+	appInfoID := shared.BindResourceIDFlag(fs, "app-info", "appInfos", "App Info ID (optional override)")
+	platform := fs.String("platform", "", "Platform used to pick the version when --version is omitted or is a version string with --app: IOS, MAC_OS, TV_OS, or VISION_OS")
 	locType := fs.String("type", shared.LocalizationTypeVersion, "Localization type: version (default) or app-info")
+	appInfoFields := fs.String("app-info-fields", "", "Sparse app info fields for app-info localizations: kidsAgeBand (deprecated; removed from API 4.5; prefer age-rating data)")
+	include := shared.BindOnceCSVFlag(fs, "include", "Include related resources for version localizations, comma-separated: "+strings.Join(versionLocalizationIncludeList(), ", "))
 	locale := fs.String("locale", "", "Filter by locale(s), comma-separated")
 	limit := fs.Int("limit", 0, "Maximum results per page (1-200)")
 	next := fs.String("next", "", "Fetch next page using a links.next URL")
@@ -72,33 +77,118 @@ func LocalizationsListCommand() *ffcli.Command {
 		ShortHelp:  "List localization metadata for an app or version.",
 		LongHelp: `List localization metadata for an app or version.
 
+For version localizations, omit --version to use the --app's newest active editable
+App Store version (PREPARE_FOR_SUBMISSION, DEVELOPER_REJECTED, REJECTED,
+METADATA_REJECTED, READY_FOR_REVIEW, WAITING_FOR_REVIEW, or INVALID_BINARY),
+then a DEVELOPER_REMOVED_FROM_SALE version, and finally the live version. The selected version is reported on stderr.
+Pass --platform when the app has candidate versions on more than one platform.
+
+--version accepts an App Store version ID. With --app (or ASC_APP_ID), it
+also accepts a version string such as 1.2.3, resolved on the app (pass
+--platform when the same version string exists on more than one platform).
+A value that is not a numeric version string is always treated as a version
+ID.
+
+Table and markdown output include each localization's ID, which is the value
+--version-localization and --localization-id flags expect.
+
 Examples:
+  asc localizations list --app "APP_ID" --version "1.2.3" --output table
   asc localizations list --version "VERSION_ID"
-  asc localizations list --app "APP_ID" --type app-info
+  asc localizations list --app "APP_ID"
+  asc localizations list --app "APP_ID" --platform IOS
+  asc localizations list --app "APP_ID" --type app-info --app-info-fields kidsAgeBand
   asc localizations list --version "VERSION_ID" --locale "en-US,ja"
+  asc localizations list --version "VERSION_ID" --include "appScreenshotSets,appPreviewSets"
   asc localizations list --version "VERSION_ID" --paginate`,
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
 			if *limit != 0 && (*limit < 1 || *limit > 200) {
-				return fmt.Errorf("localizations list: --limit must be between 1 and 200")
+				return shared.UsageError("localizations list: --limit must be between 1 and 200")
 			}
 			if err := shared.ValidateNextURL(*next); err != nil {
-				return fmt.Errorf("localizations list: %w", err)
+				return shared.UsageErrorf("localizations list: %v", err)
 			}
 
 			normalizedType, err := shared.NormalizeLocalizationType(*locType)
 			if err != nil {
 				return fmt.Errorf("localizations list: %w", err)
 			}
+			appInfoFieldsProvided := false
+			includeProvided := false
+			platformProvided := false
+			fs.Visit(func(f *flag.Flag) {
+				appInfoFieldsProvided = appInfoFieldsProvided || f.Name == "app-info-fields"
+				includeProvided = includeProvided || f.Name == "include"
+				platformProvided = platformProvided || f.Name == "platform"
+			})
+			versionValue := strings.TrimSpace(*versionID)
+			// With --app, a numeric dotted value such as 1.2.3 is a version
+			// string to resolve on the app. Version resource IDs are UUIDs,
+			// so every other value keeps its version-ID meaning.
+			versionIsString := normalizedType == shared.LocalizationTypeVersion &&
+				versionValue != "" &&
+				shared.ResolveAppID(*appID) != "" &&
+				appStoreVersionStringPattern.MatchString(versionValue)
+			normalizedPlatform := ""
+			if platformProvided {
+				if normalizedType != shared.LocalizationTypeVersion {
+					return shared.UsageError("--platform requires --type version")
+				}
+				if versionValue != "" && !versionIsString {
+					return shared.UsageError("--platform only applies when --version is omitted or is a version string with --app")
+				}
+				// A links.next cursor already points at one version's page, so
+				// there is no default version left to select.
+				if strings.TrimSpace(*next) != "" {
+					return shared.UsageError("--platform cannot be combined with --next")
+				}
+				value, err := shared.NormalizeAppStoreVersionPlatform(*platform)
+				if err != nil {
+					return shared.UsageError(err.Error())
+				}
+				normalizedPlatform = value
+			}
+			if strings.TrimSpace(*next) != "" && appInfoFieldsProvided {
+				return shared.UsageError("--next cannot be combined with --app-info-fields")
+			}
+			// A links.next cursor already carries the query it was created with,
+			// so honoring --include here would silently drop the requested
+			// relationships instead of changing the request.
+			if strings.TrimSpace(*next) != "" && includeProvided {
+				return shared.UsageError("--next cannot be combined with --include")
+			}
+			if includeProvided && normalizedType != shared.LocalizationTypeVersion {
+				return shared.UsageError("--include requires --type version")
+			}
+			includeValues, err := shared.NormalizeSelection(include.String(), versionLocalizationIncludeList(), "--include")
+			if err != nil {
+				return shared.UsageError(err.Error())
+			}
+			if includeProvided && len(includeValues) == 0 {
+				return shared.UsageError("--include must not be empty")
+			}
+			appInfoFieldValues, err := shared.NormalizeSelection(*appInfoFields, []string{"kidsAgeBand"}, "--app-info-fields")
+			if err != nil {
+				return shared.UsageError(err.Error())
+			}
+			if appInfoFieldsProvided && len(appInfoFieldValues) == 0 {
+				return shared.UsageError("--app-info-fields must not be empty")
+			}
+			if appInfoFieldsProvided && normalizedType != shared.LocalizationTypeAppInfo {
+				return shared.UsageError("--app-info-fields requires --type app-info")
+			}
 
 			locales := shared.SplitCSV(*locale)
 
 			switch normalizedType {
 			case shared.LocalizationTypeVersion:
-				if strings.TrimSpace(*versionID) == "" {
-					fmt.Fprintln(os.Stderr, "Error: --version is required for version localizations")
-					return flag.ErrHelp
+				resolvedVersionID := strings.TrimSpace(*versionID)
+				resolvedAppID := shared.ResolveAppID(*appID)
+				if resolvedVersionID == "" && resolvedAppID == "" && strings.TrimSpace(*next) == "" {
+					fmt.Fprintln(os.Stderr, "Error: --version is required for version localizations (or pass --app to use the app's editable or live version)")
+					return shared.MissingRequiredUsageError("--version")
 				}
 
 				client, err := shared.GetASCClient()
@@ -109,6 +199,34 @@ Examples:
 				requestCtx, cancel := shared.ContextWithTimeout(ctx)
 				defer cancel()
 
+				// A links.next URL replaces the request path outright, so the
+				// version ID is ignored on continuations. Resolving a default
+				// here would spend a request on a value that cannot be used,
+				// announce a version the page may not belong to, and fail a
+				// valid continuation whenever the app's defaults are ambiguous
+				// or absent.
+				if versionIsString {
+					resolvedVersionID = ""
+					if strings.TrimSpace(*next) == "" {
+						resolvedVersionID, err = resolveLocalizationsListVersionString(requestCtx, client, resolvedAppID, versionValue, normalizedPlatform)
+						if err != nil {
+							if errors.Is(err, flag.ErrHelp) {
+								return err
+							}
+							return fmt.Errorf("localizations list: %w", err)
+						}
+					}
+				} else if resolvedVersionID == "" && strings.TrimSpace(*next) == "" {
+					resolved, err := shared.ResolveAndAnnounceDefaultAppStoreVersion(requestCtx, client, resolvedAppID, normalizedPlatform, "--version")
+					if err != nil {
+						if errors.Is(err, flag.ErrHelp) {
+							return err
+						}
+						return fmt.Errorf("localizations list: %w", err)
+					}
+					resolvedVersionID = resolved.ID
+				}
+
 				opts := []asc.AppStoreVersionLocalizationsOption{
 					asc.WithAppStoreVersionLocalizationsLimit(*limit),
 					asc.WithAppStoreVersionLocalizationsNextURL(*next),
@@ -116,18 +234,23 @@ Examples:
 				if len(locales) > 0 {
 					opts = append(opts, asc.WithAppStoreVersionLocalizationLocales(locales))
 				}
+				if len(includeValues) > 0 {
+					opts = append(opts, asc.WithAppStoreVersionLocalizationsInclude(includeValues))
+				}
 
 				if *paginate {
-					// Fetch first page with limit set for consistent pagination
+					// Fetch first page with limit set for consistent pagination.
+					// Later pages ride links.next, which preserves include, and
+					// PaginateAll merges the included resources per page.
 					paginateOpts := append(opts, asc.WithAppStoreVersionLocalizationsLimit(200))
-					firstPage, err := client.GetAppStoreVersionLocalizations(requestCtx, strings.TrimSpace(*versionID), paginateOpts...)
+					firstPage, err := client.GetAppStoreVersionLocalizations(requestCtx, resolvedVersionID, paginateOpts...)
 					if err != nil {
 						return fmt.Errorf("localizations list: failed to fetch: %w", err)
 					}
 
 					// Fetch all remaining pages
 					resp, err := asc.PaginateAll(requestCtx, firstPage, func(ctx context.Context, nextURL string) (asc.PaginatedResponse, error) {
-						return client.GetAppStoreVersionLocalizations(ctx, strings.TrimSpace(*versionID), asc.WithAppStoreVersionLocalizationsNextURL(nextURL))
+						return client.GetAppStoreVersionLocalizations(ctx, resolvedVersionID, asc.WithAppStoreVersionLocalizationsNextURL(nextURL))
 					})
 					if err != nil {
 						return fmt.Errorf("localizations list: %w", err)
@@ -135,7 +258,7 @@ Examples:
 					return shared.PrintOutput(resp, *output.Output, *output.Pretty)
 				}
 
-				resp, err := client.GetAppStoreVersionLocalizations(requestCtx, strings.TrimSpace(*versionID), opts...)
+				resp, err := client.GetAppStoreVersionLocalizations(requestCtx, resolvedVersionID, opts...)
 				if err != nil {
 					return fmt.Errorf("localizations list: failed to fetch: %w", err)
 				}
@@ -144,8 +267,9 @@ Examples:
 				resolvedAppID := shared.ResolveAppID(*appID)
 				if resolvedAppID == "" {
 					fmt.Fprintln(os.Stderr, "Error: --app is required for app-info localizations")
-					return flag.ErrHelp
+					return shared.MissingRequiredUsageError("--app")
 				}
+				shared.WarnDeprecatedAppInfoFields(appInfoFieldValues, *next)
 
 				client, err := shared.GetASCClient()
 				if err != nil {
@@ -163,6 +287,13 @@ Examples:
 				opts := []asc.AppInfoLocalizationsOption{
 					asc.WithAppInfoLocalizationsLimit(*limit),
 					asc.WithAppInfoLocalizationsNextURL(*next),
+				}
+				if len(appInfoFieldValues) > 0 {
+					opts = append(
+						opts,
+						asc.WithAppInfoLocalizationsAppInfoFields(appInfoFieldValues),
+						asc.WithAppInfoLocalizationsInclude([]string{"appInfo"}),
+					)
 				}
 				if len(locales) > 0 {
 					opts = append(opts, asc.WithAppInfoLocalizationLocales(locales))
@@ -198,13 +329,68 @@ Examples:
 	}
 }
 
+// appStoreVersionStringPattern matches numeric dotted version strings such as
+// 1, 1.0, or 1.2.3. App Store version resource IDs are UUIDs, so a match is
+// never a version ID.
+var appStoreVersionStringPattern = regexp.MustCompile(`^[0-9]+(\.[0-9]+)*$`)
+
+// resolveLocalizationsListVersionString resolves a version string on the app.
+// Without a platform it searches every platform and asks for --platform when
+// the version string exists on more than one.
+func resolveLocalizationsListVersionString(ctx context.Context, client *asc.Client, appID, version, platform string) (string, error) {
+	opts := []asc.AppStoreVersionsOption{
+		asc.WithAppStoreVersionsVersionStrings([]string{version}),
+		asc.WithAppStoreVersionsLimit(200),
+	}
+	if platform != "" {
+		opts = append(opts, asc.WithAppStoreVersionsPlatforms([]string{platform}))
+	}
+	resp, err := client.GetAppStoreVersions(ctx, appID, opts...)
+	if err != nil {
+		return "", err
+	}
+	if resp == nil {
+		return "", fmt.Errorf("empty app store versions response")
+	}
+	pageHasNext := strings.TrimSpace(resp.Links.Next) != ""
+	if len(resp.Data) == 0 && !pageHasNext {
+		description := fmt.Sprintf("version %q", version)
+		if platform != "" {
+			description += fmt.Sprintf(" and platform %q", platform)
+		}
+		return "", shared.WithAppStoreVersionNotFoundDiagnostics(ctx, client, appID, version, platform, shared.NewErrorWithCause(
+			fmt.Errorf("app store version not found for %s", description),
+			asc.ErrNotFound,
+		))
+	}
+	if len(resp.Data) > 1 || pageHasNext {
+		ambiguous := shared.AmbiguousAppStoreVersionError(version, platform, resp.Data, "--platform", "--version")
+		if pageHasNext {
+			ambiguous = shared.MarkAmbiguousSelectionSample(ambiguous)
+		}
+		usageKind := shared.UsageErrorOther
+		var selection *shared.AmbiguousSelectionError
+		if errors.As(ambiguous, &selection) && selection.Flag == "--platform" {
+			usageKind = shared.UsageErrorMissingRequired
+		}
+		return "", shared.AmbiguousUsageErrorWithKind(ambiguous, usageKind)
+	}
+	return strings.TrimSpace(resp.Data[0].ID), nil
+}
+
+// versionLocalizationIncludeList reports the relationships the App Store
+// version localizations endpoint accepts for include.
+func versionLocalizationIncludeList() []string {
+	return []string{"appStoreVersion", "appScreenshotSets", "appPreviewSets", "searchKeywords"}
+}
+
 // LocalizationsDownloadCommand returns the download localizations subcommand.
 func LocalizationsDownloadCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("download", flag.ExitOnError)
 
-	versionID := fs.String("version", "", "App Store version ID")
+	versionID := shared.BindResourceIDFlag(fs, "version", "appStoreVersions", "App Store version ID")
 	appID := fs.String("app", "", "App Store Connect app ID (or ASC_APP_ID env)")
-	appInfoID := fs.String("app-info", "", "App Info ID (optional override)")
+	appInfoID := shared.BindResourceIDFlag(fs, "app-info", "appInfos", "App Info ID (optional override)")
 	locType := fs.String("type", shared.LocalizationTypeVersion, "Localization type: version (default) or app-info")
 	locale := fs.String("locale", "", "Filter by locale(s), comma-separated")
 	path := fs.String("path", "localizations", "Output path (directory or .strings file)")
@@ -228,10 +414,10 @@ Examples:
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
 			if *limit != 0 && (*limit < 1 || *limit > 200) {
-				return fmt.Errorf("localizations download: --limit must be between 1 and 200")
+				return shared.UsageError("localizations download: --limit must be between 1 and 200")
 			}
 			if err := shared.ValidateNextURL(*next); err != nil {
-				return fmt.Errorf("localizations download: %w", err)
+				return shared.UsageErrorf("localizations download: %v", err)
 			}
 
 			normalizedType, err := shared.NormalizeLocalizationType(*locType)
@@ -245,7 +431,7 @@ Examples:
 			case shared.LocalizationTypeVersion:
 				if strings.TrimSpace(*versionID) == "" {
 					fmt.Fprintln(os.Stderr, "Error: --version is required for version localizations")
-					return flag.ErrHelp
+					return shared.MissingRequiredUsageError("--version")
 				}
 
 				client, err := shared.GetASCClient()
@@ -320,9 +506,8 @@ Examples:
 				resolvedAppID := shared.ResolveAppID(*appID)
 				if resolvedAppID == "" {
 					fmt.Fprintln(os.Stderr, "Error: --app is required for app-info localizations")
-					return flag.ErrHelp
+					return shared.MissingRequiredUsageError("--app")
 				}
-
 				client, err := shared.GetASCClient()
 				if err != nil {
 					return fmt.Errorf("localizations download: %w", err)
@@ -409,9 +594,9 @@ Examples:
 func LocalizationsUploadCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("upload", flag.ExitOnError)
 
-	versionID := fs.String("version", "", "App Store version ID")
+	versionID := shared.BindResourceIDFlag(fs, "version", "appStoreVersions", "App Store version ID")
 	appID := fs.String("app", "", "App Store Connect app ID (or ASC_APP_ID env)")
-	appInfoID := fs.String("app-info", "", "App Info ID (optional override)")
+	appInfoID := shared.BindResourceIDFlag(fs, "app-info", "appInfos", "App Info ID (optional override)")
 	locType := fs.String("type", shared.LocalizationTypeVersion, "Localization type: version (default) or app-info")
 	locale := fs.String("locale", "", "Filter by locale(s), comma-separated")
 	path := fs.String("path", "", "Input path (directory or .strings file)")
@@ -434,7 +619,7 @@ Examples:
 		Exec: func(ctx context.Context, args []string) error {
 			if strings.TrimSpace(*path) == "" {
 				fmt.Fprintln(os.Stderr, "Error: --path is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--path")
 			}
 
 			normalizedType, err := shared.NormalizeLocalizationType(*locType)
@@ -448,11 +633,14 @@ Examples:
 			case shared.LocalizationTypeVersion:
 				if strings.TrimSpace(*versionID) == "" {
 					fmt.Fprintln(os.Stderr, "Error: --version is required for version localizations")
-					return flag.ErrHelp
+					return shared.MissingRequiredUsageError("--version")
 				}
 
 				valuesByLocale, err := shared.ReadLocalizationStrings(*path, locales)
 				if err != nil {
+					if shared.IsLocalizationInputError(err) {
+						return shared.UsageError(err.Error())
+					}
 					return fmt.Errorf("localizations upload: %w", err)
 				}
 				if err := shared.ValidateVersionLocalizationValueSet(valuesByLocale); err != nil {
@@ -464,34 +652,59 @@ Examples:
 					return fmt.Errorf("localizations upload: %w", err)
 				}
 
-				requestCtx, cancel := shared.ContextWithTimeout(ctx)
-				defer cancel()
-
 				submitOpts := shared.SubmitReadinessOptions{}
 				if sharedVersionLocalizationValuesNeedUpdateContext(valuesByLocale) {
-					submitOpts = shared.ResolveSubmitReadinessOptionsForVersionBestEffort(requestCtx, client, strings.TrimSpace(*versionID), "", "")
+					readinessCtx, readinessCancel := shared.ContextWithTimeout(ctx)
+					submitOpts = shared.ResolveSubmitReadinessOptionsForVersionBestEffort(readinessCtx, client, strings.TrimSpace(*versionID), "", "")
+					readinessCancel()
 				}
-				results, warnings, err := shared.UploadPrevalidatedVersionLocalizationsWithWarnings(requestCtx, client, strings.TrimSpace(*versionID), valuesByLocale, *dryRun, submitOpts)
-				if err != nil {
+				results, warnings, err := shared.UploadPrevalidatedVersionLocalizationsWithWarnings(ctx, client, strings.TrimSpace(*versionID), valuesByLocale, *dryRun, submitOpts)
+				if err != nil && len(results) == 0 {
+					if shared.IsLocalizationInputError(err) {
+						return shared.UsageError(err.Error())
+					}
 					return fmt.Errorf("localizations upload: %w", err)
 				}
+				uploadErr := err
 
 				result := asc.LocalizationUploadResult{
 					Type:      normalizedType,
 					VersionID: strings.TrimSpace(*versionID),
 					DryRun:    *dryRun,
+					InputPath: strings.TrimSpace(*path),
 					Results:   results,
 				}
+				shared.FinalizeLocalizationUploadResult(&result, "localizations upload")
 
-				if err := shared.PrintOutput(&result, *output.Output, *output.Pretty); err != nil {
+				if err := shared.PrintOutputWithRenderers(
+					&result, *output.Output, *output.Pretty,
+					func() error { return shared.RenderLocalizationUploadResult(&result, false) },
+					func() error { return shared.RenderLocalizationUploadResult(&result, true) },
+				); err != nil {
 					return err
 				}
-				return shared.PrintSubmitReadinessCreateWarnings(os.Stderr, warnings)
+				if err := shared.PrintSubmitReadinessCreateWarnings(os.Stderr, warnings); err != nil {
+					return err
+				}
+				if uploadErr != nil || result.FailureArtifactError != "" {
+					return localizationUploadReportedError(result.Failed, uploadErr, result.FailureArtifactError)
+				}
+				return nil
 			case shared.LocalizationTypeAppInfo:
 				resolvedAppID := shared.ResolveAppID(*appID)
 				if resolvedAppID == "" {
 					fmt.Fprintln(os.Stderr, "Error: --app is required for app-info localizations")
-					return flag.ErrHelp
+					return shared.MissingRequiredUsageError("--app")
+				}
+				valuesByLocale, err := shared.ReadLocalizationStrings(*path, locales)
+				if err != nil {
+					if shared.IsLocalizationInputError(err) {
+						return shared.UsageError(err.Error())
+					}
+					return fmt.Errorf("localizations upload: %w", err)
+				}
+				if err := shared.ValidateAppInfoLocalizationValueSet(valuesByLocale); err != nil {
+					return shared.UsageError(err.Error())
 				}
 
 				client, err := shared.GetASCClient()
@@ -499,38 +712,59 @@ Examples:
 					return fmt.Errorf("localizations upload: %w", err)
 				}
 
-				requestCtx, cancel := shared.ContextWithTimeout(ctx)
-				defer cancel()
-
-				appInfo, err := shared.ResolveAppInfoID(requestCtx, client, resolvedAppID, strings.TrimSpace(*appInfoID))
+				appInfo, err := shared.RetryReadWithFreshTimeout(ctx, func(resolveCtx context.Context) (string, error) {
+					return shared.ResolveAppInfoID(resolveCtx, client, resolvedAppID, strings.TrimSpace(*appInfoID))
+				})
 				if err != nil {
 					return fmt.Errorf("localizations upload: %w", err)
 				}
 
-				valuesByLocale, err := shared.ReadLocalizationStrings(*path, locales)
-				if err != nil {
+				results, err := shared.UploadAppInfoLocalizations(ctx, client, appInfo, valuesByLocale, *dryRun)
+				if err != nil && len(results) == 0 {
+					if shared.IsLocalizationInputError(err) {
+						return shared.UsageError(err.Error())
+					}
 					return fmt.Errorf("localizations upload: %w", err)
 				}
-
-				results, err := shared.UploadAppInfoLocalizations(requestCtx, client, appInfo, valuesByLocale, *dryRun)
-				if err != nil {
-					return fmt.Errorf("localizations upload: %w", err)
-				}
+				uploadErr := err
 
 				result := asc.LocalizationUploadResult{
 					Type:      normalizedType,
 					AppID:     resolvedAppID,
 					AppInfoID: appInfo,
 					DryRun:    *dryRun,
+					InputPath: strings.TrimSpace(*path),
 					Results:   results,
 				}
+				shared.FinalizeLocalizationUploadResult(&result, "localizations upload")
 
-				return shared.PrintOutput(&result, *output.Output, *output.Pretty)
+				if err := shared.PrintOutputWithRenderers(
+					&result, *output.Output, *output.Pretty,
+					func() error { return shared.RenderLocalizationUploadResult(&result, false) },
+					func() error { return shared.RenderLocalizationUploadResult(&result, true) },
+				); err != nil {
+					return err
+				}
+				if uploadErr != nil || result.FailureArtifactError != "" {
+					return localizationUploadReportedError(result.Failed, uploadErr, result.FailureArtifactError)
+				}
+				return nil
 			default:
 				return fmt.Errorf("localizations upload: unsupported type %q", normalizedType)
 			}
 		},
 	}
+}
+
+func localizationUploadReportedError(failed int, uploadErr error, artifactError string) error {
+	message := fmt.Sprintf("localizations upload: %d locale(s) failed", failed)
+	if uploadErr != nil {
+		message += ": " + uploadErr.Error()
+	}
+	if strings.TrimSpace(artifactError) != "" {
+		message += "; write failure artifact: " + artifactError
+	}
+	return shared.NewReportedError(fmt.Errorf("%s", message))
 }
 
 func sharedVersionLocalizationValuesNeedUpdateContext(valuesByLocale map[string]map[string]string) bool {

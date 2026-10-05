@@ -12,6 +12,10 @@ type appStoreVersionRelationships struct {
 	App *Relationship `json:"app"`
 }
 
+type appInfoRelationships struct {
+	App *Relationship `json:"app"`
+}
+
 // AppStoreVersionAppID extracts the related app ID from an app store version response.
 func AppStoreVersionAppID(resp *AppStoreVersionResponse) (string, error) {
 	if resp == nil {
@@ -35,10 +39,74 @@ func AppStoreVersionAppID(resp *AppStoreVersionResponse) (string, error) {
 	return appID, nil
 }
 
+// AppInfoAppID extracts the related app ID from an app info response.
+func AppInfoAppID(resp *AppInfoResponse) (string, error) {
+	if resp == nil {
+		return "", fmt.Errorf("app info response is required")
+	}
+
+	var relationships appInfoRelationships
+	if len(resp.Data.Relationships) > 0 {
+		if err := json.Unmarshal(resp.Data.Relationships, &relationships); err != nil {
+			return "", fmt.Errorf("failed to parse app info relationships: %w", err)
+		}
+	}
+
+	if relationships.App == nil {
+		return "", fmt.Errorf("app relationship missing for app info %q", strings.TrimSpace(resp.Data.ID))
+	}
+	appID := strings.TrimSpace(relationships.App.Data.ID)
+	if appID == "" {
+		return "", fmt.Errorf("app relationship missing for app info %q", strings.TrimSpace(resp.Data.ID))
+	}
+	return appID, nil
+}
+
 // AppInfoCandidate describes an app info resource considered for auto-resolution.
 type AppInfoCandidate struct {
 	ID    string
 	State string
+}
+
+// ListAppInfoCandidatesForApp lists every app info candidate for an app.
+func (c *Client) ListAppInfoCandidatesForApp(ctx context.Context, appID string) ([]AppInfoCandidate, error) {
+	appID = strings.TrimSpace(appID)
+	if appID == "" {
+		return nil, fmt.Errorf("appID is required")
+	}
+
+	firstPage, err := c.GetAppInfos(
+		ctx,
+		appID,
+		WithAppInfoFields([]string{"state"}),
+		WithAppInfosLimit(200),
+	)
+	if err != nil {
+		return nil, err
+	}
+	allPages, err := PaginateAll(ctx, firstPage, func(ctx context.Context, nextURL string) (PaginatedResponse, error) {
+		return c.GetAppInfos(ctx, appID, WithAppInfosNextURL(nextURL))
+	})
+	if err != nil {
+		return nil, err
+	}
+	appInfos, ok := allPages.(*AppInfosResponse)
+	if !ok {
+		return nil, fmt.Errorf("unexpected app info pagination response %T", allPages)
+	}
+	return AppInfoCandidates(appInfos.Data), nil
+}
+
+// CurrentAppInfoCandidates excludes historical app info records.
+func CurrentAppInfoCandidates(candidates []AppInfoCandidate) []AppInfoCandidate {
+	current := make([]AppInfoCandidate, 0, len(candidates))
+	for _, candidate := range candidates {
+		if strings.EqualFold(candidate.State, "REPLACED_WITH_NEW_INFO") {
+			continue
+		}
+		current = append(current, candidate)
+	}
+	return current
 }
 
 // ResolveAppInfoIDForAppStoreVersion resolves the app info backing a version-scoped workflow.
@@ -58,18 +126,18 @@ func (c *Client) ResolveAppInfoIDForAppStoreVersion(ctx context.Context, version
 		return "", err
 	}
 
-	appInfos, err := c.GetAppInfos(ctx, appID)
+	appInfos, err := c.ListAppInfoCandidatesForApp(ctx, appID)
 	if err != nil {
 		return "", err
 	}
-	if len(appInfos.Data) == 0 {
+	if len(appInfos) == 0 {
 		return "", fmt.Errorf("no app info found for app %q", appID)
 	}
-	if len(appInfos.Data) == 1 {
-		return strings.TrimSpace(appInfos.Data[0].ID), nil
+	if len(appInfos) == 1 {
+		return strings.TrimSpace(appInfos[0].ID), nil
 	}
 
-	candidates := AppInfoCandidates(appInfos.Data)
+	candidates := appInfos
 
 	if resolvedID, ok := AutoResolveAppInfoIDByVersionState(candidates, ResolveAppStoreVersionState(versionResp.Data.Attributes)); ok {
 		return resolvedID, nil

@@ -35,6 +35,8 @@ type screenshotValidateIssue struct {
 	Severity    string `json:"severity"`
 	FilePath    string `json:"filePath,omitempty"`
 	FileName    string `json:"fileName,omitempty"`
+	DuplicateOf string `json:"duplicateOf,omitempty"`
+	Match       string `json:"match,omitempty"`
 	Message     string `json:"message"`
 	Remediation string `json:"remediation,omitempty"`
 }
@@ -67,7 +69,8 @@ func AssetsScreenshotsValidateCommand() *ffcli.Command {
 
 This preflight mirrors upload file ordering and reports common local problems
 before any App Store Connect mutation happens, including hidden files,
-unreadable assets, and unsupported dimensions.
+unreadable assets, unsupported dimensions, images whose encoded format
+contradicts their file extension, and duplicate decoded pixels.
 
 Examples:
   asc screenshots validate --path "./screenshots" --device-type "IPHONE_65"
@@ -83,12 +86,12 @@ Examples:
 			pathValue := strings.TrimSpace(*path)
 			if pathValue == "" {
 				fmt.Fprintln(os.Stderr, "Error: --path is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--path")
 			}
 			deviceValue := strings.TrimSpace(*deviceType)
 			if deviceValue == "" {
 				fmt.Fprintln(os.Stderr, "Error: --device-type is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--device-type")
 			}
 
 			displayType, err := normalizeScreenshotDisplayType(deviceValue)
@@ -112,7 +115,7 @@ Examples:
 			}
 
 			if result.ErrorCount > 0 {
-				return shared.NewReportedError(fmt.Errorf("screenshots validate: found %d error(s)", result.ErrorCount))
+				return shared.NewValidationReportedError(fmt.Errorf("screenshots validate: found %d error(s)", result.ErrorCount))
 			}
 
 			return nil
@@ -148,6 +151,7 @@ func validateScreenshotAssets(pathValue, displayType string) (*screenshotValidat
 		return result, nil
 	}
 
+	seenPixelDigests := make(map[screenshotPixelDigest][]string, len(paths))
 	for index, filePath := range paths {
 		fileName := filepath.Base(filePath)
 		fileResult := screenshotValidateFile{
@@ -186,7 +190,7 @@ func validateScreenshotAssets(pathValue, displayType string) (*screenshotValidat
 			continue
 		}
 
-		dimensions, err := asc.ReadImageDimensions(filePath)
+		dimensions, format, err := asc.ReadImageDimensionsAndFormat(filePath)
 		if err != nil {
 			hasError = true
 			appendScreenshotValidateIssue(result, screenshotValidateIssue{
@@ -204,6 +208,18 @@ func validateScreenshotAssets(pathValue, displayType string) (*screenshotValidat
 		fileResult.Width = dimensions.Width
 		fileResult.Height = dimensions.Height
 
+		if err := asc.ValidateImageFormatMatchesExtension(filePath, format); err != nil {
+			hasError = true
+			appendScreenshotValidateIssue(result, screenshotValidateIssue{
+				Code:        "format_mismatch",
+				Severity:    screenshotValidateSeverityError,
+				FilePath:    filePath,
+				FileName:    fileName,
+				Message:     err.Error(),
+				Remediation: screenshotFormatMismatchRemediation(filePath, format),
+			})
+		}
+
 		if err := asc.ValidateScreenshotDimensionsForSize(filePath, dimensions.Width, dimensions.Height, apiDisplayType); err != nil {
 			hasError = true
 			appendScreenshotValidateIssue(result, screenshotValidateIssue{
@@ -214,6 +230,10 @@ func validateScreenshotAssets(pathValue, displayType string) (*screenshotValidat
 				Message:     err.Error(),
 				Remediation: fmt.Sprintf("Resize or replace this file to match %s screenshot requirements.", apiDisplayType),
 			})
+		}
+
+		if !hasError {
+			hasError = checkDecodedPixelDuplicate(result, filePath, fileName, seenPixelDigests)
 		}
 
 		switch {
@@ -232,6 +252,74 @@ func validateScreenshotAssets(pathValue, displayType string) (*screenshotValidat
 	}
 
 	return result, nil
+}
+
+// screenshotFormatMismatchRemediation keeps the structured advice in step with
+// the message: a rename is only useful when screenshot uploads collect the
+// real format's extension, which they do for PNG and JPEG but not for GIF.
+func screenshotFormatMismatchRemediation(filePath, format string) string {
+	if renamed, ok := asc.SuggestedImageFileName(filePath, format); ok {
+		return fmt.Sprintf("Rename this file to %s, or re-export it in the format its extension names.", renamed)
+	}
+	return "Re-export this file in the format its extension names; screenshot uploads do not collect its real format."
+}
+
+func checkDecodedPixelDuplicate(result *screenshotValidateResult, filePath, fileName string, seenPixelDigests map[screenshotPixelDigest][]string) bool {
+	digest, err := decodedScreenshotPixelDigest(filePath)
+	if err != nil {
+		appendScreenshotValidateIssue(result, screenshotValidateIssue{
+			Code:        "read_failure",
+			Severity:    screenshotValidateSeverityError,
+			FilePath:    filePath,
+			FileName:    fileName,
+			Message:     err.Error(),
+			Remediation: "Replace this file with a valid PNG or JPEG screenshot.",
+		})
+		return true
+	}
+
+	duplicateOf, err := findDecodedScreenshotDuplicate(filePath, seenPixelDigests[digest])
+	if err != nil {
+		appendScreenshotValidateIssue(result, screenshotValidateIssue{
+			Code:        "read_failure",
+			Severity:    screenshotValidateSeverityError,
+			FilePath:    filePath,
+			FileName:    fileName,
+			Message:     err.Error(),
+			Remediation: "Replace this file with a valid PNG or JPEG screenshot.",
+		})
+		return true
+	}
+	if duplicateOf == "" {
+		seenPixelDigests[digest] = append(seenPixelDigests[digest], filePath)
+		return false
+	}
+
+	duplicateName := filepath.Base(duplicateOf)
+	appendScreenshotValidateIssue(result, screenshotValidateIssue{
+		Code:        "duplicate_content",
+		Severity:    screenshotValidateSeverityError,
+		FilePath:    filePath,
+		FileName:    fileName,
+		DuplicateOf: duplicateName,
+		Match:       "pixels",
+		Message:     fmt.Sprintf("screenshot %q has decoded pixels identical to %q", fileName, duplicateName),
+		Remediation: "Remove one duplicate or replace it with a distinct screenshot before uploading.",
+	})
+	return true
+}
+
+func findDecodedScreenshotDuplicate(path string, candidates []string) (string, error) {
+	for _, candidate := range candidates {
+		equal, err := decodedScreenshotPixelsEqual(candidate, path)
+		if err != nil {
+			return "", err
+		}
+		if equal {
+			return candidate, nil
+		}
+	}
+	return "", nil
 }
 
 func appendScreenshotValidateIssue(result *screenshotValidateResult, issue screenshotValidateIssue) {

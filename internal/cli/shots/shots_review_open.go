@@ -23,18 +23,18 @@ func ShotsReviewOpenCommand() *ffcli.Command {
 	return &ffcli.Command{
 		Name:       "review-open",
 		ShortUsage: "asc screenshots review-open [flags]",
-		ShortHelp:  "[experimental] Open review HTML report in the default browser.",
+		ShortHelp:  "Open review HTML report in the default browser.",
 		FlagSet:    fs,
 		UsageFunc:  shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
 			if strings.TrimSpace(*outputDir) == "" && strings.TrimSpace(*htmlPath) == "" {
 				fmt.Fprintln(os.Stderr, "Error: --output-dir or --html-path is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("")
 			}
 
 			result, err := screenshots.OpenReview(ctx, screenshots.ReviewOpenRequest{
-				OutputDir: strings.TrimSpace(*outputDir),
-				HTMLPath:  strings.TrimSpace(*htmlPath),
+				OutputDir: *outputDir,
+				HTMLPath:  *htmlPath,
 				DryRun:    *dryRun,
 			})
 			if err != nil {

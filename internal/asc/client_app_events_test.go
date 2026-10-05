@@ -80,6 +80,47 @@ func TestGetAppEvents_WithLimit(t *testing.T) {
 	}
 }
 
+func TestGetAppEvents_WithQueryOptions(t *testing.T) {
+	response := jsonResponse(http.StatusOK, `{"data":[]}`)
+	client := newTestClient(t, func(req *http.Request) {
+		if req.Method != http.MethodGet {
+			t.Fatalf("expected GET, got %s", req.Method)
+		}
+		if req.URL.Path != "/v1/apps/app-123/appEvents" {
+			t.Fatalf("expected path /v1/apps/app-123/appEvents, got %s", req.URL.Path)
+		}
+		want := map[string]string{
+			"filter[eventState]":            "APPROVED,ARCHIVED",
+			"filter[id]":                    "event-1,event-2",
+			"fields[appEvents]":             "referenceName,eventState,localizations",
+			"fields[appEventLocalizations]": "locale,name",
+			"include":                       "localizations",
+			"limit[localizations]":          "10",
+			"limit":                         "25",
+		}
+		for key, expected := range want {
+			if got := req.URL.Query().Get(key); got != expected {
+				t.Errorf("query[%q] = %q, want %q", key, got, expected)
+			}
+		}
+		assertAuthorized(t, req)
+	}, response)
+
+	if _, err := client.GetAppEvents(
+		context.Background(),
+		"app-123",
+		WithAppEventsStates([]string{"APPROVED", "ARCHIVED"}),
+		WithAppEventsIDs([]string{"event-1", "event-2"}),
+		WithAppEventsFields([]string{"referenceName", "eventState", "localizations"}),
+		WithAppEventsLocalizationFields([]string{"locale", "name"}),
+		WithAppEventsInclude([]string{"localizations"}),
+		WithAppEventsLocalizationsLimit(10),
+		WithAppEventsLimit(25),
+	); err != nil {
+		t.Fatalf("GetAppEvents() error: %v", err)
+	}
+}
+
 func TestGetAppEvents_UsesNextURL(t *testing.T) {
 	next := "https://api.appstoreconnect.apple.com/v1/apps/app-123/appEvents?cursor=abc"
 	response := jsonResponse(http.StatusOK, `{"data":[]}`)
@@ -113,7 +154,7 @@ func TestGetAppEvent(t *testing.T) {
 }
 
 func TestCreateAppEvent(t *testing.T) {
-	response := jsonResponse(http.StatusCreated, `{"data":{"type":"appEvents","id":"event-1","attributes":{"referenceName":"Launch","badge":"PREMIERE"}}}`)
+	response := jsonResponse(http.StatusCreated, `{"data":{"type":"appEvents","id":"event-1","attributes":{"referenceName":"Launch"}}}`)
 	client := newTestClient(t, func(req *http.Request) {
 		if req.Method != http.MethodPost {
 			t.Fatalf("expected POST, got %s", req.Method)
@@ -130,6 +171,9 @@ func TestCreateAppEvent(t *testing.T) {
 		if requireString(t, attrs["referenceName"], "referenceName") != "Launch" {
 			t.Fatalf("unexpected referenceName %v", attrs["referenceName"])
 		}
+		if _, ok := attrs["badge"]; ok {
+			t.Fatalf("expected optional badge to be omitted, got %v", attrs["badge"])
+		}
 		rels := requireMap(t, data["relationships"], "data.relationships")
 		app := requireMap(t, rels["app"], "relationships.app")
 		appData := requireMap(t, app["data"], "app.data")
@@ -139,10 +183,7 @@ func TestCreateAppEvent(t *testing.T) {
 		assertAuthorized(t, req)
 	}, response)
 
-	attrs := AppEventCreateAttributes{
-		ReferenceName: "Launch",
-		Badge:         "PREMIERE",
-	}
+	attrs := AppEventCreateAttributes{ReferenceName: "Launch"}
 	if _, err := client.CreateAppEvent(context.Background(), "app-123", attrs); err != nil {
 		t.Fatalf("CreateAppEvent() error: %v", err)
 	}
@@ -739,7 +780,7 @@ func TestAppEventMethodsRequireIDs(t *testing.T) {
 }
 
 func TestAppEventMethodsReturnAPIError(t *testing.T) {
-	response := jsonResponse(http.StatusInternalServerError, `{"errors":[{"title":"Server error","detail":"boom"}]}`)
+	response := jsonResponse(http.StatusBadRequest, `{"errors":[{"title":"Invalid request","detail":"boom"}]}`)
 	tests := []struct {
 		name string
 		call func(client *Client) error

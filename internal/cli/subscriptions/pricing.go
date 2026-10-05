@@ -76,7 +76,7 @@ func buildSubscriptionsPricingSummaryCommand(
 	fs := flag.NewFlagSet(name, flag.ExitOnError)
 
 	appID := fs.String("app", "", subscriptionLookupAppUsage)
-	subscriptionID := fs.String("subscription-id", "", "Subscription ID, product ID, or exact current name")
+	subscriptionID := shared.BindResourceIDFlag(fs, "subscription-id", "subscriptions", "Subscription ID, product ID, or exact current name")
 	territory := fs.String("territory", "USA", "Territory for pricing (accepts alpha-2, alpha-3, or exact English country name)")
 	output := shared.BindOutputFlags(fs)
 
@@ -93,7 +93,7 @@ func buildSubscriptionsPricingSummaryCommand(
 			resolvedAppID := shared.ResolveAppID(requestedAppID)
 			if requestedSubID == "" && resolvedAppID == "" {
 				fmt.Fprintln(os.Stderr, "Error: --app or --subscription-id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("")
 			}
 
 			territoryInput := strings.TrimSpace(*territory)
@@ -275,6 +275,7 @@ func resolveSubscriptionPriceSummary(
 		pricesCtx,
 		sub.Sub.ID,
 		asc.WithSubscriptionPricesTerritory(territory),
+		asc.WithSubscriptionPricesPlanType(asc.SubscriptionPlanTypeUpfront),
 		asc.WithSubscriptionPricesInclude([]string{"subscriptionPricePoint", "territory"}),
 		asc.WithSubscriptionPricesPricePointFields([]string{"customerPrice", "proceeds", "proceedsYear2"}),
 		asc.WithSubscriptionPricesTerritoryFields([]string{"currency"}),
@@ -294,7 +295,7 @@ func resolveSubscriptionPriceSummary(
 		currency = territoryToCurrency(territory)
 	}
 
-	if value, ok := selectCurrentSubscriptionPriceValue(pricesResp.Data, pricePointValues, time.Now().UTC()); ok {
+	if value, ok := selectCurrentSubscriptionPriceValue(pricesResp.Data, pricePointValues, shared.PricingNow()); ok {
 		if value.CustomerPrice != "" {
 			summary.CurrentPrice = &subMoney{Amount: value.CustomerPrice, Currency: currency}
 		}
@@ -326,7 +327,7 @@ func selectCurrentSubscriptionPriceValue(
 	pricePointValues map[string]subscriptionPricePointValue,
 	now time.Time,
 ) (subscriptionPricePointValue, bool) {
-	asOf := dateOnlyUTC(now)
+	today := shared.PricingDate(now)
 
 	var bestCurrent *subscriptionPriceCandidate
 	var bestFuture *subscriptionPriceCandidate
@@ -357,7 +358,7 @@ func selectCurrentSubscriptionPriceValue(
 			continue
 		}
 
-		if candidate.startAt.After(asOf) {
+		if !shared.PriceActiveOn(candidate.startAt, nil, today) {
 			if bestFuture == nil || candidate.startAt.Before(*bestFuture.startAt) || (candidate.startAt.Equal(*bestFuture.startAt) && !candidate.preserved && bestFuture.preserved) {
 				copyCandidate := candidate
 				bestFuture = &copyCandidate
@@ -392,12 +393,18 @@ func parseSubscriptionPricingDate(value string) *time.Time {
 	if err != nil {
 		return nil
 	}
-	normalized := dateOnlyUTC(parsed.UTC())
-	return &normalized
+	return &parsed
 }
 
-func dateOnlyUTC(value time.Time) time.Time {
-	return time.Date(value.UTC().Year(), value.UTC().Month(), value.UTC().Day(), 0, 0, 0, 0, time.UTC)
+// subscriptionPricingToday returns today's App Store Connect pricing date, the
+// US Pacific calendar day, from the clock pricing commands share.
+//
+// Subscription prices carry only a startDate, so each price ends on the date
+// the next one starts: the latest price that has started on a pricing date is
+// the one that applies, matching the exclusive end dates of app and in-app
+// purchase schedules.
+func subscriptionPricingToday() time.Time {
+	return shared.PricingDate(shared.PricingNow())
 }
 
 func parseSubscriptionPricesIncluded(raw json.RawMessage) (map[string]subscriptionPricePointValue, map[string]string) {

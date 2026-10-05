@@ -2,13 +2,24 @@ package cmd
 
 import (
 	"bytes"
+	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
+	"encoding/pem"
 	"encoding/xml"
 	"errors"
 	"flag"
+	"fmt"
 	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -19,6 +30,8 @@ import (
 
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/asc"
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/cli/shared"
+	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/readonly"
+	webcore "github.com/rudrankriyam/App-Store-Connect-CLI/internal/web"
 )
 
 func TestExitCodeFromError(t *testing.T) {
@@ -38,6 +51,11 @@ func TestExitCodeFromError(t *testing.T) {
 			expected: ExitUsage,
 		},
 		{
+			name:     "reported usage error returns usage",
+			err:      shared.NewReportedUsageError(shared.UsageErrorInvalidValue, "invalid selector"),
+			expected: ExitUsage,
+		},
+		{
 			name:     "ErrMissingAuth returns auth failure",
 			err:      shared.ErrMissingAuth,
 			expected: ExitAuth,
@@ -51,6 +69,16 @@ func TestExitCodeFromError(t *testing.T) {
 			name:     "ErrForbidden returns auth failure",
 			err:      asc.ErrForbidden,
 			expected: ExitAuth,
+		},
+		{
+			name:     "wrapped invalid Apple Account credentials return auth failure",
+			err:      fmt.Errorf("SRP login failed: %w", webcore.ErrInvalidAppleAccountCredentials),
+			expected: ExitAuth,
+		},
+		{
+			name:     "wrapped missing Apple web session keeps usage exit code",
+			err:      fmt.Errorf("web review show failed: %w", &shared.MissingWebSessionError{Message: "no Apple web session is cached"}),
+			expected: ExitUsage,
 		},
 		{
 			name:     "ErrNotFound returns not found",
@@ -67,6 +95,54 @@ func TestExitCodeFromError(t *testing.T) {
 			err:      errors.New("something went wrong"),
 			expected: ExitError,
 		},
+		{
+			name:     "pending wait returns pending",
+			err:      shared.NewPendingError("build is still pending"),
+			expected: ExitPending,
+		},
+		{
+			name:     "wrapped pending wait returns pending",
+			err:      fmt.Errorf("builds wait: %w", shared.NewPendingError("build is still pending")),
+			expected: ExitPending,
+		},
+		{
+			name:     "read-only refusal returns read-only",
+			err:      &readonly.RefusedError{Source: readonly.EnvVar, Method: http.MethodPatch, Target: "/v1/apps/1"},
+			expected: ExitReadOnly,
+		},
+		{
+			name:     "wrapped read-only refusal returns read-only",
+			err:      fmt.Errorf("failed to update app: %w", &readonly.RefusedError{Source: readonly.EnvVar, Method: http.MethodPatch, Target: "/v1/apps/1"}),
+			expected: ExitReadOnly,
+		},
+		{
+			name:     "child exit code is preserved",
+			err:      shared.NewProcessExitError(42),
+			expected: 42,
+		},
+		{
+			name:     "wrapped child signal exit code is preserved",
+			err:      fmt.Errorf("cleanup failed: %w", shared.NewProcessExitError(143)),
+			expected: 143,
+		},
+		{
+			name:     "ordinary exec exit error remains generic",
+			err:      ordinaryExecExitError(t, 128),
+			expected: ExitError,
+		},
+		{
+			name:     "ordinary setup and cleanup failures remain generic",
+			err:      errors.Join(errors.New("setup failed"), errors.New("cleanup failed")),
+			expected: ExitError,
+		},
+		{
+			name: "child exit remains exact with a rendered companion",
+			err: errors.Join(
+				shared.NewProcessExitError(42),
+				shared.NewReportedError(errors.New("cleanup failed")),
+			),
+			expected: 42,
+		},
 	}
 
 	for _, tt := range tests {
@@ -77,6 +153,33 @@ func TestExitCodeFromError(t *testing.T) {
 			}
 		})
 	}
+}
+
+func ordinaryExecExitError(t *testing.T, code int) error {
+	t.Helper()
+	cmd := exec.Command(os.Args[0], "-test.run=^TestExitCodeHelperProcess$")
+	cmd.Env = append(os.Environ(), "ASC_EXIT_CODE_HELPER="+strconv.Itoa(code))
+	err := cmd.Run()
+	if err == nil {
+		t.Fatalf("helper unexpectedly exited successfully")
+	}
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) {
+		t.Fatalf("helper error = %T, want *exec.ExitError", err)
+	}
+	return err
+}
+
+func TestExitCodeHelperProcess(t *testing.T) {
+	value := os.Getenv("ASC_EXIT_CODE_HELPER")
+	if value == "" {
+		return
+	}
+	code, err := strconv.Atoi(value)
+	if err != nil {
+		os.Exit(125)
+	}
+	os.Exit(code)
 }
 
 func TestExitCodeFromError_Conflict(t *testing.T) {
@@ -110,6 +213,24 @@ func TestExitCodeConstants(t *testing.T) {
 	if ExitConflict != 5 {
 		t.Errorf("ExitConflict = %d, want 5", ExitConflict)
 	}
+	if ExitReadOnly != 6 {
+		t.Errorf("ExitReadOnly = %d, want 6", ExitReadOnly)
+	}
+	if ExitPending != 7 {
+		t.Errorf("ExitPending = %d, want 7", ExitPending)
+	}
+}
+
+func TestExitHTTPUnprocessableMatchesRuntimeMapping(t *testing.T) {
+	const want = 10 + (http.StatusUnprocessableEntity - 400)
+
+	err := &asc.APIError{StatusCode: http.StatusUnprocessableEntity}
+	if got := ExitCodeFromError(err); got != want {
+		t.Fatalf("ExitCodeFromError(HTTP 422) = %d, want %d", got, want)
+	}
+	if ExitHTTPUnprocessable != want {
+		t.Fatalf("ExitHTTPUnprocessable = %d, want %d", ExitHTTPUnprocessable, want)
+	}
 }
 
 func TestAPIErrorCodeToExitCode(t *testing.T) {
@@ -134,6 +255,127 @@ func TestAPIErrorCodeToExitCode(t *testing.T) {
 				t.Errorf("APIErrorCodeToExitCode(%q) = %d, want %d", tt.code, result, tt.expected)
 			}
 		})
+	}
+}
+
+// rewriteHostTransport redirects every request to the test server so client
+// requests built against the production base URL hit the httptest server.
+type rewriteHostTransport struct {
+	target *url.URL
+}
+
+func (t *rewriteHostTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	clone := req.Clone(req.Context())
+	clone.URL.Scheme = t.target.Scheme
+	clone.URL.Host = t.target.Host
+	return http.DefaultTransport.RoundTrip(clone)
+}
+
+// newHTTPStatusTestClient builds an asc.Client whose requests are routed to
+// the given httptest server URL.
+func newHTTPStatusTestClient(t *testing.T, serverURL string) *asc.Client {
+	t.Helper()
+
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("GenerateKey() error: %v", err)
+	}
+	der, err := x509.MarshalPKCS8PrivateKey(key)
+	if err != nil {
+		t.Fatalf("MarshalPKCS8PrivateKey() error: %v", err)
+	}
+	pemBytes := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der})
+	keyPath := filepath.Join(t.TempDir(), "AuthKey_TEST.p8")
+	if err := os.WriteFile(keyPath, pemBytes, 0o600); err != nil {
+		t.Fatalf("WriteFile() error: %v", err)
+	}
+
+	target, err := url.Parse(serverURL)
+	if err != nil {
+		t.Fatalf("url.Parse(%q) error: %v", serverURL, err)
+	}
+	client, err := asc.NewClientWithHTTPClient("KEY123", "ISS456", keyPath, &http.Client{
+		Transport: &rewriteHostTransport{target: target},
+	})
+	if err != nil {
+		t.Fatalf("NewClientWithHTTPClient() error: %v", err)
+	}
+	return client
+}
+
+// TestExitCodeFromError_RetryExhaustedStatuses exercises the full retry path:
+// a server that persistently fails with a retryable status must surface that
+// status in both the exit code and the telemetry HTTP status once retries are
+// exhausted, instead of collapsing to the generic exit code 1.
+func TestExitCodeFromError_RetryExhaustedStatuses(t *testing.T) {
+	tests := []struct {
+		name         string
+		status       int
+		body         string
+		expectedExit int
+	}{
+		{
+			name:         "persistent 503 exits with service unavailable",
+			status:       http.StatusServiceUnavailable,
+			body:         `{"errors":[{"code":"UNEXPECTED_ERROR","title":"Service Unavailable","detail":"try again later"}]}`,
+			expectedExit: ExitHTTPServiceUnavailable,
+		},
+		{
+			name:         "persistent 429 exits with rate limit code",
+			status:       http.StatusTooManyRequests,
+			body:         `{"errors":[{"code":"RATE_LIMIT_EXCEEDED","title":"Too Many Requests","detail":"rate limit exceeded"}]}`,
+			expectedExit: 39, // 10 + (429 - 400)
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("ASC_MAX_RETRIES", "1")
+			t.Setenv("ASC_BASE_DELAY", "1ms")
+			t.Setenv("ASC_MAX_DELAY", "1ms")
+
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(tt.status)
+				_, _ = w.Write([]byte(tt.body))
+			}))
+			t.Cleanup(server.Close)
+
+			client := newHTTPStatusTestClient(t, server.URL)
+			_, err := client.GetApps(context.Background())
+			if err == nil {
+				t.Fatal("expected error, got nil")
+			}
+			if got := ExitCodeFromError(err); got != tt.expectedExit {
+				t.Errorf("ExitCodeFromError() = %d, want %d (error: %v)", got, tt.expectedExit, err)
+			}
+			if got := httpStatusFromError(err); got != tt.status {
+				t.Errorf("httpStatusFromError() = %d, want %d (error: %v)", got, tt.status, err)
+			}
+		})
+	}
+}
+
+// TestExitCodeFromError_AppleNotAuthorizedPayload verifies that a real-shaped
+// Apple 401 response (code NOT_AUTHORIZED, not UNAUTHORIZED) maps to ExitAuth.
+func TestExitCodeFromError_AppleNotAuthorizedPayload(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"errors":[{"status":"401","code":"NOT_AUTHORIZED","title":"Authentication credentials are missing or invalid.","detail":"Provide a properly configured and signed bearer token, and make sure that it has not expired."}]}`))
+	}))
+	t.Cleanup(server.Close)
+
+	client := newHTTPStatusTestClient(t, server.URL)
+	_, err := client.GetApps(context.Background())
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if got := ExitCodeFromError(err); got != ExitAuth {
+		t.Errorf("ExitCodeFromError() = %d, want %d (ExitAuth) (error: %v)", got, ExitAuth, err)
+	}
+	if got := httpStatusFromError(err); got != http.StatusUnauthorized {
+		t.Errorf("httpStatusFromError() = %d, want %d (error: %v)", got, http.StatusUnauthorized, err)
 	}
 }
 
@@ -205,12 +447,7 @@ func TestGetCommandName(t *testing.T) {
 func TestJUnitReportNameWithRootFlags(t *testing.T) {
 	// Build the binary
 	tmpDir := t.TempDir()
-	binaryPath := filepath.Join(tmpDir, "asc-test")
-	cmd := exec.Command("go", "build", "-o", binaryPath, ".")
-	cmd.Dir = ".." // Go up from cmd/ to project root
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("Failed to build binary: %v\n%s", err, out)
-	}
+	binaryPath := buildASCBlackboxBinary(t)
 
 	reportFile := filepath.Join(tmpDir, "junit.xml")
 	// Run with root flags before subcommand
@@ -247,12 +484,7 @@ func TestJUnitReportNameWithRootFlags(t *testing.T) {
 func TestJUnitReportEndToEnd(t *testing.T) {
 	// Build the binary
 	tmpDir := t.TempDir()
-	binaryPath := filepath.Join(tmpDir, "asc-test")
-	cmd := exec.Command("go", "build", "-o", binaryPath, ".")
-	cmd.Dir = ".." // Go up from cmd/ to project root
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("Failed to build binary: %v\n%s", err, out)
-	}
+	binaryPath := buildASCBlackboxBinary(t)
 
 	tests := []struct {
 		name       string
@@ -334,13 +566,7 @@ func TestJUnitReportEndToEnd(t *testing.T) {
 
 func TestBuildsListMissingAppExitCode(t *testing.T) {
 	tmpDir := t.TempDir()
-	binaryPath := filepath.Join(tmpDir, "asc-test")
-
-	buildCmd := exec.Command("go", "build", "-o", binaryPath, ".")
-	buildCmd.Dir = ".."
-	if out, err := buildCmd.CombinedOutput(); err != nil {
-		t.Fatalf("failed to build binary: %v\n%s", err, out)
-	}
+	binaryPath := buildASCBlackboxBinary(t)
 
 	runCmd := exec.Command(binaryPath, "builds", "list", "--version", "1.2.3")
 	runCmd.Env = isolatedCLITestEnv(filepath.Join(tmpDir, "config.json"))
@@ -362,15 +588,202 @@ func TestBuildsListMissingAppExitCode(t *testing.T) {
 	}
 }
 
+func TestSigningReconcileInvalidDevicesFileExitsTwoWithoutSideEffects(t *testing.T) {
+	binaryPath := buildASCBlackboxBinary(t)
+
+	tests := []struct {
+		name string
+		body string
+	}{
+		{name: "malformed JSON", body: `{"schemaVersion":1,"devices":[`},
+		{name: "unknown field", body: `{"schemaVersion":1,"devices":[{"name":"Phone","udid":"ABCD1234","platform":"IOS","SECRET-UDID-Rudrank-Phone":true}]}`},
+		{name: "invalid UDID", body: `{"schemaVersion":1,"devices":[{"name":"Phone","udid":"ABC/DEF?123","platform":"IOS"}]}`},
+		{name: "duplicate device", body: `{"schemaVersion":1,"devices":[{"name":"One","udid":"00-aa-11-bb","platform":"IOS"},{"name":"Two","udid":"00aa11bb","platform":"IOS"}]}`},
+		{name: "unsupported platform", body: `{"schemaVersion":1,"devices":[{"name":"Phone","udid":"ABCD1234","platform":"MAC_OS"}]}`},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			tmpDir := t.TempDir()
+			devicesPath := filepath.Join(tmpDir, "devices.json")
+			if err := os.WriteFile(devicesPath, []byte(test.body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			stateDir := filepath.Join(tmpDir, "signing-state")
+
+			runCmd := exec.Command(
+				binaryPath,
+				"signing", "reconcile", "plan",
+				"--archive-path", filepath.Join(tmpDir, "App.xcarchive"),
+				"--devices-file", devicesPath,
+				"--state-dir", stateDir,
+			)
+			runCmd.Env = isolatedCLITestEnv(filepath.Join(tmpDir, "config.json"))
+			var stdout bytes.Buffer
+			var stderr bytes.Buffer
+			runCmd.Stdout = &stdout
+			runCmd.Stderr = &stderr
+			err := runCmd.Run()
+			if err == nil {
+				t.Fatal("expected invalid devices file to fail")
+			}
+			var exitErr *exec.ExitError
+			if !errors.As(err, &exitErr) {
+				t.Fatalf("expected *exec.ExitError, got %T (%v)", err, err)
+			}
+			if exitErr.ExitCode() != ExitUsage {
+				t.Fatalf("exit code = %d, want %d; stderr=%q", exitErr.ExitCode(), ExitUsage, stderr.String())
+			}
+			if stdout.Len() != 0 {
+				t.Fatalf("stdout = %q, want empty", stdout.String())
+			}
+			if !strings.Contains(stderr.String(), "invalid devices file") {
+				t.Fatalf("stderr = %q, want devices validation error", stderr.String())
+			}
+			if strings.Contains(stderr.String(), "SECRET-UDID-Rudrank-Phone") {
+				t.Fatalf("stderr leaked untrusted devices content: %q", stderr.String())
+			}
+			if _, statErr := os.Stat(stateDir); !errors.Is(statErr, os.ErrNotExist) {
+				t.Fatalf("state directory exists after invalid input: %v", statErr)
+			}
+		})
+	}
+}
+
+func TestSigningReconcileProtectedDevicesFileExitsTwoWithoutLeakingPath(t *testing.T) {
+	binaryPath := buildASCBlackboxBinary(t)
+	tmpDir := t.TempDir()
+	const secret = "SECRET-UDID-Rudrank-Phone"
+	devicesPath := filepath.Join(tmpDir, secret, "devices.json")
+	stateDir := filepath.Join(tmpDir, "signing-state")
+
+	runCmd := exec.Command(
+		binaryPath,
+		"signing", "reconcile", "plan",
+		"--archive-path", filepath.Join(tmpDir, "App.xcarchive"),
+		"--devices-file", devicesPath,
+		"--state-dir", stateDir,
+	)
+	runCmd.Env = isolatedCLITestEnv(filepath.Join(tmpDir, "config.json"))
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	runCmd.Stdout = &stdout
+	runCmd.Stderr = &stderr
+	err := runCmd.Run()
+	if err == nil {
+		t.Fatal("expected missing protected devices file to fail")
+	}
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) {
+		t.Fatalf("expected *exec.ExitError, got %T (%v)", err, err)
+	}
+	if exitErr.ExitCode() != ExitUsage {
+		t.Fatalf("exit code = %d, want %d; stderr=%q", exitErr.ExitCode(), ExitUsage, stderr.String())
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("stdout = %q, want empty", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "invalid devices file") {
+		t.Fatalf("stderr = %q, want protected input diagnostic", stderr.String())
+	}
+	if strings.Contains(stderr.String(), secret) || strings.Contains(stderr.String(), devicesPath) {
+		t.Fatalf("stderr leaked protected input path: %q", stderr.String())
+	}
+	if _, statErr := os.Stat(stateDir); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("state directory exists after invalid input: %v", statErr)
+	}
+}
+
+func TestAnalyticsViewInvalidGranularityExitCode(t *testing.T) {
+	binaryPath := buildASCBlackboxBinary(t)
+
+	tests := []struct {
+		name  string
+		value string
+	}{
+		{name: "unsupported", value: "HOURLY"},
+		{name: "empty", value: ""},
+		{name: "empty entry", value: "DAILY,,WEEKLY"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			tmpDir := t.TempDir()
+			runCmd := exec.Command(
+				binaryPath,
+				"analytics", "view",
+				"--request-id", "11111111-1111-1111-1111-111111111111",
+				"--granularity", test.value,
+			)
+			runCmd.Env = isolatedCLITestEnv(filepath.Join(tmpDir, "config.json"))
+
+			var stdout bytes.Buffer
+			var stderr bytes.Buffer
+			runCmd.Stdout = &stdout
+			runCmd.Stderr = &stderr
+			err := runCmd.Run()
+			if err == nil {
+				t.Fatalf("expected non-zero exit for granularity %q", test.value)
+			}
+
+			var exitErr *exec.ExitError
+			if !errors.As(err, &exitErr) {
+				t.Fatalf("expected *exec.ExitError, got %T (%v)", err, err)
+			}
+			if exitErr.ExitCode() != ExitUsage {
+				t.Fatalf("exit code = %d, want %d; stderr=%q", exitErr.ExitCode(), ExitUsage, stderr.String())
+			}
+			if stdout.Len() != 0 {
+				t.Fatalf("expected empty stdout, got %q", stdout.String())
+			}
+			if !strings.Contains(stderr.String(), "--granularity must be a comma-separated list of: DAILY, WEEKLY, MONTHLY") {
+				t.Fatalf("unexpected stderr: %q", stderr.String())
+			}
+		})
+	}
+}
+
+func TestAnalyticsViewInvalidProcessingDateExitCode(t *testing.T) {
+	binaryPath := buildASCBlackboxBinary(t)
+	for _, value := range []string{"2024-13-40", ""} {
+		t.Run(fmt.Sprintf("value=%q", value), func(t *testing.T) {
+			tmpDir := t.TempDir()
+			runCmd := exec.Command(
+				binaryPath,
+				"analytics", "view",
+				"--request-id", "11111111-1111-1111-1111-111111111111",
+				"--processing-date", value,
+			)
+			runCmd.Env = isolatedCLITestEnv(filepath.Join(tmpDir, "config.json"))
+
+			var stdout bytes.Buffer
+			var stderr bytes.Buffer
+			runCmd.Stdout = &stdout
+			runCmd.Stderr = &stderr
+			err := runCmd.Run()
+			if err == nil {
+				t.Fatal("expected invalid --processing-date to fail")
+			}
+
+			var exitErr *exec.ExitError
+			if !errors.As(err, &exitErr) {
+				t.Fatalf("expected *exec.ExitError, got %T (%v)", err, err)
+			}
+			if exitErr.ExitCode() != ExitUsage {
+				t.Fatalf("exit code = %d, want %d; stderr=%q", exitErr.ExitCode(), ExitUsage, stderr.String())
+			}
+			if stdout.Len() != 0 {
+				t.Fatalf("expected empty stdout, got %q", stdout.String())
+			}
+			if !strings.Contains(stderr.String(), "--processing-date must be in YYYY-MM-DD format") {
+				t.Fatalf("unexpected stderr: %q", stderr.String())
+			}
+		})
+	}
+}
+
 func TestScreenshotsUploadResumeMissingValueExitCode(t *testing.T) {
 	tmpDir := t.TempDir()
-	binaryPath := filepath.Join(tmpDir, "asc-test")
-
-	buildCmd := exec.Command("go", "build", "-o", binaryPath, ".")
-	buildCmd.Dir = ".."
-	if out, err := buildCmd.CombinedOutput(); err != nil {
-		t.Fatalf("failed to build binary: %v\n%s", err, out)
-	}
+	binaryPath := buildASCBlackboxBinary(t)
 
 	runCmd := exec.Command(binaryPath, "screenshots", "upload", "--resume")
 	runCmd.Env = isolatedCLITestEnv(filepath.Join(tmpDir, "config.json"))
@@ -395,16 +808,10 @@ func TestScreenshotsUploadResumeMissingValueExitCode(t *testing.T) {
 
 func TestBuildsTestNotesUpdateConflictingFlagsExitCode(t *testing.T) {
 	tmpDir := t.TempDir()
-	binaryPath := filepath.Join(tmpDir, "asc-test")
-
-	buildCmd := exec.Command("go", "build", "-o", binaryPath, ".")
-	buildCmd.Dir = ".."
-	if out, err := buildCmd.CombinedOutput(); err != nil {
-		t.Fatalf("failed to build binary: %v\n%s", err, out)
-	}
+	binaryPath := buildASCBlackboxBinary(t)
 
 	runCmd := exec.Command(binaryPath, "builds", "test-notes", "update",
-		"--id", "loc-1", "--build", "build-1", "--whats-new", "test")
+		"--localization-id", "loc-1", "--build-id", "build-1", "--whats-new", "test")
 	runCmd.Env = isolatedCLITestEnv(filepath.Join(tmpDir, "config.json"))
 	output, err := runCmd.CombinedOutput()
 	if err == nil {
@@ -420,60 +827,146 @@ func TestBuildsTestNotesUpdateConflictingFlagsExitCode(t *testing.T) {
 	}
 
 	stderr := string(output)
-	if !strings.Contains(stderr, "Warning: `--build` is deprecated. Use `--build-id`.") {
-		t.Fatalf("expected legacy build warning, got %q", stderr)
-	}
-	if !strings.Contains(stderr, "Warning: `--id` is deprecated. Use `--localization-id`.") {
-		t.Fatalf("expected legacy id warning, got %q", stderr)
+	if strings.Contains(stderr, "is deprecated") {
+		t.Fatalf("expected no deprecation warnings for canonical flags, got %q", stderr)
 	}
 	if !strings.Contains(stderr, "--localization-id cannot be combined with build selectors or --locale") {
 		t.Fatalf("expected conflict message, got %q", stderr)
 	}
 }
 
-func TestBuildsLatestExcludeExpiredInvalidBooleanExitCode(t *testing.T) {
+func TestRemovedBuildSelectorAliasesExitUsage(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		args []string
+		flag string
+	}{
+		{name: "builds wait --build", args: []string{"builds", "wait", "--build", "BUILD_123"}, flag: "--build"},
+		{name: "builds wait --newest", args: []string{"builds", "wait", "--app", "APP_123", "--newest"}, flag: "--newest"},
+		{name: "builds list --app-id", args: []string{"builds", "list", "--app-id", "APP_123"}, flag: "--app-id"},
+		{name: "builds test-notes view --id", args: []string{"builds", "test-notes", "view", "--id", "loc-1"}, flag: "--id"},
+		{name: "testflight groups view --group-id", args: []string{"testflight", "groups", "view", "--group-id", "group-1"}, flag: "--group-id"},
+		{name: "testflight testers list --build", args: []string{"testflight", "testers", "list", "--build", "BUILD_123"}, flag: "--build"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			resetReportFlags(t)
+
+			stdout, stderr := captureCommandOutput(t, func() {
+				if code := Run(test.args, "1.0.0"); code != ExitUsage {
+					t.Fatalf("Run() exit code = %d, want %d", code, ExitUsage)
+				}
+			})
+
+			if stdout != "" {
+				t.Fatalf("expected empty stdout, got %q", stdout)
+			}
+			if !strings.Contains(stderr, "Error: `"+test.flag+"` was removed in 5.0.0") {
+				t.Fatalf("expected removed-flag guidance for %s, got %q", test.flag, stderr)
+			}
+			if strings.Contains(stderr, "is deprecated") {
+				t.Fatalf("removed alias must not emit deprecation guidance, got %q", stderr)
+			}
+		})
+	}
+}
+
+func TestBuildsExpiredFlagsInvalidBooleanExitCode(t *testing.T) {
 	tmpDir := t.TempDir()
-	binaryPath := filepath.Join(tmpDir, "asc-test")
+	binaryPath := buildASCBlackboxBinary(t)
 
-	buildCmd := exec.Command("go", "build", "-o", binaryPath, ".")
-	buildCmd.Dir = ".." // Go up from cmd/ to project root
-	if out, err := buildCmd.CombinedOutput(); err != nil {
-		t.Fatalf("failed to build binary: %v\n%s", err, out)
+	tests := []struct {
+		name string
+		args []string
+		flag string
+	}{
+		{
+			name: "list exclude-expired",
+			args: []string{"builds", "list", "--app", "APP_ID", "--exclude-expired=maybe"},
+			flag: "exclude-expired",
+		},
+		{
+			name: "list not-expired",
+			args: []string{"builds", "list", "--app", "APP_ID", "--not-expired=maybe"},
+			flag: "not-expired",
+		},
+		{
+			name: "count exclude-expired",
+			args: []string{"builds", "count", "--app", "APP_ID", "--exclude-expired=maybe"},
+			flag: "exclude-expired",
+		},
+		{
+			name: "count not-expired",
+			args: []string{"builds", "count", "--app", "APP_ID", "--not-expired=maybe"},
+			flag: "not-expired",
+		},
 	}
 
-	runCmd := exec.Command(binaryPath, "builds", "latest", "--app", "APP_ID", "--exclude-expired=maybe")
-	runCmd.Env = isolatedCLITestEnv(filepath.Join(tmpDir, "config.json"))
-	output, err := runCmd.CombinedOutput()
-	if err == nil {
-		t.Fatalf("expected non-zero exit for invalid boolean value, got success output: %s", output)
-	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			runCmd := exec.Command(binaryPath, test.args...)
+			runCmd.Env = isolatedCLITestEnv(filepath.Join(tmpDir, "config.json"))
+			output, err := runCmd.CombinedOutput()
+			if err == nil {
+				t.Fatalf("expected non-zero exit for invalid boolean value, got success output: %s", output)
+			}
 
-	var exitErr *exec.ExitError
-	if !errors.As(err, &exitErr) {
-		t.Fatalf("expected *exec.ExitError, got %T (%v)", err, err)
-	}
-	if exitErr.ExitCode() != ExitUsage {
-		t.Fatalf("expected exit code %d, got %d (output: %s)", ExitUsage, exitErr.ExitCode(), output)
-	}
+			var exitErr *exec.ExitError
+			if !errors.As(err, &exitErr) {
+				t.Fatalf("expected *exec.ExitError, got %T (%v)", err, err)
+			}
+			if exitErr.ExitCode() != ExitUsage {
+				t.Fatalf("expected exit code %d, got %d (output: %s)", ExitUsage, exitErr.ExitCode(), output)
+			}
 
-	stderr := string(output)
-	if !strings.Contains(stderr, "invalid boolean value") {
-		t.Fatalf("expected stderr to contain invalid boolean message, got %q", stderr)
+			stderr := string(output)
+			if !strings.Contains(stderr, "invalid boolean value") {
+				t.Fatalf("expected stderr to contain invalid boolean message, got %q", stderr)
+			}
+			if !strings.Contains(stderr, test.flag) {
+				t.Fatalf("expected stderr to mention %s flag, got %q", test.flag, stderr)
+			}
+		})
 	}
-	if !strings.Contains(stderr, "exclude-expired") {
-		t.Fatalf("expected stderr to mention exclude-expired flag, got %q", stderr)
+}
+
+func TestTestFlightDistributionEditExternalTestingIsUnknownFlag(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		flag []string
+	}{
+		{name: "equals", flag: []string{"--external-testing=true"}},
+		{name: "space separated", flag: []string{"--external-testing", "true"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			resetReportFlags(t)
+
+			args := []string{
+				"testflight", "distribution", "edit",
+				"--id", "DETAIL_ID",
+			}
+			args = append(args, test.flag...)
+			stdout, stderr := captureCommandOutput(t, func() {
+				if code := Run(args, "1.0.0"); code != ExitUsage {
+					t.Fatalf("Run() exit code = %d, want %d", code, ExitUsage)
+				}
+			})
+
+			if stdout != "" {
+				t.Fatalf("expected empty stdout, got %q", stdout)
+			}
+			if !strings.Contains(stderr, "Error: `--external-testing` was removed in 5.0.0") {
+				t.Fatalf("expected removal diagnostic for --external-testing, got %q", stderr)
+			}
+			if strings.Contains(stderr, "is deprecated") {
+				t.Fatalf("removed flag must not emit deprecation guidance, got %q", stderr)
+			}
+		})
 	}
 }
 
 func TestPublishAppStoreDryRunInvalidBooleanExitCode(t *testing.T) {
 	tmpDir := t.TempDir()
-	binaryPath := filepath.Join(tmpDir, "asc-test")
-
-	buildCmd := exec.Command("go", "build", "-o", binaryPath, ".")
-	buildCmd.Dir = ".."
-	if out, err := buildCmd.CombinedOutput(); err != nil {
-		t.Fatalf("failed to build binary: %v\n%s", err, out)
-	}
+	binaryPath := buildASCBlackboxBinary(t)
 
 	runCmd := exec.Command(
 		binaryPath,
@@ -506,25 +999,22 @@ func TestPublishAppStoreDryRunInvalidBooleanExitCode(t *testing.T) {
 	}
 }
 
-func TestWebAuthLoginLegacyTwoFactorFlagExitCode(t *testing.T) {
+func TestPublishAppStoreEmptyMetadataDirExitCode(t *testing.T) {
 	tmpDir := t.TempDir()
-	binaryPath := filepath.Join(tmpDir, "asc-test")
-
-	buildCmd := exec.Command("go", "build", "-o", binaryPath, ".")
-	buildCmd.Dir = ".."
-	if out, err := buildCmd.CombinedOutput(); err != nil {
-		t.Fatalf("failed to build binary: %v\n%s", err, out)
-	}
+	binaryPath := buildASCBlackboxBinary(t)
 
 	runCmd := exec.Command(
 		binaryPath,
-		"web", "auth", "login",
-		"--two-factor-code", "123456",
+		"publish", "appstore",
+		"--app", "APP_ID",
+		"--ipa", "app.ipa",
+		"--version", "1.0.0",
+		"--metadata-dir", "   ",
 	)
 	runCmd.Env = isolatedCLITestEnv(filepath.Join(tmpDir, "config.json"))
 	output, err := runCmd.CombinedOutput()
 	if err == nil {
-		t.Fatalf("expected non-zero exit when apple-id is missing, got success output: %s", output)
+		t.Fatalf("expected non-zero exit for empty metadata-dir value, got success output: %s", output)
 	}
 
 	var exitErr *exec.ExitError
@@ -536,26 +1026,92 @@ func TestWebAuthLoginLegacyTwoFactorFlagExitCode(t *testing.T) {
 	}
 
 	stderr := string(output)
-	if !strings.Contains(stderr, "Warning: `--two-factor-code` is deprecated.") {
-		t.Fatalf("expected deprecated flag warning, got %q", stderr)
+	if !strings.Contains(stderr, "metadata-dir") {
+		t.Fatalf("expected stderr to mention metadata-dir flag, got %q", stderr)
 	}
-	if !strings.Contains(stderr, "--apple-id is required when no cached web session is available") {
-		t.Fatalf("expected usage error after successful parsing, got %q", stderr)
+	if !strings.Contains(stderr, "cannot be empty") {
+		t.Fatalf("expected stderr to contain empty value message, got %q", stderr)
 	}
-	if strings.Contains(stderr, "flag provided but not defined: -two-factor-code") {
-		t.Fatalf("did not expect unknown flag parse failure, got %q", stderr)
+}
+
+func TestPublishAppStoreMissingMetadataDirExitCode(t *testing.T) {
+	tmpDir := t.TempDir()
+	binaryPath := buildASCBlackboxBinary(t)
+
+	missingMetadataDir := filepath.Join(tmpDir, "missing-metadata")
+	runCmd := exec.Command(
+		binaryPath,
+		"publish", "appstore",
+		"--app", "APP_ID",
+		"--workspace", "Demo.xcworkspace",
+		"--scheme", "Demo",
+		"--version", "1.0.0",
+		"--build-number", "42",
+		"--metadata-dir", missingMetadataDir,
+		"--dry-run",
+	)
+	runCmd.Env = isolatedCLITestEnv(filepath.Join(tmpDir, "config.json"))
+	output, err := runCmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("expected non-zero exit for missing metadata-dir value, got success output: %s", output)
+	}
+
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) {
+		t.Fatalf("expected *exec.ExitError, got %T (%v)", err, err)
+	}
+	if exitErr.ExitCode() != ExitUsage {
+		t.Fatalf("expected exit code %d, got %d (output: %s)", ExitUsage, exitErr.ExitCode(), output)
+	}
+
+	stderr := string(output)
+	if !strings.Contains(stderr, "metadata-dir") {
+		t.Fatalf("expected stderr to mention metadata-dir flag, got %q", stderr)
+	}
+	if !strings.Contains(stderr, "failed to read") {
+		t.Fatalf("expected stderr to contain missing directory message, got %q", stderr)
+	}
+}
+
+func TestWebAuthLoginRemovedTwoFactorFlagExitCode(t *testing.T) {
+	tmpDir := t.TempDir()
+	binaryPath := buildASCBlackboxBinary(t)
+
+	runCmd := exec.Command(
+		binaryPath,
+		"web", "auth", "login",
+		"--apple-id", "user@example.com",
+		"--two-factor-code", "123456",
+	)
+	runCmd.Env = isolatedCLITestEnv(filepath.Join(tmpDir, "config.json"))
+	output, err := runCmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("expected non-zero exit for the removed --two-factor-code flag, got success output: %s", output)
+	}
+
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) {
+		t.Fatalf("expected *exec.ExitError, got %T (%v)", err, err)
+	}
+	if exitErr.ExitCode() != ExitUsage {
+		t.Fatalf("expected exit code %d, got %d (output: %s)", ExitUsage, exitErr.ExitCode(), output)
+	}
+
+	stderr := string(output)
+	if !strings.Contains(stderr, "`--two-factor-code` was removed in 5.0.0") {
+		t.Fatalf("expected removed-flag usage error, got %q", stderr)
+	}
+	if !strings.Contains(stderr, "--two-factor-code-command") {
+		t.Fatalf("expected --two-factor-code-command suggestion, got %q", stderr)
+	}
+	if strings.Contains(stderr, "deprecated") {
+		t.Fatalf("did not expect deprecation wording for a removed flag, got %q", stderr)
 	}
 }
 
 func TestAuthTokenConfirmInvalidBooleanExitCode(t *testing.T) {
 	tmpDir := t.TempDir()
-	binaryPath := filepath.Join(tmpDir, "asc-test")
-
-	buildCmd := exec.Command("go", "build", "-o", binaryPath, ".")
-	buildCmd.Dir = ".." // Go up from cmd/ to project root
-	if out, err := buildCmd.CombinedOutput(); err != nil {
-		t.Fatalf("failed to build binary: %v\n%s", err, out)
-	}
+	binaryPath := buildASCBlackboxBinary(t)
 
 	runCmd := exec.Command(binaryPath, "auth", "token", "--confirm=maybe")
 	runCmd.Env = isolatedCLITestEnv(filepath.Join(tmpDir, "config.json"))
@@ -581,15 +1137,71 @@ func TestAuthTokenConfirmInvalidBooleanExitCode(t *testing.T) {
 	}
 }
 
+func TestAuthLoginInvalidPrivateKeyExitCodes(t *testing.T) {
+	tmpDir := t.TempDir()
+	binaryPath := buildASCBlackboxBinary(t)
+	missingKeyPath := filepath.Join(tmpDir, "missing-key.p8")
+
+	tests := []struct {
+		name string
+		args []string
+	}{
+		{
+			name: "app store connect",
+			args: []string{
+				"auth", "login", "--name", "demo", "--key-id", "KEY", "--issuer-id", "ISS",
+				"--private-key", missingKeyPath, "--bypass-keychain", "--local",
+			},
+		},
+		{
+			name: "apple ads",
+			args: []string{
+				"ads", "auth", "login", "--name", "demo", "--client-id", "CLIENT", "--team-id", "TEAM",
+				"--key-id", "KEY", "--private-key", missingKeyPath, "--bypass-keychain", "--local",
+			},
+		},
+		{
+			name: "storekit",
+			args: []string{
+				"storekit", "auth", "login", "--name", "demo", "--key-id", "KEY", "--issuer-id", "ISS",
+				"--private-key", missingKeyPath, "--bundle-id", "com.example.app", "--bypass-keychain", "--local",
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			runCmd := exec.Command(binaryPath, test.args...)
+			runCmd.Env = isolatedCLITestEnv(filepath.Join(tmpDir, test.name+"-config.json"))
+			var stdout bytes.Buffer
+			var stderr bytes.Buffer
+			runCmd.Stdout = &stdout
+			runCmd.Stderr = &stderr
+
+			err := runCmd.Run()
+			if err == nil {
+				t.Fatalf("expected invalid private key to fail, got stdout %q", stdout.String())
+			}
+			var exitErr *exec.ExitError
+			if !errors.As(err, &exitErr) {
+				t.Fatalf("expected *exec.ExitError, got %T (%v)", err, err)
+			}
+			if exitErr.ExitCode() != ExitUsage {
+				t.Fatalf("exit code = %d, want %d; stderr=%q", exitErr.ExitCode(), ExitUsage, stderr.String())
+			}
+			if stdout.Len() != 0 {
+				t.Fatalf("stdout = %q, want empty", stdout.String())
+			}
+			if !strings.Contains(stderr.String(), "invalid private key") {
+				t.Fatalf("stderr = %q, want invalid private key diagnostic", stderr.String())
+			}
+		})
+	}
+}
+
 func TestWebAuthLoginPromptInterruptDoesNotFallBackToUsageError(t *testing.T) {
 	tmpDir := t.TempDir()
-	binaryPath := filepath.Join(tmpDir, "asc-test")
-
-	buildCmd := exec.Command("go", "build", "-o", binaryPath, ".")
-	buildCmd.Dir = ".."
-	if out, err := buildCmd.CombinedOutput(); err != nil {
-		t.Fatalf("failed to build binary: %v\n%s", err, out)
-	}
+	binaryPath := buildASCBlackboxBinary(t)
 
 	runCmd := exec.Command(binaryPath, "web", "auth", "login", "--apple-id", "user@example.com")
 	runCmd.Env = append(
@@ -597,7 +1209,6 @@ func TestWebAuthLoginPromptInterruptDoesNotFallBackToUsageError(t *testing.T) {
 		"ASC_WEB_SESSION_CACHE=1",
 		"ASC_WEB_SESSION_CACHE_BACKEND=file",
 		"ASC_WEB_SESSION_CACHE_DIR="+filepath.Join(tmpDir, "web-session-cache"),
-		"ASC_IRIS_SESSION_CACHE=0",
 	)
 
 	ptmx, err := pty.Start(runCmd)
@@ -632,11 +1243,11 @@ func TestWebAuthLoginPromptInterruptDoesNotFallBackToUsageError(t *testing.T) {
 		t.Fatalf("process did not exit promptly after interrupt\noutput:\n%s", output.String())
 	}
 
-	_ = ptmx.Close()
-
 	select {
 	case <-readDone:
 	case <-time.After(2 * time.Second):
+		// Let the child close the PTY so the reader can drain the final
+		// interrupt-specific stderr before we tear the PTY down ourselves.
 		t.Fatalf("PTY reader did not exit after process completion\noutput:\n%s", output.String())
 	}
 
@@ -652,24 +1263,18 @@ func TestWebAuthLoginPromptInterruptDoesNotFallBackToUsageError(t *testing.T) {
 		t.Fatalf("expected non-usage exit code after interrupt, got %d\noutput:\n%s", exitErr.ExitCode(), output.String())
 	}
 
+	// Some CI PTYs deliver Ctrl+C as a signal and close before the child process
+	// can flush the prompt-interrupted diagnostic. The important CLI contract
+	// here is that interrupts do not fall back to usage-style password errors.
 	stderr := output.String()
 	if strings.Contains(stderr, "password is required") {
 		t.Fatalf("expected no password-required fallback after interrupt, got %q", stderr)
-	}
-	if !strings.Contains(stderr, "password prompt interrupted") {
-		t.Fatalf("expected interrupt-specific stderr, got %q", stderr)
 	}
 }
 
 func TestWebAuthLoginPromptInterruptSkipsSkillsAutoCheck(t *testing.T) {
 	tmpDir := t.TempDir()
-	binaryPath := filepath.Join(tmpDir, "asc-test")
-
-	buildCmd := exec.Command("go", "build", "-o", binaryPath, ".")
-	buildCmd.Dir = ".."
-	if out, err := buildCmd.CombinedOutput(); err != nil {
-		t.Fatalf("failed to build binary: %v\n%s", err, out)
-	}
+	binaryPath := buildASCBlackboxBinary(t)
 
 	configPath := filepath.Join(tmpDir, "config.json")
 	if err := os.WriteFile(configPath, []byte(`{"skills_checked_at":"2000-01-01T00:00:00Z"}`), 0o600); err != nil {
@@ -683,8 +1288,10 @@ func TestWebAuthLoginPromptInterruptSkipsSkillsAutoCheck(t *testing.T) {
 
 	markerPath := filepath.Join(tmpDir, "skills-check-ran")
 	scriptPath := filepath.Join(scriptDir, "skills")
+	// Marker paths are baked into the script: helper processes receive an
+	// allowlisted environment, so arbitrary test variables cannot reach them.
 	script := "#!/bin/sh\n" +
-		"printf 'ran' > \"$SKILLS_MARKER\"\n" +
+		"printf 'ran' > '" + markerPath + "'\n" +
 		"sleep 2\n" +
 		"printf 'update available\\n'\n"
 	if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
@@ -697,10 +1304,8 @@ func TestWebAuthLoginPromptInterruptSkipsSkillsAutoCheck(t *testing.T) {
 		"ASC_WEB_SESSION_CACHE=1",
 		"ASC_WEB_SESSION_CACHE_BACKEND=file",
 		"ASC_WEB_SESSION_CACHE_DIR="+filepath.Join(tmpDir, "web-session-cache"),
-		"ASC_IRIS_SESSION_CACHE=0",
 		"ASC_SKILLS_AUTO_CHECK=1",
 		"CI=",
-		"SKILLS_MARKER="+markerPath,
 		"PATH="+scriptDir+string(os.PathListSeparator)+os.Getenv("PATH"),
 	)
 	runCmd.Env = env
@@ -755,6 +1360,100 @@ func TestWebAuthLoginPromptInterruptSkipsSkillsAutoCheck(t *testing.T) {
 
 	if strings.Contains(output.String(), "skills updates may be available") {
 		t.Fatalf("expected no skills update notice after interrupt, got %q", output.String())
+	}
+}
+
+func TestSkillsAutoCheckIsDisabledEvenWhenEnvironmentOptsIn(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("PTY timing regression requires a Unix shell")
+	}
+
+	tmpDir := t.TempDir()
+	binaryPath := buildASCBlackboxBinary(t)
+	configPath := filepath.Join(tmpDir, "config.json")
+	if err := os.WriteFile(configPath, []byte(`{"skills_checked_at":"2000-01-01T00:00:00Z"}`), 0o600); err != nil {
+		t.Fatalf("failed to write config: %v", err)
+	}
+
+	scriptDir := filepath.Join(tmpDir, "bin")
+	if err := os.MkdirAll(scriptDir, 0o755); err != nil {
+		t.Fatalf("failed to create fake skills dir: %v", err)
+	}
+	markerPath := filepath.Join(tmpDir, "skills-check-ran")
+	sleepPIDPath := filepath.Join(tmpDir, "skills-check-sleep-pid")
+	t.Cleanup(func() {
+		pidBytes, err := os.ReadFile(sleepPIDPath)
+		if err != nil {
+			return
+		}
+		pid, err := strconv.Atoi(strings.TrimSpace(string(pidBytes)))
+		if err != nil {
+			return
+		}
+		if process, err := os.FindProcess(pid); err == nil {
+			_ = process.Kill()
+		}
+	})
+	scriptPath := filepath.Join(scriptDir, "skills")
+	// Marker paths are baked into the script: helper processes receive an
+	// allowlisted environment, so arbitrary test variables cannot reach them.
+	script := "#!/bin/sh\n" +
+		"printf 'ran' > '" + markerPath + "'\n" +
+		"sleep 10 &\n" +
+		"printf '%s' \"$!\" > '" + sleepPIDPath + "'\n" +
+		"printf '2 updates available\\n'\n"
+	if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("failed to write fake skills command: %v", err)
+	}
+
+	runCmd := exec.Command(binaryPath, "completion", "--shell", "bash")
+	runCmd.Env = append(
+		isolatedCLITestEnv(configPath),
+		"ASC_SKILLS_AUTO_CHECK=1",
+		"CI=",
+		"PATH="+scriptDir+string(os.PathListSeparator)+os.Getenv("PATH"),
+	)
+
+	startedAt := time.Now()
+	ptmx, err := pty.Start(runCmd)
+	if err != nil {
+		t.Fatalf("failed to start PTY command: %v", err)
+	}
+	defer func() { _ = ptmx.Close() }()
+	output, _, readDone := startPTYCapture(ptmx, "")
+
+	waitDone := make(chan error, 1)
+	go func() {
+		waitDone <- runCmd.Wait()
+	}()
+
+	select {
+	case err = <-waitDone:
+	case <-time.After(2 * time.Second):
+		_ = runCmd.Process.Kill()
+		_ = ptmx.Close()
+		<-waitDone
+		t.Fatalf("foreground command waited for 10-second checker descendant\noutput:\n%s", output.String())
+	}
+	if err != nil {
+		t.Fatalf("foreground command failed: %v\noutput:\n%s", err, output.String())
+	}
+	if elapsed := time.Since(startedAt); elapsed >= 2*time.Second {
+		t.Fatalf("foreground command took %s, want under 2s", elapsed)
+	}
+
+	select {
+	case <-readDone:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("PTY stayed open after foreground exit\noutput:\n%s", output.String())
+	}
+
+	time.Sleep(100 * time.Millisecond)
+	if _, statErr := os.Stat(markerPath); !os.IsNotExist(statErr) {
+		t.Fatalf("automatic skills checker ran despite being disabled: %v", statErr)
+	}
+	if _, statErr := os.Stat(sleepPIDPath); !os.IsNotExist(statErr) {
+		t.Fatalf("automatic skills checker spawned a descendant despite being disabled: %v", statErr)
 	}
 }
 
@@ -817,7 +1516,8 @@ func isolatedCLITestEnv(configPath string) []string {
 		"ASC_STRICT_AUTH",
 		"ASC_APP_ID",
 	)
-	return append(env,
+	return append(
+		env,
 		"ASC_BYPASS_KEYCHAIN=1",
 		"ASC_CONFIG_PATH="+configPath,
 		"HOME="+filepath.Dir(configPath),

@@ -90,6 +90,7 @@ asc xcode-cloud workflows view --id "WORKFLOW_ID"
 asc xcode-cloud workflows repository --id "WORKFLOW_ID"
 asc xcode-cloud workflows create --file ./workflow.json
 asc xcode-cloud workflows update --id "WORKFLOW_ID" --file ./workflow.json
+asc xcode-cloud workflows duplicate --id "WORKFLOW_ID" --name "Nightly"
 asc xcode-cloud workflows delete --id "WORKFLOW_ID" --confirm
 ```
 
@@ -100,6 +101,7 @@ asc xcode-cloud workflows delete --id "WORKFLOW_ID" --confirm
 * `repository` - Get the repository for a workflow
 * `create` - Create a workflow
 * `update` - Update a workflow
+* `duplicate` - Duplicate a workflow under a new name
 * `delete` - Delete a workflow
 
 **Flags (list):**
@@ -124,6 +126,24 @@ asc xcode-cloud workflows delete --id "WORKFLOW_ID" --confirm
 * `--output` - Output format: `json`, `table`, `markdown`
 * `--pretty` - Pretty-print JSON output
 
+**Flags (duplicate):**
+
+* `--id` - Source workflow ID to copy (required)
+* `--name` - Name for the new workflow (required)
+* `--description` - Description for the new workflow (default: copied from the source workflow)
+* `--enabled` - Enable the new workflow immediately; the copy is created disabled by default
+* `--output` - Output format: `json`, `table`, `markdown`
+* `--pretty` - Pretty-print JSON output
+
+`duplicate` reads the source workflow with
+`GET /v1/ciWorkflows/{id}?include=product,repository,xcodeVersion,macOsVersion` and
+creates the copy with `POST /v1/ciWorkflows` in the same product, repository, Xcode
+version, and macOS version. The copy is created disabled and unlocked so it can be
+reviewed and edited before it starts building. TestFlight post-actions and workflow
+environment variables are not part of the public workflow schema, so they are not
+copied; configure those with `asc web xcode-cloud workflows edit` and
+`asc web xcode-cloud env-vars`.
+
 ### xcode-cloud build-runs
 
 Manage Xcode Cloud build runs:
@@ -146,6 +166,63 @@ asc xcode-cloud build-runs builds --run-id "BUILD_RUN_ID"
 * `--limit` - Maximum results per page (1-200)
 * `--next` - Fetch next page using a links.next URL
 * `--paginate` - Automatically fetch all pages
+* `--output` - Output format: `json`, `table`, `markdown`
+* `--pretty` - Pretty-print JSON output
+
+### xcode-cloud products
+
+List and manage Xcode Cloud products:
+
+```bash  theme={null}
+asc xcode-cloud products
+asc xcode-cloud products list --app "APP_ID"
+asc xcode-cloud products list --product-type APP --include app --app-fields name,bundleId
+asc xcode-cloud products list --fields "name,productType" --output json
+asc xcode-cloud products view --id "PRODUCT_ID"
+```
+
+**Flags (list):**
+
+* `--app` - App Store Connect app ID, bundle ID, or exact app name (or `ASC_APP_ID`)
+* `--product-type` - Filter by `APP` or `FRAMEWORK`
+* `--fields` - Sparse fields for CI products
+* `--app-fields` - Sparse fields for included apps; requires `--include app`
+* `--bundle-id-fields` - Sparse fields for included bundle IDs; requires `--include bundleId`
+* `--scm-repository-fields` - Sparse fields for included SCM repositories; requires `--include primaryRepositories`
+* `--include` - Include `app`, `bundleId`, or `primaryRepositories`
+* `--primary-repositories-limit` - Maximum included primary repositories (1-50); requires `--include primaryRepositories`
+* `--limit` - Maximum results per page (1-200)
+* `--next` - Fetch next page using a links.next URL
+* `--paginate` - Automatically fetch all pages
+* `--output` - Output format: `json`, `table`, `markdown`
+* `--pretty` - Pretty-print JSON output
+
+Query-shaping flags cannot be combined with `--next`; Apple's continuation URL
+already contains the complete request query.
+
+### xcode-cloud products app
+
+Get the app related to an Xcode Cloud product, with optional sparse fields
+on included resources. The legacy AppInfo selector below is forwarded with
+a deprecation warning because API 4.5 removed `AppInfo.kidsAgeBand`:
+
+```bash  theme={null}
+asc xcode-cloud products app \
+  --id "PRODUCT_ID" \
+  --app-info-fields kidsAgeBand \
+  --iap-fields versions \
+  --subscription-group-fields versions
+```
+
+* `--id` - Xcode Cloud product ID (required)
+* `--app-info-fields` - Legacy sparse fields for included app info: `kidsAgeBand`.
+  API 4.5 removed this property; the CLI still forwards it with a stderr
+  deprecation warning and automatically includes `appInfos`. Use
+  `asc age-rating view` for current age-rating data
+* `--iap-fields` - Sparse fields for included in-app purchases: `versions`;
+  automatically includes `inAppPurchases`
+* `--subscription-group-fields` - Sparse fields for included subscription
+  groups: `versions`; automatically includes `subscriptionGroups`
 * `--output` - Output format: `json`, `table`, `markdown`
 * `--pretty` - Pretty-print JSON output
 

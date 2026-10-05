@@ -8,19 +8,24 @@ import (
 	"strings"
 )
 
-const defaultBaseURL = "https://itunes.apple.com"
+const (
+	defaultBaseURL                 = "https://itunes.apple.com"
+	defaultStorefrontSearchBaseURL = "https://search.itunes.apple.com"
+)
 
 // Client is an iTunes public API client.
 type Client struct {
-	HTTPClient *http.Client
-	BaseURL    string
+	HTTPClient              *http.Client
+	BaseURL                 string
+	StorefrontSearchBaseURL string
 }
 
 // NewClient creates a new iTunes API client.
 func NewClient() *Client {
 	return &Client{
-		HTTPClient: http.DefaultClient,
-		BaseURL:    defaultBaseURL,
+		HTTPClient:              http.DefaultClient,
+		BaseURL:                 defaultBaseURL,
+		StorefrontSearchBaseURL: defaultStorefrontSearchBaseURL,
 	}
 }
 
@@ -42,7 +47,18 @@ func (c *Client) baseURL() string {
 	return strings.TrimRight(base, "/")
 }
 
-func (c *Client) newRequest(ctx context.Context, method, path string, query url.Values) (*http.Request, error) {
+func (c *Client) storefrontSearchBaseURL() string {
+	if c == nil {
+		return defaultStorefrontSearchBaseURL
+	}
+	base := strings.TrimSpace(c.StorefrontSearchBaseURL)
+	if base == "" {
+		return defaultStorefrontSearchBaseURL
+	}
+	return strings.TrimRight(base, "/")
+}
+
+func (c *Client) newRequest(ctx context.Context, path string, query url.Values) (*http.Request, error) {
 	base, err := url.Parse(c.baseURL())
 	if err != nil {
 		return nil, fmt.Errorf("invalid iTunes base URL: %w", err)
@@ -54,7 +70,7 @@ func (c *Client) newRequest(ctx context.Context, method, path string, query url.
 		reqURL.RawQuery = query.Encode()
 	}
 
-	req, err := http.NewRequestWithContext(ctx, method, reqURL.String(), nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL.String(), nil)
 	if err != nil {
 		return nil, err
 	}

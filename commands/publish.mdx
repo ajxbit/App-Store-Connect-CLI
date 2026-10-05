@@ -19,9 +19,11 @@ Use these top-level workflows deliberately:
 * `asc publish appstore` - canonical high-level App Store publish path
 * `asc release stage` - prepare an App Store version without submitting it
 
-In 1.0, the deprecated `asc release run` path was removed. Use
-[Migrate to 1.0](/migrate-to-1-0) if you still have older automation that
-expects a single deprecated release command.
+In 1.0, the deprecated `asc release run` path was removed.
+
+`--ipa --platform MAC_OS` remains available for compatibility but is
+deprecated. Migrate macOS publishing to `--pkg` with explicit `--version` and
+`--build-number` values before the next major release.
 
 ## Workflows
 
@@ -38,9 +40,40 @@ asc publish testflight \
 
 This workflow:
 
-1. Uploads the build
-2. Waits for processing
-3. Distributes to specified beta groups
+1. Uploads the build and resolves its App Store Connect build record
+2. Distributes to specified beta groups
+
+Add `--wait` to wait for build processing before distribution.
+
+For a macOS PKG, provide the version and build number explicitly. The platform
+defaults to `MAC_OS` when `--pkg` is used:
+
+```bash  theme={null}
+asc publish testflight \
+  --app APP_ID \
+  --pkg /path/to/MacApp.pkg \
+  --version 1.2.0 \
+  --build-number 42 \
+  --group "External Testers"
+```
+
+For archive/export/upload/wait without distribution, use the upload-only mode.
+It returns the uploaded build ID without requiring or
+modifying a beta group:
+
+```bash  theme={null}
+asc publish testflight \
+  --app APP_ID \
+  --ipa /path/to/MyApp.ipa \
+  --upload-only \
+  --wait \
+  --output json
+```
+
+`--upload-only` cannot be combined with `--group`, `--notify`, `--submit`,
+`--confirm`, `--test-notes`, `--locale`, or `--build-id`. Use the returned
+`buildId` with `asc builds wait`, then `asc builds add-groups`, in later
+resumable steps.
 
 ### App Store workflow
 
@@ -57,11 +90,24 @@ asc publish appstore \
 
 This workflow:
 
-1. Uploads the IPA
+1. Uploads the IPA or PKG
 2. Finds or creates the matching App Store version
 3. Attaches the processed build
 4. Optionally submits for review with `--submit`
 5. Prints the resulting build/version/submission identifiers
+
+Use `--pkg` for a prebuilt macOS installer. PKG uploads require explicit
+`--version` and `--build-number` values and use `MAC_OS` automatically:
+
+```bash  theme={null}
+asc publish appstore \
+  --app APP_ID \
+  --pkg /path/to/MacApp.pkg \
+  --version 1.2.0 \
+  --build-number 42 \
+  --submit \
+  --confirm
+```
 
 ## TestFlight flags
 
@@ -69,11 +115,15 @@ This workflow:
   App ID for the build
 </ParamField>
 
-<ParamField path="--file" type="string" required>
-  Path to IPA file
+<ParamField path="--ipa" type="string">
+  Path to an iOS, tvOS, or visionOS IPA file
 </ParamField>
 
-<ParamField path="--groups" type="string">
+<ParamField path="--pkg" type="string">
+  Path to a macOS PKG file
+</ParamField>
+
+<ParamField path="--group" type="string">
   Comma-separated beta group names or IDs
 
   Example: `"External Testers,Internal Team"`
@@ -82,7 +132,11 @@ This workflow:
 <ParamField path="--wait" type="boolean">
   Wait for build processing to complete
 
-  Default: `true`
+  Default: `false`
+</ParamField>
+
+<ParamField path="--upload-only" type="boolean">
+  Upload and optionally wait for the build without group distribution or beta review
 </ParamField>
 
 ## 1.0 migration note
@@ -113,31 +167,69 @@ asc publish appstore \
   --confirm
 ```
 
+### Publish a macOS PKG
+
+```bash  theme={null}
+asc publish appstore \
+  --app 123456789 \
+  --pkg build/MacApp.pkg \
+  --version 1.2.0 \
+  --build-number 42
+```
+
 ### CI/CD integration
 
 ```yaml  theme={null}
 # GitHub Actions
 - name: Publish to TestFlight
+  env:
+    ASC_APP_ID: ${{ secrets.APP_ID }}
   run: |
     asc publish testflight \
-      --app ${{ secrets.APP_ID }} \
+      --app "$ASC_APP_ID" \
       --ipa MyApp.ipa \
       --group "External Testers"
 ```
 
 ## Output
 
-```
-Uploading build...
-Build uploaded successfully
-Waiting for processing...
-Build processed (VALID)
-Distributing to beta groups...
-Build distributed to External Testers
+Upload-only JSON can be extracted by workflows:
 
-Publish complete!
-Build ID: build-id-here
+```json  theme={null}
+{
+  "mode": "ipa_upload",
+  "buildId": "BUILD_ID",
+  "buildVersion": "1.2.3",
+  "buildNumber": "42",
+  "uploaded": true,
+  "uploadOnly": true,
+  "processingState": "VALID"
+}
 ```
+
+PKG uploads report `"mode": "pkg_upload"`.
+
+If `--wait` fails after the build record is known, the command still prints
+canonical partial structured output and exits nonzero:
+
+```json  theme={null}
+{
+  "status": "partial",
+  "failureStage": "build_processing",
+  "failure": "publish testflight: processing failed",
+  "completedStages": ["upload"],
+  "mode": "ipa_upload",
+  "buildId": "BUILD_ID",
+  "buildVersion": "1.2.3",
+  "buildNumber": "42",
+  "uploaded": true,
+  "uploadOnly": true,
+  "processingState": "FAILED"
+}
+```
+
+Resume distribution with the returned `buildId` instead of uploading the
+binary again.
 
 ## Error handling
 

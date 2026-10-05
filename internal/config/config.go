@@ -4,11 +4,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/rootfs"
 )
 
 const (
@@ -17,6 +20,37 @@ const (
 	configPathEnvVar = "ASC_CONFIG_PATH"
 	maxConfigRetries = 30
 )
+
+const (
+	// CredentialKeyTypeTeam is the default App Store Connect API key type.
+	CredentialKeyTypeTeam = "team"
+	// CredentialKeyTypeIndividual signs JWTs with sub:"user" and no issuer.
+	CredentialKeyTypeIndividual = "individual"
+)
+
+// NormalizeCredentialKeyType returns the canonical credential key type.
+func NormalizeCredentialKeyType(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	if value == "" {
+		return CredentialKeyTypeTeam
+	}
+	return value
+}
+
+// IsValidCredentialKeyType reports whether value names a supported key type.
+func IsValidCredentialKeyType(value string) bool {
+	switch NormalizeCredentialKeyType(value) {
+	case CredentialKeyTypeTeam, CredentialKeyTypeIndividual:
+		return true
+	default:
+		return false
+	}
+}
+
+// IsIndividualCredentialKeyType reports whether value names an individual key.
+func IsIndividualCredentialKeyType(value string) bool {
+	return NormalizeCredentialKeyType(value) == CredentialKeyTypeIndividual
+}
 
 // DurationValue stores a duration with its raw string representation.
 // It marshals to/from JSON as a string to preserve config compatibility.
@@ -115,6 +149,18 @@ type Credential struct {
 	KeyID          string `json:"key_id"`
 	IssuerID       string `json:"issuer_id"`
 	PrivateKeyPath string `json:"private_key_path"`
+	KeyType        string `json:"key_type,omitempty"`
+}
+
+// AdsCredential stores a named Apple Ads API credential in config.json.
+type AdsCredential struct {
+	Name           string `json:"name"`
+	ClientID       string `json:"client_id"`
+	TeamID         string `json:"team_id"`
+	KeyID          string `json:"key_id"`
+	PrivateKeyPath string `json:"private_key_path"`
+	OrgID          string `json:"org_id,omitempty"`
+	AdAccountID    string `json:"ad_account_id,omitempty"`
 }
 
 // KeychainMetadata stores non-secret metadata for keychain-backed credentials.
@@ -122,7 +168,45 @@ type KeychainMetadata struct {
 	Name       string `json:"name"`
 	KeyID      string `json:"key_id"`
 	IssuerID   string `json:"issuer_id"`
+	KeyType    string `json:"key_type,omitempty"`
 	ModifiedAt string `json:"modified_at,omitempty"`
+}
+
+// AdsKeychainMetadata stores non-secret metadata for keychain-backed Apple Ads credentials.
+type AdsKeychainMetadata struct {
+	Name        string `json:"name"`
+	ClientID    string `json:"client_id"`
+	TeamID      string `json:"team_id"`
+	KeyID       string `json:"key_id"`
+	OrgID       string `json:"org_id,omitempty"`
+	AdAccountID string `json:"ad_account_id,omitempty"`
+	ModifiedAt  string `json:"modified_at,omitempty"`
+}
+
+// AdsConfig stores Apple Ads-specific auth configuration.
+type AdsConfig struct {
+	DefaultKeyName   string                `json:"default_key_name,omitempty"`
+	Keys             []AdsCredential       `json:"keys,omitempty"`
+	KeychainMetadata []AdsKeychainMetadata `json:"keychain_metadata,omitempty"`
+	OrgID            string                `json:"org_id,omitempty"`
+	AdAccountID      string                `json:"ad_account_id,omitempty"`
+}
+
+// StoreKitCredential stores a named In-App Purchase API credential.
+// Private key material stays in the keychain; config-backed credentials store
+// only a path to the key file.
+type StoreKitCredential struct {
+	Name           string `json:"name"`
+	KeyID          string `json:"key_id"`
+	IssuerID       string `json:"issuer_id"`
+	PrivateKeyPath string `json:"private_key_path"`
+	BundleID       string `json:"bundle_id"`
+}
+
+// StoreKitConfig stores StoreKit-specific authentication configuration.
+type StoreKitConfig struct {
+	DefaultKeyName string               `json:"default_key_name,omitempty"`
+	Keys           []StoreKitCredential `json:"keys,omitempty"`
 }
 
 // Config holds the application configuration
@@ -131,6 +215,7 @@ type Config struct {
 	IssuerID         string             `json:"issuer_id"`
 	PrivateKeyPath   string             `json:"private_key_path"`
 	PrivateKeyPEM    string             `json:"-"`
+	KeyType          string             `json:"key_type,omitempty"`
 	DefaultKeyName   string             `json:"default_key_name"`
 	Keys             []Credential       `json:"keys,omitempty"`
 	KeychainMetadata []KeychainMetadata `json:"keychain_metadata,omitempty"`
@@ -149,6 +234,9 @@ type Config struct {
 	MaxDelay             string        `json:"max_delay"`
 	RetryLog             string        `json:"retry_log"`
 	Debug                string        `json:"debug"`
+
+	Ads      AdsConfig      `json:"ads,omitempty"`
+	StoreKit StoreKitConfig `json:"storekit,omitempty"`
 }
 
 // ErrNotFound is returned when the config file doesn't exist
@@ -188,6 +276,32 @@ func Path() (string, error) {
 	return resolvePath()
 }
 
+// OverridePath returns the ASC_CONFIG_PATH override and true when it is set.
+func OverridePath() (string, bool, error) {
+	envPath := strings.TrimSpace(os.Getenv(configPathEnvVar))
+	if envPath == "" {
+		return "", false, nil
+	}
+	path, err := cleanConfigPath(envPath)
+	if err != nil {
+		return "", true, err
+	}
+	return path, true, nil
+}
+
+// DefaultWritePath returns the config file that commands storing credentials
+// write to when no explicit destination is requested: ASC_CONFIG_PATH when it
+// is set, because reads then use only that file, otherwise the global config.
+// Unlike Path, it never selects a repo-local config found by the upward search;
+// callers write there only when the user asks for it explicitly.
+func DefaultWritePath() (string, error) {
+	path, ok, err := OverridePath()
+	if err != nil || ok {
+		return path, err
+	}
+	return GlobalPath()
+}
+
 // LocalPath returns the local configuration file path.
 func LocalPath() (string, error) {
 	baseDir, err := localConfigBaseDir()
@@ -198,8 +312,8 @@ func LocalPath() (string, error) {
 }
 
 func resolvePath() (string, error) {
-	if envPath := strings.TrimSpace(os.Getenv(configPathEnvVar)); envPath != "" {
-		return cleanConfigPath(envPath)
+	if path, ok, err := OverridePath(); ok || err != nil {
+		return path, err
 	}
 
 	localPath, err := findLocalConfigPath()
@@ -207,6 +321,7 @@ func resolvePath() (string, error) {
 		return "", err
 	}
 	if localPath != "" {
+		warnIfAccountHomeLocalConfig(localPath)
 		return localPath, nil
 	}
 
@@ -308,12 +423,20 @@ func LoadAt(path string) (*Config, error) {
 		return nil, fmt.Errorf("failed to read config: empty path")
 	}
 
-	data, err := os.ReadFile(path)
+	file, err := rootfs.OpenFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, ErrNotFound
 		}
 		return nil, fmt.Errorf("failed to read config: %w", err)
+	}
+	data, readErr := io.ReadAll(file)
+	closeErr := file.Close()
+	if readErr != nil {
+		return nil, fmt.Errorf("failed to read config: %w", readErr)
+	}
+	if closeErr != nil {
+		return nil, fmt.Errorf("failed to close config: %w", closeErr)
 	}
 
 	var cfg Config

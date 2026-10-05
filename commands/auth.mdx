@@ -6,20 +6,23 @@
 
 Authentication commands manage your App Store Connect API credentials. Credentials are stored securely in the system keychain when available, with a config file fallback.
 
-## Authentication Resolution
+## Authentication resolution
 
-Credentials are resolved in this order:
+Resolution depends on whether a profile is selected, whether environment credentials are complete, and whether keychain access is bypassed. See the [credential resolution matrix](/authentication#credential-resolution) for the authoritative behavior.
 
-1. Selected profile (keychain or config)
-2. Environment variables (fallback for missing fields)
+The short version:
 
-Use `--strict-auth` or `ASC_STRICT_AUTH=true` to fail when sources are mixed.
+* `--profile` or `ASC_PROFILE` selects a stored profile and disables the environment-only fast path.
+* Without a profile and with keychain bypass disabled, a complete environment credential set skips stored lookup.
+* Environment fields can fill gaps only after an eligible stored credential is returned.
+* `ASC_BYPASS_KEYCHAIN=1` skips keychain; environment fallback follows only missing-config or permitted default-selection errors.
+* `--strict-auth` or `ASC_STRICT_AUTH=true` rejects credentials assembled from multiple sources.
 
 ## Commands
 
 ### `asc auth init`
 
-Create a template config.json for authentication.
+Create a template config.json for authentication. It writes the `ASC_CONFIG_PATH` file when that variable is set, otherwise `~/.asc/config.json`.
 
 <ParamField path="--force" type="boolean" default="false">
   Overwrite existing config.json
@@ -66,8 +69,12 @@ Register and store App Store Connect API key credentials.
   App Store Connect API Key ID
 </ParamField>
 
-<ParamField path="--issuer-id" type="string" required>
-  App Store Connect Issuer ID
+<ParamField path="--issuer-id" type="string">
+  App Store Connect Issuer ID. Required for team keys; omit for individual keys.
+</ParamField>
+
+<ParamField path="--key-type" type="string" default="team">
+  App Store Connect API key type: `team` or `individual`
 </ParamField>
 
 <ParamField path="--private-key" type="string" required>
@@ -75,7 +82,7 @@ Register and store App Store Connect API key credentials.
 </ParamField>
 
 <ParamField path="--bypass-keychain" type="boolean" default="false">
-  Store credentials in config.json instead of keychain
+  Store credentials in config.json instead of keychain: the `ASC_CONFIG_PATH` file when set, otherwise `~/.asc/config.json`
 </ParamField>
 
 <ParamField path="--local" type="boolean" default="false">
@@ -90,12 +97,29 @@ Register and store App Store Connect API key credentials.
   Skip JWT and network validation checks
 </ParamField>
 
+<ParamField path="--fix-permissions" type="boolean" default="false">
+  Change an over-permissive private key file to `0600` before reading it
+</ParamField>
+
+The private key file must not be readable by other users. Without
+`--fix-permissions`, login fails with the `file_permissions_insecure`
+diagnostic. When the path can be displayed safely, it prints an exact,
+shell-quoted `chmod 600` command; otherwise it recommends `--fix-permissions`
+without embedding the path in executable-looking text. With
+`--fix-permissions`, asc changes the file to `0600`, reports the change on
+stderr, and continues through the normal validation path. A symlinked or
+non-regular key path is rejected instead of being changed. If the operating
+system cannot securely open the file for descriptor-bound repair, such as an
+owner-unreadable key on macOS, asc fails without changing it.
+
 **Examples:**
 
 ```bash  theme={null}
 asc auth login --name "MyKey" --key-id "ABC123" --issuer-id "DEF456" --private-key /path/to/AuthKey.p8
+asc auth login --name "MyIndividualKey" --key-id "ABC123" --key-type individual --private-key /path/to/AuthKey.p8
 asc auth login --bypass-keychain --local --name "MyKey" --key-id "ABC123" --issuer-id "DEF456" --private-key /path/to/AuthKey.p8
 asc auth login --network --name "MyKey" --key-id "ABC123" --issuer-id "DEF456" --private-key /path/to/AuthKey.p8
+asc auth login --fix-permissions --name "MyKey" --key-id "ABC123" --issuer-id "DEF456" --private-key /path/to/AuthKey.p8
 ```
 
 **Output:**
@@ -135,20 +159,32 @@ Default profile set to 'Personal'
 Remove stored API credentials.
 
 <ParamField path="--all" type="boolean" default="false">
-  Remove all stored credentials (default behavior)
+  Remove all stored credentials
 </ParamField>
 
 <ParamField path="--name" type="string">
   Remove a named credential
 </ParamField>
 
+<ParamField path="--confirm" type="boolean" default="false">
+  Confirm credential removal (required)
+</ParamField>
+
+<ParamField path="--include-global" type="boolean" default="false">
+  Also remove matching credentials from `~/.asc/config.json` when `ASC_CONFIG_PATH` points to another file
+</ParamField>
+
 **Examples:**
 
 ```bash  theme={null}
-asc auth logout
-asc auth logout --all
-asc auth logout --name "MyKey"
+asc auth logout --all --confirm
+asc auth logout --name "MyKey" --confirm
+asc auth logout --all --include-global --confirm
 ```
+
+`--confirm` is required. Omitting it, or passing an explicit `--confirm=false`, is a usage error (exit 2) and no credentials are changed. Omitting `--name` removes all credentials; pass `--name` or `--all` to make the target explicit.
+
+Logout removes matching credentials from the keychain and the active config file. When `ASC_CONFIG_PATH` is set, that file is the only config file logout changes. If `~/.asc/config.json` still holds matching credentials, logout leaves them in place and prints a warning to stderr naming the file. To remove them too, run logout with `ASC_CONFIG_PATH` unset or pass `--include-global`. Without `ASC_CONFIG_PATH`, logout also cleans `~/.asc/config.json`, as before.
 
 **Output:**
 
@@ -265,9 +301,11 @@ No issues found.
 * `ASC_PRIVATE_KEY_PATH` - Path to .p8 file
 * `ASC_PRIVATE_KEY` - PEM-encoded private key
 * `ASC_PRIVATE_KEY_B64` - Base64-encoded private key
-* `ASC_BYPASS_KEYCHAIN` - Set to `1`, `true`, `yes`, `y`, or `on` to bypass keychain
-* `ASC_STRICT_AUTH` - Set to `true`, `1`, `yes`, `y`, or `on` to fail on mixed credential sources
+* `ASC_KEY_TYPE` - API key type: `team` (default) or `individual`
+* `ASC_BYPASS_KEYCHAIN` - Set to `1`, `true`, `yes`, or `on` to bypass keychain
+* `ASC_STRICT_AUTH` - Set to `true`, `1`, `yes`, `y`, or `on` to fail when required credential fields mix sources
 * `ASC_PROFILE` - Select a named profile
+* `ASC_CONFIG_PATH` - Select an absolute config file path
 
 ## Generating API Keys
 

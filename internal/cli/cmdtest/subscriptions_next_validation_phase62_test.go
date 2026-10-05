@@ -3,7 +3,7 @@ package cmdtest
 import "testing"
 
 func TestSubscriptionsAvailabilityAvailableTerritoriesRejectsInvalidNextURLPhase62(t *testing.T) {
-	runGameCenterAchievementsInvalidNextURLCases(
+	runInvalidNextURLUsageErrorCases(
 		t,
 		[]string{"subscriptions", "pricing", "availability", "available-territories"},
 		"subscriptions pricing availability available-territories: --next",
@@ -38,6 +38,7 @@ func TestSubscriptionsGroupsListRejectsInvalidNextURLPhase62(t *testing.T) {
 }
 
 func TestSubscriptionsGroupsListPaginateFromNextWithoutAppPhase62(t *testing.T) {
+	t.Setenv("ASC_APP_ID", "ambient-app")
 	const firstURL = "https://api.appstoreconnect.apple.com/v1/apps/app-1/subscriptionGroups?cursor=AQ&limit=200"
 	const secondURL = "https://api.appstoreconnect.apple.com/v1/apps/app-1/subscriptionGroups?cursor=BQ&limit=200"
 
@@ -53,60 +54,6 @@ func TestSubscriptionsGroupsListPaginateFromNextWithoutAppPhase62(t *testing.T) 
 		secondBody,
 		"subscription-group-next-1",
 		"subscription-group-next-2",
-	)
-}
-
-func TestSubscriptionsGroupsLocalizationsListRejectsInvalidNextURLPhase62(t *testing.T) {
-	runGameCenterAchievementsInvalidNextURLCases(
-		t,
-		[]string{"subscriptions", "groups", "localizations", "list"},
-		"subscriptions groups localizations list: --next",
-	)
-}
-
-func TestSubscriptionsGroupsLocalizationsListPaginateFromNextWithoutGroupIDPhase62(t *testing.T) {
-	const firstURL = "https://api.appstoreconnect.apple.com/v1/subscriptionGroups/group-1/subscriptionGroupLocalizations?cursor=AQ&limit=200"
-	const secondURL = "https://api.appstoreconnect.apple.com/v1/subscriptionGroups/group-1/subscriptionGroupLocalizations?cursor=BQ&limit=200"
-
-	firstBody := `{"data":[{"type":"subscriptionGroupLocalizations","id":"subscription-group-localization-next-1"}],"links":{"next":"` + secondURL + `"}}`
-	secondBody := `{"data":[{"type":"subscriptionGroupLocalizations","id":"subscription-group-localization-next-2"}],"links":{"next":""}}`
-
-	runGameCenterAchievementsPaginateFromNext(
-		t,
-		[]string{"subscriptions", "groups", "localizations", "list"},
-		firstURL,
-		secondURL,
-		firstBody,
-		secondBody,
-		"subscription-group-localization-next-1",
-		"subscription-group-localization-next-2",
-	)
-}
-
-func TestSubscriptionsImagesListRejectsInvalidNextURLPhase62(t *testing.T) {
-	runGameCenterAchievementsInvalidNextURLCases(
-		t,
-		[]string{"subscriptions", "images", "list"},
-		"subscriptions images list: --next",
-	)
-}
-
-func TestSubscriptionsImagesListPaginateFromNextWithoutSubscriptionIDPhase62(t *testing.T) {
-	const firstURL = "https://api.appstoreconnect.apple.com/v1/subscriptions/sub-1/images?cursor=AQ&limit=200"
-	const secondURL = "https://api.appstoreconnect.apple.com/v1/subscriptions/sub-1/images?cursor=BQ&limit=200"
-
-	firstBody := `{"data":[{"type":"subscriptionImages","id":"subscription-image-next-1"}],"links":{"next":"` + secondURL + `"}}`
-	secondBody := `{"data":[{"type":"subscriptionImages","id":"subscription-image-next-2"}],"links":{"next":""}}`
-
-	runGameCenterAchievementsPaginateFromNext(
-		t,
-		[]string{"subscriptions", "images", "list"},
-		firstURL,
-		secondURL,
-		firstBody,
-		secondBody,
-		"subscription-image-next-1",
-		"subscription-image-next-2",
 	)
 }
 
@@ -146,6 +93,8 @@ func TestSubscriptionsListRejectsInvalidNextURLPhase62(t *testing.T) {
 }
 
 func TestSubscriptionsListPaginateFromNextWithoutGroupPhase62(t *testing.T) {
+	t.Setenv("ASC_APP_ID", "ambient-app")
+
 	const firstURL = "https://api.appstoreconnect.apple.com/v1/subscriptionGroups/group-1/subscriptions?cursor=AQ&limit=200"
 	const secondURL = "https://api.appstoreconnect.apple.com/v1/subscriptionGroups/group-1/subscriptions?cursor=BQ&limit=200"
 
@@ -161,33 +110,6 @@ func TestSubscriptionsListPaginateFromNextWithoutGroupPhase62(t *testing.T) {
 		secondBody,
 		"subscription-next-1",
 		"subscription-next-2",
-	)
-}
-
-func TestSubscriptionsLocalizationsListRejectsInvalidNextURLPhase62(t *testing.T) {
-	runGameCenterAchievementsInvalidNextURLCases(
-		t,
-		[]string{"subscriptions", "localizations", "list"},
-		"subscriptions localizations list: --next",
-	)
-}
-
-func TestSubscriptionsLocalizationsListPaginateFromNextWithoutSubscriptionIDPhase62(t *testing.T) {
-	const firstURL = "https://api.appstoreconnect.apple.com/v1/subscriptions/sub-1/subscriptionLocalizations?cursor=AQ&limit=200"
-	const secondURL = "https://api.appstoreconnect.apple.com/v1/subscriptions/sub-1/subscriptionLocalizations?cursor=BQ&limit=200"
-
-	firstBody := `{"data":[{"type":"subscriptionLocalizations","id":"subscription-localization-next-1"}],"links":{"next":"` + secondURL + `"}}`
-	secondBody := `{"data":[{"type":"subscriptionLocalizations","id":"subscription-localization-next-2"}],"links":{"next":""}}`
-
-	runGameCenterAchievementsPaginateFromNext(
-		t,
-		[]string{"subscriptions", "localizations", "list"},
-		firstURL,
-		secondURL,
-		firstBody,
-		secondBody,
-		"subscription-localization-next-1",
-		"subscription-localization-next-2",
 	)
 }
 

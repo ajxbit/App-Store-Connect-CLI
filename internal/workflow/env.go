@@ -2,13 +2,19 @@ package workflow
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"strings"
 	"sync"
+	"time"
+
+	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/readonly"
 )
+
+var shellWaitDelay = 5 * time.Second
 
 var (
 	lookPathFn       = exec.LookPath
@@ -60,7 +66,7 @@ func buildEnvSlice(env map[string]string) []string {
 	base = sanitized
 
 	if len(env) == 0 {
-		return base
+		return forceReadOnlyEnv(base)
 	}
 
 	// Build an index once so each override is O(1) instead of scanning base.
@@ -102,7 +108,45 @@ func buildEnvSlice(env map[string]string) []string {
 		indexByKey[k] = len(base)
 		base = append(base, entry)
 	}
-	return base
+	return forceReadOnlyEnv(base)
+}
+
+// forceReadOnlyEnv propagates read-only mode into workflow steps. A step runs
+// a shell command that may invoke asc again, and the root --read-only flag is
+// process-local, so the child needs the environment variable to inherit the
+// policy. It is applied after the step's declared env so a workflow file cannot
+// override it declaratively. This is inheritance rather than containment: a
+// step's shell command can still clear the variable for a process it starts,
+// and a step that runs a different tool never reaches these guards.
+func forceReadOnlyEnv(env []string) []string {
+	if !readonly.Enabled() {
+		return env
+	}
+	forced := make([]string, 0, forcedEnvCapacity(len(env)))
+	for _, entry := range env {
+		if key, _, ok := strings.Cut(entry, "="); ok && key == readonly.EnvVar {
+			continue
+		}
+		forced = append(forced, entry)
+	}
+	return append(forced, readonly.EnvVar+"=1")
+}
+
+// maxForcedEnvEntries bounds the capacity hint computed by forcedEnvCapacity.
+// A process environment is orders of magnitude smaller than this, so the clamp
+// never changes the allocation for a real environment; it only keeps the
+// arithmetic provably free of integer overflow.
+const maxForcedEnvEntries = 1 << 16
+
+// forcedEnvCapacity returns the capacity hint for the slice forceReadOnlyEnv
+// builds: one slot per inherited entry plus one for the forced entry. The
+// addition is clamped so no entry count can overflow it. The result is only a
+// hint, so append still grows the slice correctly beyond the clamp.
+func forcedEnvCapacity(entries int) int {
+	if entries > maxForcedEnvEntries {
+		return maxForcedEnvEntries + 1
+	}
+	return entries + 1
 }
 
 // runShellCommand executes a command string via bash -o pipefail -c when bash
@@ -116,10 +160,19 @@ func runShellCommand(ctx context.Context, command string, env map[string]string,
 	args := append(append([]string{}, flags...), command)
 
 	cmd := commandContextFn(ctx, shell, args...)
+	configureProcessTree(cmd)
+	cmd.WaitDelay = shellWaitDelay
 	cmd.Env = buildEnvSlice(env)
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
-	return cmd.Run()
+	err = cmd.Run()
+	if errors.Is(err, exec.ErrWaitDelay) && ctx.Err() == nil {
+		// The shell exited successfully, but a background descendant retained a
+		// captured output pipe. WaitDelay closed the pipe to bound cleanup; do not
+		// turn that completed command into a retryable failure.
+		return nil
+	}
+	return err
 }
 
 func resolveShell() (string, []string, error) {

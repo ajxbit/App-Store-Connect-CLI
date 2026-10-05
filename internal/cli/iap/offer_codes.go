@@ -31,7 +31,7 @@ func IAPOfferCodesCommand() *ffcli.Command {
 
 Examples:
   asc iap offer-codes list --iap-id "IAP_ID"
-  asc iap offer-codes get --offer-code-id "CODE_ID"
+  asc iap offer-codes view --offer-code-id "CODE_ID"
   asc iap offer-codes create --iap-id "IAP_ID" --name "SPRING" --prices "USA:PRICE_POINT_ID"
   asc iap offer-codes update --offer-code-id "CODE_ID" --active true`,
 		FlagSet:   fs,
@@ -56,7 +56,7 @@ func IAPOfferCodesListCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("offer-codes list", flag.ExitOnError)
 
 	appID := addIAPLookupAppFlag(fs)
-	iapID := fs.String("iap-id", "", "In-app purchase ID, product ID, or exact current name")
+	iapID := shared.BindResourceIDFlag(fs, "iap-id", "inAppPurchases", "In-app purchase ID, product ID, or exact current name")
 	limit := fs.Int("limit", 0, "Maximum results per page (1-200)")
 	next := fs.String("next", "", "Fetch next page using a links.next URL")
 	paginate := fs.Bool("paginate", false, "Automatically fetch all pages (aggregate results)")
@@ -75,16 +75,16 @@ Examples:
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
 			if *limit != 0 && (*limit < 1 || *limit > 200) {
-				return fmt.Errorf("iap offer-codes list: --limit must be between 1 and 200")
+				return shared.UsageError("iap offer-codes list: --limit must be between 1 and 200")
 			}
 			if err := shared.ValidateNextURL(*next); err != nil {
-				return fmt.Errorf("iap offer-codes list: %w", err)
+				return shared.UsageErrorf("iap offer-codes list: %v", err)
 			}
 
 			iapValue := strings.TrimSpace(*iapID)
 			if iapValue == "" && strings.TrimSpace(*next) == "" {
 				fmt.Fprintln(os.Stderr, "Error: --iap-id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--iap-id")
 			}
 
 			client, err := shared.GetASCClient()
@@ -136,31 +136,31 @@ Examples:
 
 // IAPOfferCodesGetCommand returns the offer codes get subcommand.
 func IAPOfferCodesGetCommand() *ffcli.Command {
-	fs := flag.NewFlagSet("offer-codes get", flag.ExitOnError)
+	fs := flag.NewFlagSet("offer-codes view", flag.ExitOnError)
 
-	offerCodeID := fs.String("offer-code-id", "", "Offer code ID")
+	offerCodeID := shared.BindResourceIDFlag(fs, "offer-code-id", "inAppPurchaseOfferCodes", "Offer code ID")
 	output := shared.BindOutputFlags(fs)
 
 	return &ffcli.Command{
-		Name:       "get",
-		ShortUsage: "asc iap offer-codes get --offer-code-id \"CODE_ID\"",
-		ShortHelp:  "Get an offer code by ID.",
-		LongHelp: `Get an offer code by ID.
+		Name:       "view",
+		ShortUsage: "asc iap offer-codes view --offer-code-id \"CODE_ID\"",
+		ShortHelp:  "View an offer code by ID.",
+		LongHelp: `View an offer code by ID.
 
 Examples:
-  asc iap offer-codes get --offer-code-id "CODE_ID"`,
+  asc iap offer-codes view --offer-code-id "CODE_ID"`,
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
 			offerCodeValue := strings.TrimSpace(*offerCodeID)
 			if offerCodeValue == "" {
 				fmt.Fprintln(os.Stderr, "Error: --offer-code-id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--offer-code-id")
 			}
 
 			client, err := shared.GetASCClient()
 			if err != nil {
-				return fmt.Errorf("iap offer-codes get: %w", err)
+				return fmt.Errorf("iap offer-codes view: %w", err)
 			}
 
 			requestCtx, cancel := shared.ContextWithTimeout(ctx)
@@ -168,7 +168,7 @@ Examples:
 
 			resp, err := client.GetInAppPurchaseOfferCode(requestCtx, offerCodeValue)
 			if err != nil {
-				return fmt.Errorf("iap offer-codes get: failed to fetch: %w", err)
+				return fmt.Errorf("iap offer-codes view: failed to fetch: %w", err)
 			}
 
 			return shared.PrintOutput(resp, *output.Output, *output.Pretty)
@@ -181,10 +181,10 @@ func IAPOfferCodesCreateCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("offer-codes create", flag.ExitOnError)
 
 	appID := addIAPLookupAppFlag(fs)
-	iapID := fs.String("iap-id", "", "In-app purchase ID, product ID, or exact current name")
+	iapID := shared.BindResourceIDFlag(fs, "iap-id", "inAppPurchases", "In-app purchase ID, product ID, or exact current name")
 	name := fs.String("name", "", "Offer code name")
 	eligibilities := fs.String("eligibilities", "", "Customer eligibilities (comma-separated)")
-	prices := fs.String("prices", "", "Prices: TERRITORY:PRICE_POINT_ID entries (territory accepts alpha-2, alpha-3, or exact English country name)")
+	prices := fs.String("prices", "", "Prices: TERRITORY:PRICE_POINT_ID or TERRITORY:FREE entries (territory accepts alpha-2, alpha-3, or exact English country name)")
 	output := shared.BindOutputFlags(fs)
 
 	return &ffcli.Command{
@@ -195,6 +195,7 @@ func IAPOfferCodesCreateCommand() *ffcli.Command {
 
 Examples:
   asc iap offer-codes create --iap-id "IAP_ID" --name "SPRING" --prices "US:PRICE_POINT_ID"
+  asc iap offer-codes create --iap-id "IAP_ID" --name "GIFT" --prices "US:FREE,CA:FREE"
   asc iap offer-codes create --iap-id "IAP_ID" --name "SPRING" --eligibilities "NON_SPENDER" --prices "France:PRICE_POINT_ID"`,
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
@@ -202,13 +203,13 @@ Examples:
 			iapValue := strings.TrimSpace(*iapID)
 			if iapValue == "" {
 				fmt.Fprintln(os.Stderr, "Error: --iap-id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--iap-id")
 			}
 
 			nameValue := strings.TrimSpace(*name)
 			if nameValue == "" {
 				fmt.Fprintln(os.Stderr, "Error: --name is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--name")
 			}
 
 			parsedEligibilities, err := parseOfferCodeEligibilities(*eligibilities)
@@ -227,7 +228,7 @@ Examples:
 			}
 			if len(priceEntries) == 0 {
 				fmt.Fprintln(os.Stderr, "Error: --prices is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--prices")
 			}
 
 			client, err := shared.GetASCClient()
@@ -261,7 +262,7 @@ Examples:
 func IAPOfferCodesUpdateCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("offer-codes update", flag.ExitOnError)
 
-	offerCodeID := fs.String("offer-code-id", "", "Offer code ID")
+	offerCodeID := shared.BindResourceIDFlag(fs, "offer-code-id", "inAppPurchaseOfferCodes", "Offer code ID")
 	var active shared.OptionalBool
 	fs.Var(&active, "active", "Set active status: true or false")
 	output := shared.BindOutputFlags(fs)
@@ -280,11 +281,11 @@ Examples:
 			offerCodeValue := strings.TrimSpace(*offerCodeID)
 			if offerCodeValue == "" {
 				fmt.Fprintln(os.Stderr, "Error: --offer-code-id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--offer-code-id")
 			}
 			if !active.IsSet() {
 				fmt.Fprintln(os.Stderr, "Error: --active is required (true or false)")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--active")
 			}
 
 			client, err := shared.GetASCClient()

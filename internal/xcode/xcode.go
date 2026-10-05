@@ -3,6 +3,7 @@ package xcode
 import (
 	"archive/zip"
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -11,20 +12,60 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
+	"sync"
 	"unicode"
+	"unicode/utf8"
 
 	"howett.net/plist"
+
+	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/infoplist"
+	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/rootfs"
+	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/secureopen"
 )
 
 var (
 	runtimeGOOS          = runtime.GOOS
 	lookPathFn           = exec.LookPath
+	statPathFn           = os.Stat
 	commandContextFn     = exec.CommandContext
 	activeDeveloperDirFn = activeDeveloperDir
 	altoolHelpOutputFn   = readAltoolHelpOutput
+	// signingCaseInsensitiveVolumeFn is kept as a narrow seam for the
+	// signing xcconfig collector. On Darwin/Windows its platform implementation
+	// can report directory-specific semantics; tests can model either result
+	// without changing the host filesystem.
+	signingCaseInsensitiveVolumeFn = signingCaseInsensitiveVolumeForRuntime
+	// signingPathRelFn is a narrow test seam for modeling filepath.Rel's
+	// case-folded Windows behavior on non-Windows hosts.
+	signingPathRelFn = filepath.Rel
+
+	altoolValidationErrorPrefixes = [...]*regexp.Regexp{
+		regexp.MustCompile(`(?i)^[[:space:]]*\*{3}[[:space:]]*error:[[:space:]]*`),
+		regexp.MustCompile(`(?i)^[[:space:]]*[0-9]{4}-[0-9]{2}-[0-9]{2}[[:space:]]+[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]+)?[[:space:]]+error:[[:space:]]*`),
+	}
 )
+
+func xcconfigUsesIdentityTraversal() bool {
+	switch runtimeGOOS {
+	case "windows", "darwin", "linux":
+		return true
+	default:
+		return false
+	}
+}
+
+func signingCaseInsensitiveVolumeForRuntime(path string) (bool, bool) {
+	// runtimeGOOS is intentionally replaceable in package tests. Do not let a
+	// host filesystem probe decide the semantics of a simulated platform; the
+	// platform-specific test seam can provide the modeled answer instead.
+	if runtimeGOOS != runtime.GOOS {
+		return false, true
+	}
+	return signingCaseInsensitiveVolumeFor(path)
+}
 
 const xcodebuildErrorTailLimit = 64 * 1024
 
@@ -53,28 +94,38 @@ type ExportOptions struct {
 	ArchivePath    string
 	ExportOptions  string
 	IPAPath        string
+	PKGPath        string
 	Overwrite      bool
 	XcodebuildArgs []string
+	Environment    []string
 	LogWriter      io.Writer
+	// terminateProcessGroup is reserved for the exact release-testing seam.
+	// Ordinary CLI exports retain their established subprocess behavior.
+	terminateProcessGroup   bool
+	strictExportedIPASource bool
 }
 
 type ExportResult struct {
 	ArchivePath string `json:"archive_path"`
 	IPAPath     string `json:"ipa_path"`
+	PKGPath     string `json:"pkg_path,omitempty"`
 	BundleID    string `json:"bundle_id,omitempty"`
 	Version     string `json:"version,omitempty"`
 	BuildNumber string `json:"build_number,omitempty"`
 }
 
 type ValidateOptions struct {
-	IPAPath   string
-	APIKey    string
-	APIIssuer string
-	LogWriter io.Writer
+	IPAPath    string
+	PKGPath    string
+	APIKey     string
+	APIIssuer  string
+	P8FilePath string
+	LogWriter  io.Writer
 }
 
 type ValidateResult struct {
-	IPAPath   string `json:"ipa_path"`
+	IPAPath   string `json:"ipa_path,omitempty"`
+	PKGPath   string `json:"pkg_path,omitempty"`
 	Validated bool   `json:"validated"`
 }
 
@@ -102,6 +153,112 @@ type bundleInfo struct {
 	Version     string
 	BuildNumber string
 	Platform    string
+}
+
+type exportDestinationUsageError struct {
+	message string
+}
+
+func (e exportDestinationUsageError) Error() string {
+	return e.message
+}
+
+// IsExportDestinationUsageError reports whether destination preflight failed
+// because of deterministic CLI input rather than a filesystem access error.
+func IsExportDestinationUsageError(err error) bool {
+	var usageErr exportDestinationUsageError
+	return errors.As(err, &usageErr)
+}
+
+// PreflightExport verifies that local Xcode export tooling is available before
+// callers perform any preparatory filesystem mutation.
+func PreflightExport(ctx context.Context) error {
+	return ensureXcodeAvailable(ctx)
+}
+
+// ValidateExportDestination checks an IPA destination without mutating the
+// filesystem.
+func ValidateExportDestination(ipaPath string, overwrite, directUpload bool) error {
+	ipaPath = strings.TrimSpace(ipaPath)
+	if ipaPath == "" {
+		return exportDestinationUsageError{message: "--ipa-path is required"}
+	}
+	if !strings.EqualFold(filepath.Ext(ipaPath), ".ipa") {
+		return exportDestinationUsageError{message: "--ipa-path must end with .ipa"}
+	}
+	if directUpload {
+		return nil
+	}
+	return validateAvailableExportDestination(ipaPath, "--ipa-path", "ipa path", overwrite)
+}
+
+func validateAvailableExportDestination(path, flagName, description string, overwrite bool) error {
+	info, err := os.Lstat(path)
+	switch {
+	case err == nil && info.IsDir():
+		return exportDestinationUsageError{message: fmt.Sprintf("%s must not be a directory: %s", flagName, path)}
+	case err == nil && !overwrite:
+		return exportDestinationUsageError{message: fmt.Sprintf("%s already exists: %s (use --overwrite to replace it)", flagName, path)}
+	case err == nil && overwrite:
+		return nil
+	case errors.Is(err, os.ErrNotExist):
+		return nil
+	default:
+		return fmt.Errorf("lstat %s: %w", description, err)
+	}
+}
+
+// PreflightExportDestination validates an IPA destination and proves its
+// parent writable with a transient probe. Export repeats the check before the
+// final mutation.
+func PreflightExportDestination(ipaPath string, overwrite, directUpload bool) error {
+	if err := ValidateExportDestination(ipaPath, overwrite, directUpload); err != nil {
+		return err
+	}
+	return preflightWritableParent(strings.TrimSpace(ipaPath), "ipa output")
+}
+
+// ValidateExportPKGDestination checks a PKG destination without mutating the
+// filesystem.
+func ValidateExportPKGDestination(pkgPath string, overwrite, directUpload bool) error {
+	pkgPath = strings.TrimSpace(pkgPath)
+	if pkgPath == "" {
+		return exportDestinationUsageError{message: "--pkg-path is required"}
+	}
+	if !strings.EqualFold(filepath.Ext(pkgPath), ".pkg") {
+		return exportDestinationUsageError{message: "--pkg-path must end with .pkg"}
+	}
+	if directUpload {
+		return nil
+	}
+	return validateAvailableExportDestination(pkgPath, "--pkg-path", "pkg path", overwrite)
+}
+
+// PreflightExportPKGDestination validates a PKG destination and proves its
+// parent writable with a transient probe.
+func PreflightExportPKGDestination(pkgPath string, overwrite, directUpload bool) error {
+	if err := ValidateExportPKGDestination(pkgPath, overwrite, directUpload); err != nil {
+		return err
+	}
+	return preflightWritableParent(strings.TrimSpace(pkgPath), "pkg output")
+}
+
+func preflightWritableParent(path, description string) error {
+	parent := filepath.Dir(path)
+	if err := os.MkdirAll(parent, 0o755); err != nil {
+		return fmt.Errorf("create %s parent directory: %w", description, err)
+	}
+	probe, err := os.CreateTemp(parent, ".asc-output-preflight-*")
+	if err != nil {
+		return fmt.Errorf("preflight %s parent: %w", description, err)
+	}
+	probePath := probe.Name()
+	closeErr := probe.Close()
+	removeErr := os.Remove(probePath)
+	if err := errors.Join(closeErr, removeErr); err != nil {
+		return fmt.Errorf("clean up %s parent preflight: %w", description, err)
+	}
+	return nil
 }
 
 func Archive(ctx context.Context, opts ArchiveOptions) (*ArchiveResult, error) {
@@ -144,45 +301,53 @@ func Export(ctx context.Context, opts ExportOptions) (*ExportResult, error) {
 	if err := validateExportOptions(opts); err != nil {
 		return nil, err
 	}
-	if err := ensureXcodeAvailable(ctx); err != nil {
+	uploadMode := isDirectUploadMode(opts.ExportOptions)
+	if opts.IPAPath == "" && opts.PKGPath == "" && !uploadMode {
+		return nil, fmt.Errorf("--ipa-path or --pkg-path is required unless ExportOptions.plist uses destination=upload")
+	}
+	if err := ensureXcodeAvailableWithEnvironment(ctx, opts.Environment, opts.terminateProcessGroup); err != nil {
 		return nil, err
 	}
 	if err := validateExportInputPaths(opts); err != nil {
 		return nil, err
 	}
 
-	// Always ensure parent dir exists (needed for temp dir creation below).
-	if err := os.MkdirAll(filepath.Dir(opts.IPAPath), 0o755); err != nil {
-		return nil, fmt.Errorf("create output directory: %w", err)
-	}
-
 	// When the ExportOptions plist has destination=upload, xcodebuild uploads
-	// directly to App Store Connect and does not produce a local .ipa file.
+	// directly to App Store Connect and does not produce a local artifact.
 	// This is the normal path for tvOS and some macOS exports. Detect this
-	// mode before prepareIPAPath to avoid deleting an existing IPA that will
-	// never be replaced.
-	uploadMode := isDirectUploadMode(opts.ExportOptions)
+	// mode before preparing a destination that will never be written.
 
 	if !uploadMode {
-		if err := prepareIPAPath(opts.IPAPath, opts.Overwrite); err != nil {
-			return nil, err
+		switch {
+		case opts.PKGPath != "":
+			if err := prepareExportArtifactPath(opts.PKGPath, "--pkg-path", "pkg", opts.Overwrite); err != nil {
+				return nil, err
+			}
+		default:
+			if err := prepareIPAPath(opts.IPAPath, opts.Overwrite); err != nil {
+				return nil, err
+			}
 		}
 	}
 	maybeWarnAboutBetaXcodeForAppStoreExport(ctx, opts.ExportOptions, opts.LogWriter)
 
-	tempExportDir, err := os.MkdirTemp(filepath.Dir(opts.IPAPath), ".asc-xcode-export-*")
+	tempParent := ""
+	if !uploadMode {
+		tempParent = filepath.Dir(exportArtifactPath(opts))
+	}
+	tempExportDir, err := os.MkdirTemp(tempParent, ".asc-xcode-export-*")
 	if err != nil {
 		return nil, fmt.Errorf("create temporary export directory: %w", err)
 	}
 	defer os.RemoveAll(tempExportDir)
 
 	args := buildExportCommand(opts, tempExportDir)
-	if err := runXcodebuild(ctx, args, opts.LogWriter); err != nil {
+	if err := runXcodebuildWithEnvironment(ctx, args, opts.Environment, opts.LogWriter, opts.terminateProcessGroup); err != nil {
 		return nil, err
 	}
 
 	if uploadMode {
-		// xcodebuild uploaded directly — no local IPA produced.
+		// xcodebuild uploaded directly — no local artifact produced.
 		info, err := readArchiveBundleInfo(opts.ArchivePath)
 		if err != nil {
 			return nil, fmt.Errorf("read archive bundle info after direct upload: %w", err)
@@ -190,6 +355,27 @@ func Export(ctx context.Context, opts ExportOptions) (*ExportResult, error) {
 		return &ExportResult{
 			ArchivePath: opts.ArchivePath,
 			IPAPath:     "",
+			PKGPath:     "",
+			BundleID:    info.BundleID,
+			Version:     info.Version,
+			BuildNumber: info.BuildNumber,
+		}, nil
+	}
+	if opts.PKGPath != "" {
+		exportedPKGPath, err := findExportedArtifact(tempExportDir, ".pkg", "PKG")
+		if err != nil {
+			return nil, err
+		}
+		info, err := readArchiveBundleInfo(opts.ArchivePath)
+		if err != nil {
+			return nil, fmt.Errorf("read archive bundle info after PKG export: %w", err)
+		}
+		if err := moveExportedArtifact(exportedPKGPath, opts.PKGPath, "PKG", opts.Overwrite); err != nil {
+			return nil, err
+		}
+		return &ExportResult{
+			ArchivePath: opts.ArchivePath,
+			PKGPath:     opts.PKGPath,
 			BundleID:    info.BundleID,
 			Version:     info.Version,
 			BuildNumber: info.BuildNumber,
@@ -200,13 +386,20 @@ func Export(ctx context.Context, opts ExportOptions) (*ExportResult, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := moveExportedIPA(exportedIPAPath, opts.IPAPath, opts.Overwrite); err != nil {
-		return nil, err
-	}
-
-	info, err := readIPABundleInfo(opts.IPAPath)
-	if err != nil {
-		return nil, err
+	var info bundleInfo
+	if opts.strictExportedIPASource {
+		info, err = finalizeExactExportedIPA(exportedIPAPath, opts.IPAPath)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		info, err = readIPABundleInfo(exportedIPAPath)
+		if err != nil {
+			return nil, fmt.Errorf("inspect exported IPA before installation: %w", err)
+		}
+		if err := moveExportedIPA(exportedIPAPath, opts.IPAPath, opts.Overwrite); err != nil {
+			return nil, err
+		}
 	}
 
 	return &ExportResult{
@@ -226,20 +419,58 @@ func Validate(ctx context.Context, opts ValidateOptions) (*ValidateResult, error
 	if err := ensureXcodeAvailable(ctx); err != nil {
 		return nil, err
 	}
-	if _, err := lookPathFn("xcrun"); err != nil {
-		if errors.Is(err, exec.ErrNotFound) {
+	if _, err := trustedXcodeToolPathFn(ctx, "xcrun", nil); err != nil {
+		if isTrustedXcodeToolUnavailable(err, "xcrun") {
 			return nil, fmt.Errorf("xcrun not available; install Xcode and ensure the active developer directory is configured")
 		}
 		return nil, fmt.Errorf("locate xcrun: %w", err)
 	}
-	if err := validateExistingFile(opts.IPAPath, "--ipa"); err != nil {
+	if opts.P8FilePath != "" {
+		if err := validateExistingFile(opts.P8FilePath, "--p8-file-path"); err != nil {
+			return nil, err
+		}
+	}
+	artifactPath := opts.IPAPath
+	artifactFlag := "--ipa"
+	artifactName := "IPA"
+	platform := ""
+	if opts.PKGPath != "" {
+		artifactPath = opts.PKGPath
+		artifactFlag = "--pkg"
+		artifactName = "PKG"
+		platform = "macos"
+	}
+	validatedArtifact, _, err := secureopen.OpenExistingRegularFileNoFollow(artifactPath, artifactName, artifactFlag)
+	if err != nil {
 		return nil, err
 	}
-	if err := runAltoolValidate(ctx, buildValidateCommand(opts, inferValidatePlatform(opts.IPAPath)), opts.LogWriter); err != nil {
+	defer validatedArtifact.Close()
+	validatedInfo, err := validatedArtifact.Stat()
+	if err != nil {
+		return nil, fmt.Errorf("inspect validated %s: %w", artifactName, err)
+	}
+	snapshotPath, cleanupSnapshot, err := snapshotValidationArtifact(ctx, validatedArtifact, validatedInfo.Size(), strings.ToLower(filepath.Ext(artifactPath)))
+	if err != nil {
+		return nil, fmt.Errorf("prepare %s for validation: %w", artifactName, err)
+	}
+	defer cleanupSnapshot()
+	snapshotArtifact, snapshotInfo, err := secureopen.OpenExistingRegularFileNoFollow(snapshotPath, artifactName+" validation snapshot", artifactFlag)
+	if err != nil {
+		return nil, fmt.Errorf("open %s validation snapshot: %w", artifactName, err)
+	}
+	defer snapshotArtifact.Close()
+	if platform == "" {
+		platform, err = inferValidatePlatformFromFile(snapshotArtifact, snapshotInfo.Size())
+		if err != nil {
+			return nil, err
+		}
+	}
+	if err := runAltoolValidate(ctx, buildValidateCommand(opts, platform, snapshotPath), opts.LogWriter); err != nil {
 		return nil, err
 	}
 	return &ValidateResult{
 		IPAPath:   opts.IPAPath,
+		PKGPath:   opts.PKGPath,
 		Validated: true,
 	}, nil
 }
@@ -252,8 +483,8 @@ func BuildStatus(ctx context.Context, opts BuildStatusOptions) (*BuildStatusResu
 	if err := ensureXcodeAvailable(ctx); err != nil {
 		return nil, err
 	}
-	if _, err := lookPathFn("xcrun"); err != nil {
-		if errors.Is(err, exec.ErrNotFound) {
+	if _, err := trustedXcodeToolPathFn(ctx, "xcrun", nil); err != nil {
+		if isTrustedXcodeToolUnavailable(err, "xcrun") {
 			return nil, fmt.Errorf("xcrun not available; install Xcode and ensure the active developer directory is configured")
 		}
 		return nil, fmt.Errorf("locate xcrun: %w", err)
@@ -282,7 +513,7 @@ func SupportsBuildStatusBundleID(ctx context.Context) bool {
 }
 
 // IsDirectUploadMode reports whether ExportOptions.plist uploads directly to
-// App Store Connect instead of producing a local IPA artifact.
+// App Store Connect instead of producing a local artifact.
 func IsDirectUploadMode(exportOptionsPlistPath string) bool {
 	return isDirectUploadMode(exportOptionsPlistPath)
 }
@@ -337,13 +568,59 @@ func validateExportOptions(opts ExportOptions) error {
 	if opts.ExportOptions == "" {
 		return fmt.Errorf("--export-options is required")
 	}
-	if opts.IPAPath == "" {
-		return fmt.Errorf("--ipa-path is required")
+	if opts.IPAPath != "" && opts.PKGPath != "" {
+		return fmt.Errorf("--ipa-path and --pkg-path are mutually exclusive")
 	}
-	if !strings.EqualFold(filepath.Ext(opts.IPAPath), ".ipa") {
+	if opts.IPAPath != "" && !strings.EqualFold(filepath.Ext(opts.IPAPath), ".ipa") {
 		return fmt.Errorf("--ipa-path must end with .ipa")
 	}
+	if opts.PKGPath != "" && !strings.EqualFold(filepath.Ext(opts.PKGPath), ".pkg") {
+		return fmt.Errorf("--pkg-path must end with .pkg")
+	}
+	if err := ValidateExportXcodebuildArgs(opts.XcodebuildArgs); err != nil {
+		return err
+	}
+	if opts.Environment != nil {
+		if err := validateProcessEnvironment(opts.Environment); err != nil {
+			return err
+		}
+	}
 	return nil
+}
+
+// ValidateExportXcodebuildArgs rejects passthrough arguments that would switch
+// xcodebuild away from the export operation or override paths managed by asc.
+func ValidateExportXcodebuildArgs(args []string) error {
+	for _, arg := range args {
+		if strings.TrimSpace(arg) == "" {
+			return fmt.Errorf("--xcodebuild-flag cannot be empty")
+		}
+	}
+	if reserved := reservedExportPassthroughArgument(args); reserved != "" {
+		return fmt.Errorf("--xcodebuild-flag cannot override asc-managed argument %q", reserved)
+	}
+	return nil
+}
+
+func reservedExportPassthroughArgument(args []string) string {
+	if reserved := reservedBuildPassthroughArgument(args); reserved != "" {
+		return reserved
+	}
+	for index := 0; index < len(args); index++ {
+		arg := args[index]
+		trimmed := strings.TrimSpace(arg)
+		normalized := strings.ToLower(trimmed)
+		if xcodebuildPassthroughArgumentTakesValue(normalized) {
+			index++
+			continue
+		}
+		for _, managed := range []string{"-exportpath", "-exportoptionsplist"} {
+			if normalized == managed || strings.HasPrefix(normalized, managed+"=") {
+				return strings.SplitN(trimmed, "=", 2)[0]
+			}
+		}
+	}
+	return ""
 }
 
 func validateExportInputPaths(opts ExportOptions) error {
@@ -357,11 +634,19 @@ func validateExportInputPaths(opts ExportOptions) error {
 }
 
 func validateValidateOptions(opts ValidateOptions) error {
-	if opts.IPAPath == "" {
-		return fmt.Errorf("--ipa is required")
+	hasIPA := opts.IPAPath != ""
+	hasPKG := opts.PKGPath != ""
+	if !hasIPA && !hasPKG {
+		return fmt.Errorf("--ipa or --pkg is required")
 	}
-	if !strings.EqualFold(filepath.Ext(opts.IPAPath), ".ipa") {
+	if hasIPA && hasPKG {
+		return fmt.Errorf("--ipa and --pkg are mutually exclusive")
+	}
+	if hasIPA && !strings.EqualFold(filepath.Ext(opts.IPAPath), ".ipa") {
 		return fmt.Errorf("--ipa must end with .ipa")
+	}
+	if hasPKG && !strings.EqualFold(filepath.Ext(opts.PKGPath), ".pkg") {
+		return fmt.Errorf("--pkg must end with .pkg")
 	}
 	if (opts.APIKey == "") != (opts.APIIssuer == "") {
 		return fmt.Errorf("--api-key and --api-issuer must be provided together")
@@ -404,13 +689,17 @@ func normalizeExportOptions(opts ExportOptions) ExportOptions {
 	opts.ArchivePath = normalizeDirectoryPath(opts.ArchivePath)
 	opts.ExportOptions = strings.TrimSpace(opts.ExportOptions)
 	opts.IPAPath = strings.TrimSpace(opts.IPAPath)
+	opts.PKGPath = strings.TrimSpace(opts.PKGPath)
+	opts.Environment = cloneEnvironment(opts.Environment)
 	return opts
 }
 
 func normalizeValidateOptions(opts ValidateOptions) ValidateOptions {
 	opts.IPAPath = strings.TrimSpace(opts.IPAPath)
+	opts.PKGPath = strings.TrimSpace(opts.PKGPath)
 	opts.APIKey = strings.TrimSpace(opts.APIKey)
 	opts.APIIssuer = strings.TrimSpace(opts.APIIssuer)
+	opts.P8FilePath = strings.TrimSpace(opts.P8FilePath)
 	return opts
 }
 
@@ -434,6 +723,31 @@ func normalizeDirectoryPath(pathValue string) string {
 	return filepath.Clean(trimmed)
 }
 
+// InputPathNotFoundError reports that an input path named by Flag does not exist.
+type InputPathNotFoundError struct {
+	Flag string
+	Err  error
+}
+
+func (e *InputPathNotFoundError) Error() string {
+	return fmt.Sprintf("%s: %v", e.Flag, e.Err)
+}
+
+func (e *InputPathNotFoundError) Unwrap() error {
+	return e.Err
+}
+
+func statInputPath(pathValue, flagName string) (os.FileInfo, error) {
+	info, err := os.Stat(pathValue)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, &InputPathNotFoundError{Flag: flagName, Err: err}
+	}
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", flagName, err)
+	}
+	return info, nil
+}
+
 func validateExistingPath(pathValue, suffix, flagName string) error {
 	trimmed := strings.TrimSpace(pathValue)
 	if trimmed == "" {
@@ -443,9 +757,9 @@ func validateExistingPath(pathValue, suffix, flagName string) error {
 	if !strings.EqualFold(filepath.Ext(normalized), suffix) {
 		return fmt.Errorf("%s must end with %s", flagName, suffix)
 	}
-	info, err := os.Stat(normalized)
+	info, err := statInputPath(normalized, flagName)
 	if err != nil {
-		return fmt.Errorf("%s: %w", flagName, err)
+		return err
 	}
 	if !info.IsDir() {
 		return fmt.Errorf("%s must point to a directory", flagName)
@@ -458,9 +772,9 @@ func validateExistingFile(pathValue, flagName string) error {
 	if trimmed == "" {
 		return fmt.Errorf("%s is required", flagName)
 	}
-	info, err := os.Stat(trimmed)
+	info, err := statInputPath(trimmed, flagName)
 	if err != nil {
-		return fmt.Errorf("%s: %w", flagName, err)
+		return err
 	}
 	if info.IsDir() {
 		return fmt.Errorf("%s must point to a file", flagName)
@@ -469,16 +783,17 @@ func validateExistingFile(pathValue, flagName string) error {
 }
 
 func ensureXcodeAvailable(ctx context.Context) error {
+	return ensureXcodeAvailableWithEnvironment(ctx, nil, false)
+}
+
+func ensureXcodeAvailableWithEnvironment(ctx context.Context, environment []string, terminateProcessGroup bool) error {
 	if runtimeGOOS != "darwin" {
 		return fmt.Errorf("supported on macOS only; current platform is %s", runtimeGOOS)
 	}
-	if _, err := lookPathFn("xcodebuild"); err != nil {
-		if errors.Is(err, exec.ErrNotFound) {
+	if err := runXcodebuildWithEnvironment(ctx, []string{"-version"}, environment, io.Discard, terminateProcessGroup); err != nil {
+		if isTrustedXcodeToolUnavailable(err, "xcodebuild") {
 			return fmt.Errorf("xcodebuild not available; install Xcode and ensure the active developer directory is configured")
 		}
-		return fmt.Errorf("locate xcodebuild: %w", err)
-	}
-	if err := runXcodebuild(ctx, []string{"-version"}, io.Discard); err != nil {
 		return fmt.Errorf("xcodebuild not usable: %w", err)
 	}
 	return nil
@@ -523,15 +838,7 @@ func activeDeveloperDir(ctx context.Context) (string, error) {
 	if developerDir := strings.TrimSpace(os.Getenv("DEVELOPER_DIR")); developerDir != "" {
 		return filepath.Clean(developerDir), nil
 	}
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	cmd := exec.CommandContext(ctx, "xcode-select", "-p")
-	output, err := cmd.Output()
-	if err != nil {
-		return "", err
-	}
-	return filepath.Clean(strings.TrimSpace(string(output))), nil
+	return activeDeveloperDirFromTrustedSelect(ctx, nil)
 }
 
 func isBetaXcodePath(pathValue string) bool {
@@ -578,25 +885,25 @@ func buildExportCommand(opts ExportOptions, exportDir string) []string {
 	return args
 }
 
-func inferValidatePlatform(ipaPath string) string {
-	info, err := readIPABundleInfo(ipaPath)
+func inferValidatePlatformFromFile(ipa *os.File, size int64) (string, error) {
+	info, err := readIPABundleInfoFromReaderAt(ipa, size)
 	if err != nil {
-		return "ios"
+		return "", fmt.Errorf("inspect IPA metadata before validation: %w", err)
 	}
 	if platform := mapAppStorePlatformToAltoolType(info.Platform); platform != "" {
-		return platform
+		return platform, nil
 	}
-	return "ios"
+	return "ios", nil
 }
 
-func buildValidateCommand(opts ValidateOptions, platform string) []string {
+func buildValidateCommand(opts ValidateOptions, platform, artifactPath string) []string {
 	if strings.TrimSpace(platform) == "" {
 		platform = "ios"
 	}
 	args := []string{
 		"altool",
 		"--validate-app",
-		"--file", opts.IPAPath,
+		"--file", artifactPath,
 		"--type", platform,
 	}
 	if opts.APIKey != "" {
@@ -604,6 +911,9 @@ func buildValidateCommand(opts ValidateOptions, platform string) []string {
 	}
 	if opts.APIIssuer != "" {
 		args = append(args, "--apiIssuer", opts.APIIssuer)
+	}
+	if opts.P8FilePath != "" {
+		args = append(args, "--p8-file-path", opts.P8FilePath)
 	}
 	return args
 }
@@ -670,18 +980,261 @@ func cloneStrings(values []string) []string {
 }
 
 func runXcodebuild(ctx context.Context, args []string, logWriter io.Writer) error {
-	return runCommandWithTail(ctx, "xcodebuild", args, logWriter, summarizeAction(args), "xcodebuild")
+	return runCommandWithBoundedOutput(ctx, "xcodebuild", args, logWriter, summarizeAction(args), "xcodebuild")
+}
+
+func runXcodebuildWithEnvironment(ctx context.Context, args, environment []string, logWriter io.Writer, terminateProcessGroup bool) error {
+	return runCommandWithBoundedOutputEnvironment(ctx, "xcodebuild", args, environment, logWriter, summarizeAction(args), "xcodebuild", terminateProcessGroup)
+}
+
+func runXcodebuildForBuild(ctx context.Context, args []string, logWriter io.Writer) error {
+	return runCommandWithBoundedOutputMode(ctx, "xcodebuild", args, logWriter, summarizeAction(args), "xcodebuild", true)
 }
 
 func runAltoolValidate(ctx context.Context, args []string, logWriter io.Writer) error {
-	return runCommandWithTail(ctx, "xcrun", args, logWriter, "validate", "xcrun altool")
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	cmd, err := trustedXcodeCommand(ctx, "xcrun", args, nil)
+	if err != nil {
+		return err
+	}
+	outputTail := newTailBuffer(xcodebuildErrorTailLimit)
+	combinedOutput := io.Writer(outputTail)
+	if logWriter != nil {
+		combinedOutput = io.MultiWriter(logWriter, outputTail)
+	}
+	serializedOutput := &synchronizedWriter{writer: combinedOutput}
+	stdoutOutput := newAltoolValidationOutputWriter(serializedOutput)
+	stderrOutput := newAltoolValidationOutputWriter(serializedOutput)
+	cmd.Stdout = stdoutOutput
+	cmd.Stderr = stderrOutput
+	if err := runXcodeCommand(cmd); err != nil {
+		failureOutput := newAltoolValidationFailureOutput(
+			append(stdoutOutput.Details(), stderrOutput.Details()...),
+			outputTail,
+			xcodebuildErrorTailLimit,
+		)
+		return formatCommandOutputError(ctx, err, failureOutput, "validate", "xcrun altool", true)
+	}
+
+	details := append(stdoutOutput.Details(), stderrOutput.Details()...)
+	details = UniqueDiagnosticDetails(details)
+	details = boundDiagnosticDetails(details, xcodebuildErrorTailLimit)
+	if len(details) == 0 {
+		return nil
+	}
+	return fmt.Errorf("xcrun altool validate failed: %s", strings.Join(details, "; "))
+}
+
+// altoolValidationFailureOutput renders the diagnostics altool already
+// classified ahead of the raw output tail, so a recognized failure survives the
+// trailing upload progress noise that would otherwise evict it. It mirrors
+// xcodeDiagnosticBuffer: an untruncated tail is reported verbatim, and the
+// rendered message stays within the same byte budget.
+type altoolValidationFailureOutput struct {
+	details []string
+	tail    *tailBuffer
+	limit   int
+}
+
+func newAltoolValidationFailureOutput(details []string, tail *tailBuffer, limit int) *altoolValidationFailureOutput {
+	return &altoolValidationFailureOutput{
+		details: UniqueDiagnosticDetails(details),
+		tail:    tail,
+		limit:   max(0, limit),
+	}
+}
+
+func (o *altoolValidationFailureOutput) String() string {
+	tail := strings.TrimSpace(o.tail.String())
+	if !o.tail.Truncated() {
+		return tail
+	}
+
+	detail := strings.Join(boundDiagnosticDetails(o.details, min(o.limit/2, xcodeDiagnosticPrefixLimit)), "; ")
+	switch {
+	case detail == "":
+		return tail
+	case tail == "":
+		return detail
+	}
+
+	tail = strings.TrimSpace(truncateUTF8Suffix(tail, o.limit-len(detail)-len("\n")))
+	if tail == "" {
+		return detail
+	}
+	return detail + "\n" + tail
+}
+
+func (o *altoolValidationFailureOutput) Truncated() bool {
+	return o.tail.Truncated()
+}
+
+func (o *altoolValidationFailureOutput) TruncationDescription() string {
+	if len(o.details) == 0 {
+		return o.tail.TruncationDescription()
+	}
+	return fmt.Sprintf("output truncated to %d bytes; preserving recognized errors and final output", o.limit)
+}
+
+func boundDiagnosticDetails(details []string, maxBytes int) []string {
+	if maxBytes <= 0 {
+		return nil
+	}
+
+	bounded := make([]string, 0, len(details))
+	usedBytes := 0
+	for _, detail := range details {
+		separatorBytes := 0
+		if len(bounded) > 0 {
+			separatorBytes = len("; ")
+		}
+		remaining := maxBytes - usedBytes - separatorBytes
+		if remaining <= 0 {
+			break
+		}
+
+		boundedDetail := truncateUTF8Prefix(detail, remaining)
+		if boundedDetail == "" {
+			break
+		}
+		bounded = append(bounded, boundedDetail)
+		usedBytes += separatorBytes + len(boundedDetail)
+		if len(boundedDetail) < len(detail) {
+			break
+		}
+	}
+	return bounded
+}
+
+type altoolValidationOutputWriter struct {
+	logWriter   io.Writer
+	line        []byte
+	details     []string
+	seen        map[string]struct{}
+	detailBytes int
+}
+
+type synchronizedWriter struct {
+	mu     sync.Mutex
+	writer io.Writer
+}
+
+func (w *synchronizedWriter) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.writer.Write(p)
+}
+
+func newAltoolValidationOutputWriter(logWriter io.Writer) *altoolValidationOutputWriter {
+	return &altoolValidationOutputWriter{
+		logWriter: logWriter,
+		seen:      make(map[string]struct{}),
+	}
+}
+
+func (w *altoolValidationOutputWriter) Write(p []byte) (int, error) {
+	written := len(p)
+	var err error
+	if w.logWriter != nil {
+		written, err = w.logWriter.Write(p)
+	}
+	w.consume(p[:written])
+	return written, err
+}
+
+func (w *altoolValidationOutputWriter) Details() []string {
+	if len(w.line) > 0 {
+		w.recordLine()
+	}
+	return append([]string(nil), w.details...)
+}
+
+func (w *altoolValidationOutputWriter) consume(p []byte) {
+	for len(p) > 0 {
+		newline := bytes.IndexByte(p, '\n')
+		if newline < 0 {
+			w.appendLine(p)
+			return
+		}
+		w.appendLine(p[:newline])
+		w.recordLine()
+		p = p[newline+1:]
+	}
+}
+
+func (w *altoolValidationOutputWriter) appendLine(fragment []byte) {
+	remaining := xcodebuildErrorTailLimit - len(w.line)
+	if remaining <= 0 {
+		return
+	}
+	if len(fragment) > remaining {
+		fragment = fragment[:remaining]
+	}
+	w.line = append(w.line, fragment...)
+}
+
+func (w *altoolValidationOutputWriter) recordLine() {
+	detail, ok := parseAltoolValidationErrorLine(string(w.line))
+	w.line = w.line[:0]
+	if !ok {
+		return
+	}
+
+	separatorBytes := 0
+	if len(w.details) > 0 {
+		separatorBytes = len("; ")
+	}
+	remaining := xcodebuildErrorTailLimit - w.detailBytes - separatorBytes
+	if remaining <= 0 {
+		return
+	}
+	detail = truncateUTF8Prefix(detail, remaining)
+	if detail == "" {
+		return
+	}
+	if _, exists := w.seen[detail]; exists {
+		return
+	}
+	w.seen[detail] = struct{}{}
+	w.details = append(w.details, detail)
+	w.detailBytes += separatorBytes + len(detail)
+}
+
+func parseAltoolValidationErrorLine(line string) (string, bool) {
+	for _, pattern := range altoolValidationErrorPrefixes {
+		if match := pattern.FindStringIndex(line); match != nil {
+			detail := strings.TrimSpace(line[match[1]:])
+			if detail == "" {
+				detail = "altool reported an unspecified validation error"
+			}
+			return detail, true
+		}
+	}
+	return "", false
+}
+
+func truncateUTF8Prefix(value string, limit int) string {
+	value = strings.ToValidUTF8(value, "\uFFFD")
+	if len(value) <= limit {
+		return value
+	}
+	prefix := []byte(value[:limit])
+	for len(prefix) > 0 && !utf8.Valid(prefix) {
+		prefix = prefix[:len(prefix)-1]
+	}
+	return string(prefix)
 }
 
 func runAltoolAndCapture(ctx context.Context, args []string, logWriter io.Writer, action string) (string, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	cmd := commandContextFn(ctx, "xcrun", args...)
+	cmd, err := trustedXcodeCommand(ctx, "xcrun", args, nil)
+	if err != nil {
+		return "", err
+	}
 	var stdout strings.Builder
 	var stderr strings.Builder
 	outputTail := newTailBuffer(xcodebuildErrorTailLimit)
@@ -693,7 +1246,7 @@ func runAltoolAndCapture(ctx context.Context, args []string, logWriter io.Writer
 	}
 	cmd.Stdout = stdoutWriter
 	cmd.Stderr = stderrWriter
-	if err := cmd.Run(); err != nil {
+	if err := runXcodeCommand(cmd); err != nil {
 		detail := strings.TrimSpace(outputTail.String())
 		if detail == "" {
 			detail = strings.TrimSpace(mergeCapturedCommandOutput(stdout.String(), stderr.String()))
@@ -724,12 +1277,15 @@ func readAltoolHelpOutput(ctx context.Context) (string, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	cmd := commandContextFn(ctx, "xcrun", "altool", "--help")
+	cmd, err := trustedXcodeCommand(ctx, "xcrun", []string{"altool", "--help"}, nil)
+	if err != nil {
+		return "", err
+	}
 	var stdout strings.Builder
 	var stderr strings.Builder
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
+	if err := runXcodeCommand(cmd); err != nil {
 		return "", err
 	}
 	return mergeCapturedCommandOutput(stdout.String(), stderr.String()), nil
@@ -979,35 +1535,428 @@ func parseBuildStatusMetadataField(line string) (string, string, bool) {
 	return key, strings.TrimSpace(line[index+1:]), true
 }
 
-func runCommandWithTail(ctx context.Context, name string, args []string, logWriter io.Writer, action string, commandLabel string) error {
+func runCommandWithBoundedOutput(ctx context.Context, name string, args []string, logWriter io.Writer, action string, commandLabel string) error {
+	return runCommandWithBoundedOutputEnvironmentMode(ctx, name, args, nil, logWriter, action, commandLabel, false)
+}
+
+func runCommandWithBoundedOutputMode(ctx context.Context, name string, args []string, logWriter io.Writer, action string, commandLabel string, preserveProcessError bool) error {
+	return runCommandWithBoundedOutputEnvironmentMode(ctx, name, args, nil, logWriter, action, commandLabel, preserveProcessError)
+}
+
+func runCommandWithBoundedOutputEnvironment(ctx context.Context, name string, args, environment []string, logWriter io.Writer, action string, commandLabel string, terminateProcessGroup bool) error {
+	return runCommandWithBoundedOutputEnvironmentMode(ctx, name, args, environment, logWriter, action, commandLabel, false, terminateProcessGroup)
+}
+
+func runCommandWithBoundedOutputEnvironmentMode(ctx context.Context, name string, args, environment []string, logWriter io.Writer, action string, commandLabel string, preserveProcessError bool, terminateProcessGroup ...bool) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	cmd := commandContextFn(ctx, name, args...)
-	outputTail := newTailBuffer(xcodebuildErrorTailLimit)
-	writer := io.Writer(outputTail)
-	if logWriter != nil {
-		writer = io.MultiWriter(logWriter, outputTail)
+	cmd, err := trustedXcodeCommand(ctx, name, args, environment)
+	if err != nil {
+		return err
 	}
-	cmd.Stdout = writer
-	cmd.Stderr = writer
-	if err := cmd.Run(); err != nil {
-		detail := strings.TrimSpace(outputTail.String())
-		if detail != "" {
-			if outputTail.Truncated() {
-				return fmt.Errorf(
-					"%s %s failed (showing last %d bytes): %s",
-					commandLabel,
-					action,
-					xcodebuildErrorTailLimit,
-					detail,
-				)
-			}
-			return fmt.Errorf("%s %s failed: %s", commandLabel, action, detail)
-		}
-		return fmt.Errorf("%s %s failed: %w", commandLabel, action, err)
+	outputWindow := newXcodeDiagnosticBuffer(xcodebuildErrorTailLimit, logWriter)
+	cmd.Stdout = outputWindow
+	cmd.Stderr = outputWindow
+	cleanupProcessGroup := len(terminateProcessGroup) > 0 && terminateProcessGroup[0]
+	run := runXcodeCommand
+	if cleanupProcessGroup {
+		run = runXcodeCommandWithProcessGroupCleanup
+	}
+	if err := run(cmd); err != nil {
+		return formatCommandOutputError(ctx, err, outputWindow, action, commandLabel, preserveProcessError)
 	}
 	return nil
+}
+
+type formattedCommandOutput interface {
+	String() string
+	Truncated() bool
+	TruncationDescription() string
+}
+
+func formatCommandOutputError(ctx context.Context, err error, output formattedCommandOutput, action string, commandLabel string, preserveProcessError bool) error {
+	detail := strings.TrimSpace(output.String())
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		if detail != "" {
+			if output.Truncated() {
+				return fmt.Errorf(
+					"%s %s timed out or was canceled (%s): %s: %w",
+					commandLabel,
+					action,
+					output.TruncationDescription(),
+					detail,
+					ctxErr,
+				)
+			}
+			return fmt.Errorf("%s %s timed out or was canceled: %s: %w", commandLabel, action, detail, ctxErr)
+		}
+		return fmt.Errorf("%s %s timed out or was canceled: %w", commandLabel, action, ctxErr)
+	}
+	if detail != "" {
+		if output.Truncated() {
+			if preserveProcessError {
+				return fmt.Errorf(
+					"%s %s failed (%s): %s: %w",
+					commandLabel,
+					action,
+					output.TruncationDescription(),
+					detail,
+					err,
+				)
+			}
+			return fmt.Errorf(
+				"%s %s failed (%s): %s",
+				commandLabel,
+				action,
+				output.TruncationDescription(),
+				detail,
+			)
+		}
+		if preserveProcessError {
+			return fmt.Errorf("%s %s failed: %s: %w", commandLabel, action, detail, err)
+		}
+		return fmt.Errorf("%s %s failed: %s", commandLabel, action, detail)
+	}
+	return fmt.Errorf("%s %s failed: %w", commandLabel, action, err)
+}
+
+const (
+	xcodeDiagnosticLineLimit   = 8 * 1024
+	xcodeDiagnosticPrefixLimit = 16 * 1024
+)
+
+var sourceLocationXcodeErrorPattern = regexp.MustCompile(
+	`^.+:[0-9]+(:[0-9]+)?:[[:space:]]+(fatal[[:space:]]+)?error:[[:space:]]+[^[:space:]]`,
+)
+
+var xcodeErrorToolPrefixes = map[string]struct{}{
+	"actool":     {},
+	"clang":      {},
+	"clang++":    {},
+	"codesign":   {},
+	"ibtool":     {},
+	"ld":         {},
+	"swiftc":     {},
+	"xcodebuild": {},
+	"xcrun":      {},
+}
+
+var xcodeDiagnosticPathExtensions = map[string]struct{}{
+	".app":          {},
+	".appex":        {},
+	".c":            {},
+	".cc":           {},
+	".cpp":          {},
+	".entitlements": {},
+	".framework":    {},
+	".h":            {},
+	".hpp":          {},
+	".m":            {},
+	".metal":        {},
+	".mm":           {},
+	".modulemap":    {},
+	".plist":        {},
+	".storyboard":   {},
+	".strings":      {},
+	".swift":        {},
+	".xcassets":     {},
+	".xcconfig":     {},
+	".xcodeproj":    {},
+	".xcworkspace":  {},
+	".xib":          {},
+}
+
+type xcodeDiagnosticBuffer struct {
+	mu              sync.Mutex
+	limit           int
+	tail            *tailBuffer
+	logWriter       io.Writer
+	totalBytes      int64
+	diagnostics     []string
+	diagnosticSet   map[string]struct{}
+	diagnosticBytes int
+	pending         []byte
+	overflow        bool
+}
+
+func newXcodeDiagnosticBuffer(limit int, logWriter io.Writer) *xcodeDiagnosticBuffer {
+	return &xcodeDiagnosticBuffer{
+		limit:         max(0, limit),
+		tail:          newTailBuffer(max(0, limit)),
+		logWriter:     logWriter,
+		diagnosticSet: make(map[string]struct{}),
+	}
+}
+
+func (b *xcodeDiagnosticBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	if b.logWriter != nil {
+		written, err := b.logWriter.Write(p)
+		if err != nil {
+			return written, err
+		}
+		if written != len(p) {
+			return written, io.ErrShortWrite
+		}
+	}
+	written := len(p)
+	b.totalBytes += int64(written)
+	_, _ = b.tail.Write(p)
+	b.consumeDiagnosticLinesLocked(p)
+	return written, nil
+}
+
+func (b *xcodeDiagnosticBuffer) consumeDiagnosticLinesLocked(p []byte) {
+	for len(p) > 0 {
+		newline := bytes.IndexByte(p, '\n')
+		if newline < 0 {
+			b.appendDiagnosticFragmentLocked(p)
+			return
+		}
+		b.appendDiagnosticFragmentLocked(p[:newline])
+		b.finishDiagnosticLineLocked()
+		p = p[newline+1:]
+	}
+}
+
+func (b *xcodeDiagnosticBuffer) appendDiagnosticFragmentLocked(fragment []byte) {
+	remaining := xcodeDiagnosticLineLimit - len(b.pending)
+	if remaining > 0 {
+		prefixLength := min(remaining, len(fragment))
+		b.pending = append(b.pending, fragment[:prefixLength]...)
+		fragment = fragment[prefixLength:]
+	}
+	if len(fragment) > 0 {
+		b.overflow = true
+	}
+}
+
+func (b *xcodeDiagnosticBuffer) finishDiagnosticLineLocked() {
+	if len(b.pending) == 0 && !b.overflow {
+		return
+	}
+
+	line := strings.TrimSuffix(strings.ToValidUTF8(string(b.pending), ""), "\r")
+	if b.overflow {
+		const omissionMarker = "…"
+		line = truncateUTF8Prefix(line, xcodeDiagnosticLineLimit-len(omissionMarker)) + omissionMarker
+	}
+	b.pending = b.pending[:0]
+	b.overflow = false
+
+	line = strings.TrimSpace(line)
+	if !isXcodeErrorDiagnostic(line) {
+		return
+	}
+	b.addDiagnosticLocked(line)
+}
+
+func (b *xcodeDiagnosticBuffer) addDiagnosticLocked(line string) {
+	if _, exists := b.diagnosticSet[line]; exists {
+		return
+	}
+
+	remaining := b.diagnosticBudget() - b.diagnosticBytes
+	required := len(line) + 1
+	if required > remaining {
+		return
+	}
+
+	b.diagnosticSet[line] = struct{}{}
+	b.diagnostics = append(b.diagnostics, line)
+	b.diagnosticBytes += required
+}
+
+func (b *xcodeDiagnosticBuffer) diagnosticBudget() int {
+	return min(b.limit/2, xcodeDiagnosticPrefixLimit)
+}
+
+func (b *xcodeDiagnosticBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	b.finishDiagnosticLineLocked()
+	tail := strings.ToValidUTF8(b.tail.String(), "")
+	if b.totalBytes <= int64(b.limit) {
+		return tail
+	}
+
+	tailDiagnostics := newXcodeDiagnosticTailIndex(tail)
+	diagnostics := make([]string, 0, len(tailDiagnostics.diagnostics)+len(b.diagnostics))
+	diagnosticSet := make(map[string]struct{}, cap(diagnostics))
+	for _, diagnostic := range append(tailDiagnostics.diagnostics, b.diagnostics...) {
+		if _, exists := diagnosticSet[diagnostic]; exists {
+			continue
+		}
+		diagnosticSet[diagnostic] = struct{}{}
+		diagnostics = append(diagnostics, diagnostic)
+	}
+
+	prefixBytes := 0
+	for {
+		boundary := max(0, len(tail)-(b.limit-prefixBytes))
+		newPrefixBytes := appendMissingXcodeDiagnostics(
+			nil, diagnostics, tailDiagnostics, boundary, b.diagnosticBudget(),
+		)
+		if newPrefixBytes <= prefixBytes {
+			break
+		}
+		prefixBytes = newPrefixBytes
+	}
+	boundary := max(0, len(tail)-(b.limit-prefixBytes))
+
+	var prefix strings.Builder
+	prefix.Grow(prefixBytes)
+	appendMissingXcodeDiagnostics(&prefix, diagnostics, tailDiagnostics, boundary, b.diagnosticBudget())
+	diagnosticPrefix := prefix.String()
+	// Preserve the calculated tail boundary when complete-line packing leaves unused prefix space.
+	tail = truncateUTF8Suffix(tail, b.limit-prefixBytes)
+	return diagnosticPrefix + tail
+}
+
+func appendMissingXcodeDiagnostics(
+	destination *strings.Builder,
+	diagnostics []string,
+	tailDiagnostics xcodeDiagnosticTailIndex,
+	boundary int,
+	limit int,
+) int {
+	written := 0
+	for _, diagnostic := range diagnostics {
+		if tailDiagnostics.containsAtOrAfter(diagnostic, boundary) {
+			continue
+		}
+		required := len(diagnostic) + 1
+		if required > limit-written {
+			continue
+		}
+		if destination != nil {
+			destination.WriteString(diagnostic)
+			destination.WriteByte('\n')
+		}
+		written += required
+	}
+	return written
+}
+
+type xcodeDiagnosticTailIndex struct {
+	lines       map[string]int
+	diagnostics []string
+}
+
+func newXcodeDiagnosticTailIndex(tail string) xcodeDiagnosticTailIndex {
+	index := xcodeDiagnosticTailIndex{lines: make(map[string]int)}
+	diagnosticSet := make(map[string]struct{})
+	offset := 0
+	for {
+		newline := strings.IndexByte(tail[offset:], '\n')
+		lineEnd := len(tail)
+		if newline >= 0 {
+			lineEnd = offset + newline
+		}
+		line := tail[offset:lineEnd]
+		line = strings.TrimSpace(strings.TrimSuffix(line, "\r"))
+		if line != "" {
+			lineStart := offset + strings.Index(tail[offset:lineEnd], line)
+			index.lines[line] = max(index.lines[line], lineStart)
+			diagnostic := line
+			if len(diagnostic) > xcodeDiagnosticLineLimit {
+				const omissionMarker = "…"
+				diagnostic = truncateUTF8Prefix(diagnostic, xcodeDiagnosticLineLimit-len(omissionMarker)) + omissionMarker
+			}
+			if isXcodeErrorDiagnostic(diagnostic) {
+				if _, exists := diagnosticSet[diagnostic]; !exists {
+					diagnosticSet[diagnostic] = struct{}{}
+					index.diagnostics = append(index.diagnostics, diagnostic)
+				}
+			}
+		}
+		if newline < 0 {
+			return index
+		}
+		offset = lineEnd + 1
+	}
+}
+
+func (i xcodeDiagnosticTailIndex) containsAtOrAfter(diagnostic string, boundary int) bool {
+	diagnostic = strings.TrimSpace(diagnostic)
+	if diagnostic == "" {
+		return false
+	}
+	if start, exists := i.lines[diagnostic]; exists && start >= boundary {
+		return true
+	}
+
+	if !strings.HasSuffix(diagnostic, "…") {
+		return false
+	}
+	match := strings.TrimSuffix(diagnostic, "…")
+	for line, start := range i.lines {
+		if start >= boundary && strings.HasPrefix(line, match) {
+			return true
+		}
+	}
+	return false
+}
+
+func (b *xcodeDiagnosticBuffer) Truncated() bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.totalBytes > int64(b.limit)
+}
+
+func (b *xcodeDiagnosticBuffer) TruncationDescription() string {
+	return fmt.Sprintf("output truncated to %d bytes; preserving recognized errors and final output", b.limit)
+}
+
+func isXcodeErrorDiagnostic(line string) bool {
+	line = strings.TrimSpace(line)
+	if hasXcodeErrorMessagePrefix(line) || sourceLocationXcodeErrorPattern.MatchString(line) {
+		return true
+	}
+
+	colon := strings.IndexByte(line, ':')
+	if colon <= 0 {
+		return false
+	}
+	prefix := line[:colon]
+	if !hasXcodeErrorMessagePrefix(strings.TrimSpace(line[colon+1:])) {
+		return false
+	}
+	if _, ok := xcodeErrorToolPrefixes[prefix]; ok {
+		return true
+	}
+	if strings.ContainsRune(prefix, filepath.Separator) {
+		return true
+	}
+	_, ok := xcodeDiagnosticPathExtensions[strings.ToLower(filepath.Ext(prefix))]
+	return ok
+}
+
+func hasXcodeErrorMessagePrefix(line string) bool {
+	for _, prefix := range []string{"error:", "fatal error:"} {
+		if strings.HasPrefix(line, prefix) && strings.TrimSpace(line[len(prefix):]) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+func truncateUTF8Suffix(value string, limit int) string {
+	if limit <= 0 {
+		return ""
+	}
+	if len(value) <= limit {
+		return value
+	}
+	value = value[len(value)-limit:]
+	for len(value) > 0 && !utf8.RuneStart(value[0]) {
+		value = value[1:]
+	}
+	return value
 }
 
 type tailBuffer struct {
@@ -1044,11 +1993,21 @@ func (b *tailBuffer) Write(p []byte) (int, error) {
 }
 
 func (b *tailBuffer) String() string {
-	return string(b.data)
+	data := b.data
+	if b.truncated {
+		for len(data) > 0 && !utf8.RuneStart(data[0]) {
+			data = data[1:]
+		}
+	}
+	return string(data)
 }
 
 func (b *tailBuffer) Truncated() bool {
 	return b.truncated
+}
+
+func (b *tailBuffer) TruncationDescription() string {
+	return fmt.Sprintf("showing last %d bytes", b.limit)
 }
 
 func summarizeAction(args []string) string {
@@ -1060,6 +2019,9 @@ func summarizeAction(args []string) string {
 	}
 	if containsArg(args, "archive") {
 		return "archive"
+	}
+	if containsArg(args, "build") {
+		return "build"
 	}
 	return "command"
 }
@@ -1093,41 +2055,54 @@ func prepareArchiveDestination(archivePath string, overwrite bool) error {
 }
 
 func prepareIPAPath(ipaPath string, overwrite bool) error {
-	parent := filepath.Dir(ipaPath)
+	return prepareExportArtifactPath(ipaPath, "--ipa-path", "ipa", overwrite)
+}
+
+func prepareExportArtifactPath(path, flagName, description string, overwrite bool) error {
+	parent := filepath.Dir(path)
 	if err := os.MkdirAll(parent, 0o755); err != nil {
-		return fmt.Errorf("create ipa output directory: %w", err)
+		return fmt.Errorf("create %s output directory: %w", description, err)
 	}
-	_, err := os.Stat(ipaPath)
+	_, err := os.Stat(path)
 	switch {
 	case err == nil && !overwrite:
-		return fmt.Errorf("--ipa-path already exists: %s (use --overwrite to replace it)", ipaPath)
+		return fmt.Errorf("%s already exists: %s (use --overwrite to replace it)", flagName, path)
 	case err == nil && overwrite:
-		if removeErr := os.Remove(ipaPath); removeErr != nil {
-			return fmt.Errorf("remove existing ipa path: %w", removeErr)
-		}
+		return nil
 	case err != nil && !errors.Is(err, os.ErrNotExist):
-		return fmt.Errorf("stat ipa path: %w", err)
+		return fmt.Errorf("stat %s path: %w", description, err)
 	}
 	return nil
 }
 
 func findExportedIPA(exportDir string) (string, error) {
-	matches, err := filepath.Glob(filepath.Join(exportDir, "*.ipa"))
+	return findExportedArtifact(exportDir, ".ipa", "IPA")
+}
+
+func findExportedArtifact(exportDir, extension, artifactName string) (string, error) {
+	matches, err := filepath.Glob(filepath.Join(exportDir, "*"+extension))
 	if err != nil {
-		return "", fmt.Errorf("scan exported ipa: %w", err)
+		return "", fmt.Errorf("scan exported %s: %w", strings.ToLower(artifactName), err)
 	}
 	if len(matches) == 0 {
-		return "", fmt.Errorf("xcodebuild export did not produce an .ipa file")
+		return "", fmt.Errorf("xcodebuild export did not produce a %s file", extension)
 	}
 	if len(matches) > 1 {
-		return "", fmt.Errorf("xcodebuild export produced multiple .ipa files")
+		return "", fmt.Errorf("xcodebuild export produced multiple %s files", extension)
 	}
 	return matches[0], nil
 }
 
+func exportArtifactPath(opts ExportOptions) string {
+	if opts.PKGPath != "" {
+		return opts.PKGPath
+	}
+	return opts.IPAPath
+}
+
 // isDirectUploadMode reads the ExportOptions plist and returns true when
 // destination is set to "upload". In this mode xcodebuild uploads the build
-// directly to App Store Connect and does not produce a local .ipa file.
+// directly to App Store Connect and does not produce a local artifact.
 func isDirectUploadMode(exportOptionsPlistPath string) bool {
 	data, err := os.ReadFile(exportOptionsPlistPath)
 	if err != nil {
@@ -1142,19 +2117,59 @@ func isDirectUploadMode(exportOptionsPlistPath string) bool {
 }
 
 func moveExportedIPA(sourcePath, destinationPath string, overwrite bool) error {
-	if overwrite {
-		if err := os.Remove(destinationPath); err != nil && !errors.Is(err, os.ErrNotExist) {
-			return fmt.Errorf("remove existing ipa path: %w", err)
-		}
+	return moveExportedArtifact(sourcePath, destinationPath, "IPA", overwrite)
+}
+
+func moveExportedArtifact(sourcePath, destinationPath, artifactName string, overwrite bool) error {
+	artifactLower := strings.ToLower(artifactName)
+	pathInfo, err := os.Lstat(sourcePath)
+	if err != nil {
+		return fmt.Errorf("inspect exported %s: %w", artifactName, err)
 	}
+	if !pathInfo.Mode().IsRegular() {
+		return fmt.Errorf("exported %s is not a regular file", artifactName)
+	}
+	if pathInfo.Size() == 0 {
+		return fmt.Errorf("exported %s is empty", artifactName)
+	}
+	if !overwrite {
+		source, err := os.Open(sourcePath)
+		if err != nil {
+			return fmt.Errorf("open exported %s: %w", artifactName, err)
+		}
+		defer source.Close()
+		info, err := source.Stat()
+		if err != nil {
+			return fmt.Errorf("inspect exported %s: %w", artifactName, err)
+		}
+		root, err := rootfs.New(filepath.Dir(destinationPath))
+		if err != nil {
+			return fmt.Errorf("open %s output root: %w", artifactLower, err)
+		}
+		defer root.Close()
+		if _, err := root.CreateNewFrom(filepath.Base(destinationPath), source, info.Mode().Perm()); err != nil {
+			return newDestinationExistsError(destinationPath, err)
+		}
+		// Publication is the commit point. The source lives in Export's owned
+		// temporary directory, whose deferred cleanup handles best-effort removal.
+		return nil
+	}
+	// Export runs only on macOS, where rename replaces an existing regular file
+	// atomically. Do not unlink the old artifact first: if the final move fails,
+	// the caller's prior artifact remains intact.
 	if err := os.Rename(sourcePath, destinationPath); err != nil {
-		return fmt.Errorf("move exported ipa: %w", err)
+		return fmt.Errorf("move exported %s: %w", artifactLower, err)
 	}
 	return nil
 }
 
 func readArchiveBundleInfo(archivePath string) (bundleInfo, error) {
-	data, err := os.ReadFile(filepath.Join(archivePath, "Info.plist"))
+	archiveRoot, err := os.OpenRoot(archivePath)
+	if err != nil {
+		return bundleInfo{}, fmt.Errorf("open archive: %w", err)
+	}
+	defer func() { _ = archiveRoot.Close() }()
+	data, err := readRegularFileFromRoot(archiveRoot, "Info.plist")
 	if err != nil {
 		return bundleInfo{}, fmt.Errorf("read archive Info.plist: %w", err)
 	}
@@ -1206,15 +2221,22 @@ func isTopLevelAppInfoPlist(name string) bool {
 }
 
 func readBundleInfoFromZip(file *zip.File) (bundleInfo, error) {
+	if err := infoplist.CheckDeclaredSize(file.UncompressedSize64); err != nil {
+		return bundleInfo{}, fmt.Errorf("read Info.plist: %w", err)
+	}
+
 	reader, err := file.Open()
 	if err != nil {
 		return bundleInfo{}, fmt.Errorf("open Info.plist: %w", err)
 	}
 	defer reader.Close()
 
-	data, err := io.ReadAll(reader)
+	data, err := infoplist.ReadBounded(reader)
 	if err != nil {
 		return bundleInfo{}, fmt.Errorf("read Info.plist: %w", err)
+	}
+	if err := infoplist.ValidateStructure(data); err != nil {
+		return bundleInfo{}, fmt.Errorf("decode Info.plist: %w", err)
 	}
 	var payload map[string]any
 	if _, err := plist.Unmarshal(data, &payload); err != nil {
@@ -1229,15 +2251,50 @@ func readBundleInfoFromZip(file *zip.File) (bundleInfo, error) {
 }
 
 func inferArchivePlatformFromAppBundle(archivePath string, appProps map[string]any) (string, error) {
+	payload, err := readArchivedAppInfoPlist(archivePath, appProps)
+	if err != nil {
+		return "", err
+	}
+	platform := inferAppStorePlatformFromPlist(payload)
+	if platform == "" {
+		return "", fmt.Errorf("archived app Info.plist did not contain a supported platform marker")
+	}
+	return platform, nil
+}
+
+func readArchivedAppInfoPlist(archivePath string, appProps map[string]any) (map[string]any, error) {
+	archiveRoot, err := os.OpenRoot(archivePath)
+	if err != nil {
+		return nil, fmt.Errorf("open archive: %w", err)
+	}
+	defer func() { _ = archiveRoot.Close() }()
+	return readArchivedAppInfoPlistFromRoot(archiveRoot, appProps)
+}
+
+func readArchivedAppInfoPlistFromRoot(archiveRoot *os.Root, appProps map[string]any) (map[string]any, error) {
 	applicationPath := coercePlistValueToString(appProps["ApplicationPath"])
 	if strings.TrimSpace(applicationPath) == "" {
-		return "", fmt.Errorf("archive Info.plist missing ApplicationPath")
+		return nil, fmt.Errorf("archive Info.plist missing ApplicationPath")
 	}
 
-	appBundlePath := filepath.Join(archivePath, "Products", filepath.FromSlash(applicationPath))
-	candidatePaths := []string{filepath.Join(appBundlePath, "Info.plist")}
-	if strings.HasSuffix(strings.ToLower(strings.TrimSpace(appBundlePath)), ".app") {
-		candidatePaths = append(candidatePaths, filepath.Join(appBundlePath, "Contents", "Info.plist"))
+	relativeApplicationPath := filepath.Clean(filepath.FromSlash(applicationPath))
+	if filepath.IsAbs(relativeApplicationPath) || relativeApplicationPath == ".." || strings.HasPrefix(relativeApplicationPath, ".."+string(filepath.Separator)) {
+		return nil, fmt.Errorf("archive Info.plist contains unsafe ApplicationPath %q", applicationPath)
+	}
+	productsRoot, err := archiveRoot.OpenRoot("Products")
+	if err != nil {
+		return nil, fmt.Errorf("open archive Products directory: %w", err)
+	}
+	defer func() { _ = productsRoot.Close() }()
+	appRoot, err := productsRoot.OpenRoot(relativeApplicationPath)
+	if err != nil {
+		return nil, fmt.Errorf("open archived app bundle: %w", err)
+	}
+	defer func() { _ = appRoot.Close() }()
+
+	candidatePaths := []string{"Info.plist"}
+	if strings.HasSuffix(strings.ToLower(strings.TrimSpace(relativeApplicationPath)), ".app") {
+		candidatePaths = append(candidatePaths, filepath.Join("Contents", "Info.plist"))
 	}
 
 	var (
@@ -1245,23 +2302,44 @@ func inferArchivePlatformFromAppBundle(archivePath string, appProps map[string]a
 		lastErr error
 	)
 	for _, candidatePath := range candidatePaths {
-		data, lastErr = os.ReadFile(candidatePath)
+		data, lastErr = readRegularFileFromRoot(appRoot, candidatePath)
 		if lastErr == nil {
 			break
 		}
+		if !errors.Is(lastErr, os.ErrNotExist) {
+			return nil, fmt.Errorf("read archived app Info.plist: %w", lastErr)
+		}
 	}
 	if lastErr != nil {
-		return "", fmt.Errorf("read archived app Info.plist: %w", lastErr)
+		return nil, fmt.Errorf("read archived app Info.plist: %w", lastErr)
 	}
 	var payload map[string]any
 	if _, err := plist.Unmarshal(data, &payload); err != nil {
-		return "", fmt.Errorf("decode archived app Info.plist: %w", err)
+		return nil, fmt.Errorf("decode archived app Info.plist: %w", err)
 	}
-	platform := inferAppStorePlatformFromPlist(payload)
-	if platform == "" {
-		return "", fmt.Errorf("archived app Info.plist did not contain a supported platform marker")
+	return payload, nil
+}
+
+func readRegularFileFromRoot(root *os.Root, name string) ([]byte, error) {
+	file, err := secureopen.OpenExistingNoFollowInRoot(root, name)
+	if err != nil {
+		return nil, err
 	}
-	return platform, nil
+	defer func() { _ = file.Close() }()
+	info, err := file.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("metadata path must be a regular file: %s", name)
+	}
+	if info.Size() < 0 {
+		return nil, fmt.Errorf("metadata path has an invalid size: %s", name)
+	}
+	if err := infoplist.CheckDeclaredSize(uint64(info.Size())); err != nil {
+		return nil, err
+	}
+	return infoplist.ReadBounded(file)
 }
 
 func inferAppStorePlatformFromPlist(payload map[string]any) string {

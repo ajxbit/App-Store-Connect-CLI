@@ -17,11 +17,14 @@ import (
 func BuildsCountCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("count", flag.ExitOnError)
 
-	appID := fs.String("app", "", "App Store Connect app ID, bundle ID, or exact app name (required, or ASC_APP_ID env)")
+	appID := shared.BindResourceIDFlag(fs, "app", "apps", "App Store Connect app ID, bundle ID, or exact app name (required, or ASC_APP_ID env)")
 	version := fs.String("version", "", "Filter by marketing version string (CFBundleShortVersionString)")
 	buildNumber := fs.String("build-number", "", "Filter by build number (CFBundleVersion)")
 	platform := fs.String("platform", "", "Filter by platform: IOS, MAC_OS, TV_OS, VISION_OS")
 	processingState := fs.String("processing-state", "", "Filter by processing state: VALID, PROCESSING, FAILED, INVALID, or all")
+	betaReviewState := fs.String("beta-review-state", "", "Filter by beta app review state, comma-separated ("+strings.Join(buildsListBetaReviewStates, ", ")+")")
+	excludeExpired := fs.Bool("exclude-expired", false, "Exclude expired builds")
+	notExpired := fs.Bool("not-expired", false, "Alias for --exclude-expired")
 	output := shared.BindOutputFlags(fs)
 
 	return &ffcli.Command{
@@ -44,6 +47,8 @@ Examples:
   asc builds count --app "123456789" --platform IOS
   asc builds count --app "123456789" --processing-state VALID
   asc builds count --app "123456789" --processing-state all
+  asc builds count --app "123456789" --beta-review-state "WAITING_FOR_REVIEW,IN_REVIEW"
+  asc builds count --app "123456789" --exclude-expired
   asc builds count --app "123456789" --version "2.1.0" --platform IOS --output json`,
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
@@ -51,7 +56,7 @@ Examples:
 			resolvedAppID := shared.ResolveAppID(*appID)
 			if resolvedAppID == "" {
 				fmt.Fprintf(os.Stderr, "Error: --app is required (or set ASC_APP_ID)\n\n")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--app")
 			}
 
 			platformValue := ""
@@ -65,6 +70,11 @@ Examples:
 
 			buildNumberValue := strings.TrimSpace(*buildNumber)
 			processingStateValues, err := normalizeBuildProcessingStateFilter(*processingState)
+			if err != nil {
+				return err
+			}
+
+			betaReviewStateValues, err := normalizeBuildsListBetaReviewStates(*betaReviewState)
 			if err != nil {
 				return err
 			}
@@ -87,7 +97,7 @@ Examples:
 			var preReleaseVersionIDs []string
 			versionValue := strings.TrimSpace(*version)
 			if versionValue != "" {
-				preReleaseVersionIDs, err = findPreReleaseVersionIDsForBuildsList(requestCtx, client, resolvedAppID, versionValue)
+				preReleaseVersionIDs, err = shared.FindPreReleaseVersionIDs(requestCtx, client, resolvedAppID, versionValue, platformValue)
 				if err != nil {
 					return fmt.Errorf("builds count: %w", err)
 				}
@@ -106,6 +116,12 @@ Examples:
 			}
 			if len(processingStateValues) > 0 {
 				filterOpts = append(filterOpts, asc.WithBuildsProcessingStates(processingStateValues))
+			}
+			if len(betaReviewStateValues) > 0 {
+				filterOpts = append(filterOpts, asc.WithBuildsBetaReviewStates(betaReviewStateValues))
+			}
+			if *excludeExpired || *notExpired {
+				filterOpts = append(filterOpts, asc.WithBuildsExpired(false))
 			}
 			if len(preReleaseVersionIDs) > 0 {
 				filterOpts = append(filterOpts, asc.WithBuildsPreReleaseVersions(preReleaseVersionIDs))

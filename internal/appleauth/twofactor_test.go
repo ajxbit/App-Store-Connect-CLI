@@ -51,6 +51,7 @@ func TestAuthOptionsResponseAuthOptionsCopiesTrustedPhoneNumbers(t *testing.T) {
 	got := resp.AuthOptions()
 	if got == nil {
 		t.Fatal("expected auth options response conversion result")
+		return
 	}
 	if !got.NoTrustedDevices {
 		t.Fatal("expected noTrustedDevices to be preserved")
@@ -73,6 +74,7 @@ func TestNilAuthOptionsResponseReturnsEmptyOptions(t *testing.T) {
 	got := resp.AuthOptions()
 	if got == nil {
 		t.Fatal("expected empty auth options for nil response")
+		return
 	}
 	if got.NoTrustedDevices {
 		t.Fatal("did not expect noTrustedDevices on nil response")
@@ -339,5 +341,72 @@ func TestSubmitTwoFactorCodeRejectsPreparedPhoneFlowWithoutPhoneID(t *testing.T)
 	}
 	if finalized {
 		t.Fatal("did not expect finalize after rejected phone submission")
+	}
+}
+
+func TestSubmitTwoFactorCodeUsesVoicePushModeFromAuthOptions(t *testing.T) {
+	session := &stubSessionState{}
+	requestedPhoneCode := false
+	submittedPhoneCode := false
+	finalized := false
+
+	err := SubmitTwoFactorCode(
+		context.Background(),
+		session,
+		"123456",
+		func(context.Context) (*AuthOptions, error) {
+			return &AuthOptions{
+				NoTrustedDevices: true,
+				TrustedPhoneNumbers: []TrustedPhoneNumber{
+					{ID: 7, PushMode: "voice", NumberWithDialCode: "+1 (•••) •••-••66"},
+				},
+			}, nil
+		},
+		func(ctx context.Context, phoneID int, mode string) error {
+			requestedPhoneCode = true
+			if phoneID != 7 {
+				t.Fatalf("expected phone id 7, got %d", phoneID)
+			}
+			if mode != "voice" {
+				t.Fatalf("expected phone request mode voice, got %q", mode)
+			}
+			return nil
+		},
+		func(context.Context, string) error {
+			t.Fatal("did not expect trusted-device submission for phone-only flow")
+			return nil
+		},
+		func(ctx context.Context, code string, phoneID int, mode string) error {
+			submittedPhoneCode = true
+			if code != "123456" {
+				t.Fatalf("expected 2fa code 123456, got %q", code)
+			}
+			if phoneID != 7 {
+				t.Fatalf("expected phone id 7, got %d", phoneID)
+			}
+			if mode != "voice" {
+				t.Fatalf("expected phone verification mode voice, got %q", mode)
+			}
+			return nil
+		},
+		func(context.Context) error {
+			finalized = true
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("expected successful phone verification, got %v", err)
+	}
+	if !requestedPhoneCode {
+		t.Fatal("expected phone delivery request")
+	}
+	if !submittedPhoneCode {
+		t.Fatal("expected phone verification submission")
+	}
+	if !finalized {
+		t.Fatal("expected finalize after phone verification")
+	}
+	if session.phoneMode != "voice" {
+		t.Fatalf("expected session to remember voice mode, got %q", session.phoneMode)
 	}
 }

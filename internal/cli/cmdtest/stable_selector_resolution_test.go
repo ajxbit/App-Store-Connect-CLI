@@ -7,15 +7,52 @@ import (
 	"flag"
 	"io"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/asc"
+	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/cli/shared"
 )
 
 func setupStableSelectorAuth(t *testing.T) {
 	t.Helper()
 	setupAuth(t)
 	t.Setenv("ASC_CONFIG_PATH", filepath.Join(t.TempDir(), "nonexistent.json"))
+}
+
+// selectorLookupHangGuard bounds request budgets once a selector lookup has
+// timed out. It only stops a hung test; no assertion depends on it.
+const selectorLookupHangGuard = 30 * time.Second
+
+// expireSelectorLookup gives the command a 10 ms request budget so its selector
+// lookup times out for real, and returns the transport handler for that lookup.
+// The handler waits for the lookup's own deadline, then raises ASC_TIMEOUT to
+// selectorLookupHangGuard, so the requests that follow the fallback cannot time
+// out on a loaded host. A fallback request that reused the lookup's context or
+// budget would still see it expired, so fresh-context assertions keep their
+// meaning. Call it after the auth setup, which the client factory reads.
+func expireSelectorLookup(t *testing.T) func(*http.Request) (*http.Response, error) {
+	t.Helper()
+	t.Setenv("ASC_TIMEOUT", "10ms")
+	t.Setenv("ASC_TIMEOUT_SECONDS", "")
+	// The client fixes its whole-request HTTP timeout when it is built, so build
+	// it with the hang guard; only the per-request budgets start at 10 ms.
+	t.Cleanup(shared.SetASCClientFactoryForTesting(func() (*asc.Client, error) {
+		return asc.NewClientWithTimeout(
+			os.Getenv("ASC_KEY_ID"),
+			os.Getenv("ASC_ISSUER_ID"),
+			os.Getenv("ASC_PRIVATE_KEY_PATH"),
+			selectorLookupHangGuard,
+		)
+	}))
+	return func(req *http.Request) (*http.Response, error) {
+		<-req.Context().Done()
+		t.Setenv("ASC_TIMEOUT", selectorLookupHangGuard.String())
+		return nil, req.Context().Err()
+	}
 }
 
 func selectorJSONResponse(body string) *http.Response {
@@ -184,8 +221,7 @@ func TestIAPContentGetFallsBackToNumericIDWhenLookupErrors(t *testing.T) {
 func TestIAPContentGetFallsBackToNumericIDAfterLookupTimeout(t *testing.T) {
 	setupStableSelectorAuth(t)
 	t.Setenv("ASC_APP_ID", "")
-	t.Setenv("ASC_TIMEOUT", "10ms")
-	t.Setenv("ASC_TIMEOUT_SECONDS", "")
+	lookupTimeout := expireSelectorLookup(t)
 
 	originalTransport := http.DefaultTransport
 	t.Cleanup(func() { http.DefaultTransport = originalTransport })
@@ -195,8 +231,7 @@ func TestIAPContentGetFallsBackToNumericIDAfterLookupTimeout(t *testing.T) {
 		requests++
 		switch req.URL.Path {
 		case "/v1/apps/app-123/inAppPurchasesV2":
-			<-req.Context().Done()
-			return nil, req.Context().Err()
+			return lookupTimeout(req)
 		case "/v2/inAppPurchases/2024/content":
 			if err := req.Context().Err(); err != nil {
 				t.Fatalf("expected fresh fetch context after lookup timeout, got %v", err)
@@ -236,11 +271,10 @@ func TestIAPContentGetFallsBackToNumericIDAfterLookupTimeout(t *testing.T) {
 	}
 }
 
-func TestIAPLocalizationsListFallsBackToNumericIDAfterLookupTimeout(t *testing.T) {
+func TestIAPContentViewFallsBackToNumericIDAfterLookupTimeout(t *testing.T) {
 	setupStableSelectorAuth(t)
 	t.Setenv("ASC_APP_ID", "")
-	t.Setenv("ASC_TIMEOUT", "10ms")
-	t.Setenv("ASC_TIMEOUT_SECONDS", "")
+	lookupTimeout := expireSelectorLookup(t)
 
 	originalTransport := http.DefaultTransport
 	t.Cleanup(func() { http.DefaultTransport = originalTransport })
@@ -250,13 +284,12 @@ func TestIAPLocalizationsListFallsBackToNumericIDAfterLookupTimeout(t *testing.T
 		requests++
 		switch req.URL.Path {
 		case "/v1/apps/app-123/inAppPurchasesV2":
-			<-req.Context().Done()
-			return nil, req.Context().Err()
-		case "/v2/inAppPurchases/2024/inAppPurchaseLocalizations":
+			return lookupTimeout(req)
+		case "/v2/inAppPurchases/2024/content":
 			if err := req.Context().Err(); err != nil {
-				t.Fatalf("expected fresh localizations context after lookup timeout, got %v", err)
+				t.Fatalf("expected fresh content context after lookup timeout, got %v", err)
 			}
-			return selectorJSONResponse(`{"data":[]}`), nil
+			return selectorJSONResponse(`{"data":{"type":"inAppPurchaseContents","id":"content-2024"}}`), nil
 		default:
 			t.Fatalf("unexpected request: %s %s", req.Method, req.URL.String())
 			return nil, nil
@@ -264,25 +297,25 @@ func TestIAPLocalizationsListFallsBackToNumericIDAfterLookupTimeout(t *testing.T
 	})
 
 	stdout, stderr, runErr := runRootCommand(t, []string{
-		"iap", "localizations", "list",
+		"iap", "content", "view",
 		"--app", "app-123",
 		"--iap-id", "2024",
 	})
 	if runErr != nil {
 		t.Fatalf("expected nil error, got %v", runErr)
 	}
-	if stderr != "" {
+	if strings.TrimSpace(stderr) != "" {
 		t.Fatalf("expected empty stderr, got %q", stderr)
 	}
 	if requests != 2 {
-		t.Fatalf("expected lookup timeout followed by localizations fetch, got %d requests", requests)
+		t.Fatalf("expected lookup timeout followed by content fetch, got %d requests", requests)
 	}
-	if !strings.Contains(stdout, `"data"`) {
+	if !strings.Contains(stdout, `"content-2024"`) {
 		t.Fatalf("expected JSON output, got %q", stdout)
 	}
 }
 
-func TestIAPLocalizationsListDoesNotSuppressNumericAmbiguity(t *testing.T) {
+func TestIAPContentViewDoesNotSuppressNumericAmbiguity(t *testing.T) {
 	setupStableSelectorAuth(t)
 	t.Setenv("ASC_APP_ID", "")
 
@@ -309,7 +342,7 @@ func TestIAPLocalizationsListDoesNotSuppressNumericAmbiguity(t *testing.T) {
 				t.Fatalf("unexpected lookup query: %s", req.URL.RawQuery)
 				return nil, nil
 			}
-		case "/v2/inAppPurchases/2024/inAppPurchaseLocalizations":
+		case "/v2/inAppPurchases/2024/content":
 			t.Fatal("expected ambiguity to stop before direct numeric ID fetch")
 			return nil, nil
 		default:
@@ -319,14 +352,14 @@ func TestIAPLocalizationsListDoesNotSuppressNumericAmbiguity(t *testing.T) {
 	})
 
 	_, _, runErr := runRootCommand(t, []string{
-		"iap", "localizations", "list",
+		"iap", "content", "view",
 		"--app", "app-123",
 		"--iap-id", "2024",
 	})
 	if runErr == nil {
 		t.Fatal("expected ambiguity error")
 	}
-	if !strings.Contains(runErr.Error(), "Use the explicit ASC ID to disambiguate") {
+	if !strings.Contains(runErr.Error(), "pass --iap-id with one of:") {
 		t.Fatalf("expected disambiguation guidance, got %v", runErr)
 	}
 	if requests != 2 {
@@ -388,11 +421,79 @@ func TestSubscriptionReviewScreenshotGetResolvesStableSelectorWithAppFlag(t *tes
 	}
 }
 
-func TestSubscriptionLocalizationsListFallsBackToNumericIDAfterLookupTimeout(t *testing.T) {
+func TestSubscriptionPromotedPurchaseViewResolvesStableSelectorWithAppFlag(t *testing.T) {
 	setupStableSelectorAuth(t)
 	t.Setenv("ASC_APP_ID", "")
-	t.Setenv("ASC_TIMEOUT", "10ms")
-	t.Setenv("ASC_TIMEOUT_SECONDS", "")
+
+	originalTransport := http.DefaultTransport
+	t.Cleanup(func() { http.DefaultTransport = originalTransport })
+
+	requests := 0
+	http.DefaultTransport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		requests++
+		if req.Method != http.MethodGet {
+			t.Fatalf("request method = %s, want GET", req.Method)
+		}
+		switch req.URL.Path {
+		case "/v1/apps/app-1/subscriptionGroups":
+			query := req.URL.Query()
+			if len(query) != 1 || len(query["limit"]) != 1 || query["limit"][0] != "200" {
+				t.Fatalf("subscription-group query = %v, want exactly limit=200", query)
+			}
+			return selectorJSONResponse(`{"data":[{"type":"subscriptionGroups","id":"group-1","attributes":{"referenceName":"Premium"}}]}`), nil
+		case "/v1/subscriptionGroups/group-1/subscriptions":
+			query := req.URL.Query()
+			if len(query) != 2 || len(query["limit"]) != 1 || query["limit"][0] != "200" {
+				t.Fatalf("subscription query = %v, want exactly product filter and limit=200", query)
+			}
+			if got := query["filter[productId]"]; len(got) != 1 || got[0] != "com.example.monthly" {
+				t.Fatalf("product filter = %v, want exactly [com.example.monthly]", got)
+			}
+			return selectorJSONResponse(`{"data":[{"type":"subscriptions","id":"sub-1","attributes":{"name":"Monthly","productId":"com.example.monthly"}}]}`), nil
+		case "/v1/subscriptions/sub-1/promotedPurchase":
+			query := req.URL.Query()
+			want := map[string]string{
+				"fields[inAppPurchases]": "versions",
+				"fields[subscriptions]":  "versions",
+				"include":                "inAppPurchaseV2,subscription",
+			}
+			if len(query) != len(want) {
+				t.Fatalf("query = %v, want exactly %v", query, want)
+			}
+			for key, wantValue := range want {
+				if got := query[key]; len(got) != 1 || got[0] != wantValue {
+					t.Fatalf("query[%q] = %v, want exactly [%q]", key, got, wantValue)
+				}
+			}
+			return selectorJSONResponse(`{"data":{"type":"promotedPurchases","id":"promo-1"}}`), nil
+		default:
+			t.Fatalf("unexpected request: %s %s", req.Method, req.URL.String())
+			return nil, nil
+		}
+	})
+
+	stdout, stderr, runErr := runRootCommand(t, []string{
+		"subscriptions", "promoted-purchases", "view",
+		"--app", "app-1",
+		"--subscription-id", "com.example.monthly",
+		"--iap-fields", "versions",
+		"--subscription-fields", "versions",
+	})
+	if runErr != nil {
+		t.Fatalf("expected nil error, got %v", runErr)
+	}
+	if stderr != "" {
+		t.Fatalf("expected empty stderr, got %q", stderr)
+	}
+	if requests != 3 || !strings.Contains(stdout, `"id":"promo-1"`) {
+		t.Fatalf("requests=%d stdout=%q", requests, stdout)
+	}
+}
+
+func TestSubscriptionVersionsListFallsBackToNumericIDAfterLookupTimeout(t *testing.T) {
+	setupStableSelectorAuth(t)
+	t.Setenv("ASC_APP_ID", "")
+	lookupTimeout := expireSelectorLookup(t)
 
 	originalTransport := http.DefaultTransport
 	t.Cleanup(func() { http.DefaultTransport = originalTransport })
@@ -402,11 +503,10 @@ func TestSubscriptionLocalizationsListFallsBackToNumericIDAfterLookupTimeout(t *
 		requests++
 		switch req.URL.Path {
 		case "/v1/apps/app-123/subscriptionGroups":
-			<-req.Context().Done()
-			return nil, req.Context().Err()
-		case "/v1/subscriptions/2024/subscriptionLocalizations":
+			return lookupTimeout(req)
+		case "/v1/subscriptions/2024/versions":
 			if err := req.Context().Err(); err != nil {
-				t.Fatalf("expected fresh localizations context after lookup timeout, got %v", err)
+				t.Fatalf("expected fresh versions context after lookup timeout, got %v", err)
 			}
 			return selectorJSONResponse(`{"data":[]}`), nil
 		default:
@@ -416,7 +516,7 @@ func TestSubscriptionLocalizationsListFallsBackToNumericIDAfterLookupTimeout(t *
 	})
 
 	stdout, stderr, runErr := runRootCommand(t, []string{
-		"subscriptions", "localizations", "list",
+		"subscriptions", "versions", "list",
 		"--app", "app-123",
 		"--subscription-id", "2024",
 	})
@@ -427,7 +527,7 @@ func TestSubscriptionLocalizationsListFallsBackToNumericIDAfterLookupTimeout(t *
 		t.Fatalf("expected empty stderr, got %q", stderr)
 	}
 	if requests != 2 {
-		t.Fatalf("expected lookup timeout followed by localizations fetch, got %d requests", requests)
+		t.Fatalf("expected lookup timeout followed by versions fetch, got %d requests", requests)
 	}
 	if !strings.Contains(stdout, `"data"`) {
 		t.Fatalf("expected JSON output, got %q", stdout)
@@ -501,7 +601,7 @@ func TestSubscriptionsOfferCodesCreateStopsBeforeMutationWhenLookupFails(t *test
 		"--offer-eligibility", "STACK_WITH_INTRO_OFFERS",
 		"--customer-eligibilities", "NEW",
 		"--offer-duration", "ONE_MONTH",
-		"--offer-mode", "FREE_TRIAL",
+		"--offer-mode", "PAY_AS_YOU_GO",
 		"--number-of-periods", "1",
 		"--prices", "usa:pp-us",
 	})
@@ -513,6 +613,219 @@ func TestSubscriptionsOfferCodesCreateStopsBeforeMutationWhenLookupFails(t *test
 	}
 	if requests == 0 {
 		t.Fatal("expected lookup requests before failure")
+	}
+}
+
+func TestSubscriptionsOfferCodesCreateFreeTrialStopsBeforeMutationWhenLookupFails(t *testing.T) {
+	setupStableSelectorAuth(t)
+
+	originalTransport := http.DefaultTransport
+	t.Cleanup(func() { http.DefaultTransport = originalTransport })
+
+	requests := 0
+	http.DefaultTransport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		requests++
+		if req.Method == http.MethodPost && req.URL.Path == "/v1/subscriptionOfferCodes" {
+			t.Fatalf("unexpected mutation request during failed lookup: %s %s", req.Method, req.URL.String())
+		}
+		switch req.URL.Path {
+		case "/v1/apps/app-1/subscriptionGroups":
+			return selectorJSONResponse(`{"data":[{"type":"subscriptionGroups","id":"group-1","attributes":{"referenceName":"Premium"}}]}`), nil
+		case "/v1/subscriptionGroups/group-1/subscriptions":
+			return selectorJSONResponse(`{"data":[]}`), nil
+		default:
+			t.Fatalf("unexpected request: %s %s", req.Method, req.URL.String())
+			return nil, nil
+		}
+	})
+
+	_, _, runErr := runRootCommand(t, []string{
+		"subscriptions", "offers", "offer-codes", "create",
+		"--app", "app-1",
+		"--subscription-id", "com.example.missing",
+		"--name", "SPRING",
+		"--offer-eligibility", "STACK_WITH_INTRO_OFFERS",
+		"--customer-eligibilities", "NEW",
+		"--offer-duration", "ONE_MONTH",
+		"--offer-mode", "FREE_TRIAL",
+		"--number-of-periods", "1",
+		"--prices", "DE",
+	})
+	if runErr == nil {
+		t.Fatal("expected lookup error")
+	}
+	if !strings.Contains(runErr.Error(), "not found") {
+		t.Fatalf("expected not found error, got %v", runErr)
+	}
+	if requests == 0 {
+		t.Fatal("expected lookup requests before failure")
+	}
+}
+
+func TestSubscriptionsOfferCodesCreateFreeTrialResolvesAndIncludesTerritoryOnlyPrice(t *testing.T) {
+	setupStableSelectorAuth(t)
+
+	originalTransport := http.DefaultTransport
+	t.Cleanup(func() { http.DefaultTransport = originalTransport })
+
+	http.DefaultTransport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		switch req.URL.Path {
+		case "/v1/apps/app-1/subscriptionGroups":
+			return selectorJSONResponse(`{"data":[{"type":"subscriptionGroups","id":"group-1","attributes":{"referenceName":"Premium"}}]}`), nil
+		case "/v1/subscriptionGroups/group-1/subscriptions":
+			if req.URL.Query().Get("filter[productId]") != "com.example.monthly" {
+				t.Fatalf("expected product filter on lookup request, got %q", req.URL.Query().Get("filter[productId]"))
+			}
+			return selectorJSONResponse(`{"data":[{"type":"subscriptions","id":"sub-1","attributes":{"name":"Monthly","productId":"com.example.monthly"}}]}`), nil
+		case "/v1/subscriptionOfferCodes":
+			if req.Method != http.MethodPost {
+				t.Fatalf("expected POST to /v1/subscriptionOfferCodes, got %s", req.Method)
+			}
+			rawBody, err := io.ReadAll(req.Body)
+			if err != nil {
+				t.Fatalf("read body error: %v", err)
+			}
+			var payload map[string]any
+			if err := json.Unmarshal(rawBody, &payload); err != nil {
+				t.Fatalf("decode request body: %v\nbody=%s", err, string(rawBody))
+			}
+			data, ok := payload["data"].(map[string]any)
+			if !ok {
+				t.Fatalf("expected payload.data to be an object, got %T", payload["data"])
+			}
+			relationships, ok := data["relationships"].(map[string]any)
+			if !ok {
+				t.Fatalf("expected payload.data.relationships to be an object, got %T", data["relationships"])
+			}
+			pricesRelationship, ok := relationships["prices"].(map[string]any)
+			if !ok {
+				t.Fatalf("expected prices relationship for FREE_TRIAL, got %#v", relationships["prices"])
+			}
+			priceRefs, ok := pricesRelationship["data"].([]any)
+			if !ok || len(priceRefs) != 1 {
+				t.Fatalf("expected one price relationship, got %#v", pricesRelationship["data"])
+			}
+			included, ok := payload["included"].([]any)
+			if !ok || len(included) != 1 {
+				t.Fatalf("expected one included price, got %#v", payload["included"])
+			}
+			includedPrice, ok := included[0].(map[string]any)
+			if !ok {
+				t.Fatalf("expected included price object, got %T", included[0])
+			}
+			priceRelationships, ok := includedPrice["relationships"].(map[string]any)
+			if !ok {
+				t.Fatalf("expected included price relationships, got %T", includedPrice["relationships"])
+			}
+			territory, ok := priceRelationships["territory"].(map[string]any)
+			if !ok {
+				t.Fatalf("expected territory relationship, got %#v", priceRelationships["territory"])
+			}
+			territoryData, ok := territory["data"].(map[string]any)
+			if !ok || territoryData["id"] != "DEU" {
+				t.Fatalf("expected normalized territory DEU, got %#v", territory["data"])
+			}
+			if _, ok := priceRelationships["subscriptionPricePoint"]; ok {
+				t.Fatalf("expected subscriptionPricePoint to be omitted, got %#v", priceRelationships["subscriptionPricePoint"])
+			}
+			body := `{"data":{"type":"subscriptionOfferCodes","id":"sub-offer-ft-2","attributes":{"name":"SPRING","active":true}}}`
+			return &http.Response{
+				StatusCode: http.StatusCreated,
+				Body:       io.NopCloser(strings.NewReader(body)),
+				Header:     http.Header{"Content-Type": []string{"application/json"}},
+			}, nil
+		default:
+			t.Fatalf("unexpected request: %s %s", req.Method, req.URL.String())
+			return nil, nil
+		}
+	})
+
+	stdout, stderr, runErr := runRootCommand(t, []string{
+		"subscriptions", "offers", "offer-codes", "create",
+		"--app", "app-1",
+		"--subscription-id", "com.example.monthly",
+		"--name", "SPRING",
+		"--offer-eligibility", "STACK_WITH_INTRO_OFFERS",
+		"--customer-eligibilities", "NEW",
+		"--offer-duration", "ONE_MONTH",
+		"--offer-mode", "FREE_TRIAL",
+		"--number-of-periods", "1",
+		"--prices", "DE",
+	})
+	if runErr != nil {
+		t.Fatalf("expected nil error, got %v", runErr)
+	}
+	if stderr != "" {
+		t.Fatalf("expected empty stderr, got %q", stderr)
+	}
+	var resp struct {
+		Data struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &resp); err != nil {
+		t.Fatalf("unmarshal output: %v\nstdout: %s", err, stdout)
+	}
+	if resp.Data.ID != "sub-offer-ft-2" {
+		t.Fatalf("expected offer code id sub-offer-ft-2, got %q", resp.Data.ID)
+	}
+}
+
+func TestSubscriptionsOfferCodesCreateFreeTrialWithPricePointIsRejected(t *testing.T) {
+	_, stderr, runErr := runRootCommand(t, []string{
+		"subscriptions", "offers", "offer-codes", "create",
+		"--subscription-id", "8000000001",
+		"--name", "SPRING",
+		"--offer-eligibility", "STACK_WITH_INTRO_OFFERS",
+		"--customer-eligibilities", "NEW",
+		"--offer-duration", "ONE_MONTH",
+		"--offer-mode", "FREE_TRIAL",
+		"--number-of-periods", "1",
+		"--prices", "usa:pp-us",
+	})
+	if runErr == nil {
+		t.Fatal("expected error for FREE_TRIAL with a price point, got nil")
+	}
+	if !errors.Is(runErr, flag.ErrHelp) {
+		t.Fatalf("expected flag.ErrHelp (exit 2), got %v", runErr)
+	}
+	if !strings.Contains(stderr, "--prices for FREE_TRIAL must use TERRITORY entries without price point IDs") {
+		t.Fatalf("expected validation message in stderr, got %q", stderr)
+	}
+}
+
+func TestSubscriptionsOfferCodesCreateWithoutPricesIsRejected(t *testing.T) {
+	tests := []struct {
+		name      string
+		offerMode string
+	}{
+		{"pay_as_you_go", "PAY_AS_YOU_GO"},
+		{"pay_up_front", "PAY_UP_FRONT"},
+		{"free_trial", "FREE_TRIAL"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, stderr, runErr := runRootCommand(t, []string{
+				"subscriptions", "offers", "offer-codes", "create",
+				"--subscription-id", "8000000001",
+				"--name", "SPRING",
+				"--offer-eligibility", "STACK_WITH_INTRO_OFFERS",
+				"--customer-eligibilities", "NEW",
+				"--offer-duration", "ONE_MONTH",
+				"--offer-mode", tc.offerMode,
+				"--number-of-periods", "1",
+			})
+			if runErr == nil {
+				t.Fatalf("expected error for %s without prices, got nil", tc.offerMode)
+			}
+			if !errors.Is(runErr, flag.ErrHelp) {
+				t.Fatalf("expected flag.ErrHelp (exit 2), got %v", runErr)
+			}
+			if !strings.Contains(stderr, "--prices is required") {
+				t.Fatalf("expected --prices is required in stderr, got %q", stderr)
+			}
+		})
 	}
 }
 
@@ -563,8 +876,7 @@ func TestWinBackOffersLinksResolvesStableSelector(t *testing.T) {
 func TestWinBackOffersLinksFallsBackToNumericIDAfterLookupTimeout(t *testing.T) {
 	setupStableSelectorAuth(t)
 	t.Setenv("ASC_APP_ID", "")
-	t.Setenv("ASC_TIMEOUT", "10ms")
-	t.Setenv("ASC_TIMEOUT_SECONDS", "")
+	lookupTimeout := expireSelectorLookup(t)
 
 	originalTransport := http.DefaultTransport
 	t.Cleanup(func() { http.DefaultTransport = originalTransport })
@@ -574,8 +886,7 @@ func TestWinBackOffersLinksFallsBackToNumericIDAfterLookupTimeout(t *testing.T) 
 		requests++
 		switch req.URL.Path {
 		case "/v1/apps/app-123/subscriptionGroups":
-			<-req.Context().Done()
-			return nil, req.Context().Err()
+			return lookupTimeout(req)
 		case "/v1/subscriptions/2024/relationships/winBackOffers":
 			if err := req.Context().Err(); err != nil {
 				t.Fatalf("expected fresh win-back request context after lookup timeout, got %v", err)
@@ -756,7 +1067,7 @@ func TestStableSelectorMissingAppContextShowsUsageError(t *testing.T) {
 }
 
 func TestStableSelectorHelpMentionsStableIdentifiers(t *testing.T) {
-	iapUsage := usageForCommand(t, "iap", "images", "create")
+	iapUsage := usageForCommand(t, "iap", "content", "view")
 	if !strings.Contains(iapUsage, "In-app purchase ID, product ID, or exact current name") {
 		t.Fatalf("expected iap help to mention stable selectors, got %q", iapUsage)
 	}

@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"unicode"
 
 	"github.com/peterbourgon/ff/v3/ffcli"
 
@@ -26,45 +27,17 @@ type betaTestersCSVRow struct {
 	groups    []string // raw group values (names or IDs), trimmed
 }
 
-type betaTestersExportSummary struct {
-	AppID         string `json:"appId"`
-	OutputFile    string `json:"outputFile"`
-	Total         int    `json:"total"`
-	IncludeGroups bool   `json:"includeGroups"`
-}
-
-type betaTestersImportFailure struct {
-	Row   int    `json:"row"`
-	Email string `json:"email,omitempty"`
-	Error string `json:"error"`
-}
-
-type betaTestersImportSummary struct {
-	AppID           string                     `json:"appId"`
-	InputFile       string                     `json:"inputFile"`
-	DryRun          bool                       `json:"dryRun"`
-	Invite          bool                       `json:"invite"`
-	SkipExisting    bool                       `json:"skipExisting"`
-	ContinueOnError bool                       `json:"continueOnError"`
-	AppliedGroup    string                     `json:"appliedGroup,omitempty"`
-	Total           int                        `json:"total"`
-	Created         int                        `json:"created"`
-	Existed         int                        `json:"existed"`
-	Updated         int                        `json:"updated"`
-	Invited         int                        `json:"invited"`
-	Failed          int                        `json:"failed"`
-	Failures        []betaTestersImportFailure `json:"failures,omitempty"`
-}
-
 // BetaTestersExportCommand writes beta testers to a CSV file.
 func BetaTestersExportCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("export", flag.ExitOnError)
 
 	appID := fs.String("app", "", "App Store Connect app ID (or ASC_APP_ID env)")
 	outputPath := fs.String("output", "", "Output CSV file path (required)")
-	group := fs.String("group", "", "Beta group name or ID to filter (optional)")
-	buildID, legacyBuildID := bindBuildIDFlag(fs, "Build ID to filter (optional)")
+	group := shared.BindResourceIDFlag(fs, "group", "betaGroups", "Beta group name or ID to filter (optional)")
+	buildID := shared.BindResourceIDFlag(fs, "build-id", "builds", "Build ID to filter (optional)")
 	email := fs.String("email", "", "Filter by tester email (optional)")
+	firstName := fs.String("first-name", "", "Filter by tester first name (exact match, optional)")
+	lastName := fs.String("last-name", "", "Filter by tester last name (exact match, optional)")
 	includeGroups := fs.Bool("include-groups", false, "Include a groups column (requires additional API calls)")
 	format := shared.BindOutputFlagsWith(fs, "format", "json", "Summary output format: json (default), table, markdown")
 
@@ -77,35 +50,45 @@ func BetaTestersExportCommand() *ffcli.Command {
 CSV format:
   email,first_name,last_name,groups
   - groups are semicolon-delimited when present (for fastlane compatibility)
+  - a cell whose first character would start a spreadsheet formula (=, +, -, @)
+    is prefixed with a single quote so spreadsheet software treats it as text
+  - when escaping is needed, an _asc_formula_escaping provenance column is
+    included so "beta-testers import" only removes prefixes added by this export
 
 Examples:
   asc testflight beta-testers export --app "APP_ID" --output "./testflight-testers.csv"
   asc testflight beta-testers export --app "APP_ID" --group "Beta" --output "./testers.csv"
   asc testflight beta-testers export --app "APP_ID" --build-id "BUILD_ID" --output "./testers.csv"
   asc testflight beta-testers export --app "APP_ID" --email "tester@example.com" --output "./testers.csv"
+  asc testflight beta-testers export --app "APP_ID" --last-name "Lovelace" --output "./testers.csv"
   asc testflight beta-testers export --app "APP_ID" --output "./testers.csv" --include-groups`,
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
-			if err := applyLegacyBuildIDAlias(buildID, legacyBuildID); err != nil {
-				return err
-			}
 			if strings.TrimSpace(*group) != "" && strings.TrimSpace(*buildID) != "" {
-				return shared.UsageError("--group cannot be combined with --build-id")
+				return shared.WithDiagnostic(
+					shared.UsageError("--group cannot be combined with --build-id"),
+					shared.DiagnosticConflictingInput,
+					"",
+				)
 			}
 			resolvedAppID := shared.ResolveAppID(*appID)
 			if resolvedAppID == "" {
 				fmt.Fprintf(os.Stderr, "Error: --app is required (or set ASC_APP_ID)\n\n")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--app")
 			}
 
 			outputValue := strings.TrimSpace(*outputPath)
 			if outputValue == "" {
 				fmt.Fprintf(os.Stderr, "Error: --output is required\n\n")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--output")
 			}
 			if strings.HasSuffix(outputValue, string(filepath.Separator)) {
-				return shared.UsageError("--output must be a file path")
+				return shared.WithDiagnostic(
+					shared.UsageError("--output must be a file path"),
+					shared.DiagnosticInvalidInput,
+					"--output",
+				)
 			}
 
 			client, err := shared.GetASCClient()
@@ -113,12 +96,9 @@ Examples:
 				return fmt.Errorf("beta-testers export: %w", err)
 			}
 
-			requestCtx, cancel := shared.ContextWithTimeout(ctx)
-			defer cancel()
-
 			var groupResolver *betaGroupResolver
 			if strings.TrimSpace(*group) != "" || *includeGroups {
-				groupResolver, err = newBetaGroupResolver(requestCtx, client, resolvedAppID)
+				groupResolver, err = newBetaGroupResolver(ctx, client, resolvedAppID)
 				if err != nil {
 					return fmt.Errorf("beta-testers export: %w", err)
 				}
@@ -131,6 +111,12 @@ Examples:
 			if trimmed := strings.TrimSpace(*email); trimmed != "" {
 				opts = append(opts, asc.WithBetaTestersEmail(trimmed))
 			}
+			if trimmed := strings.TrimSpace(*firstName); trimmed != "" {
+				opts = append(opts, asc.WithBetaTestersFirstName(trimmed))
+			}
+			if trimmed := strings.TrimSpace(*lastName); trimmed != "" {
+				opts = append(opts, asc.WithBetaTestersLastName(trimmed))
+			}
 			if trimmed := strings.TrimSpace(*group); trimmed != "" {
 				id, err := groupResolver.Resolve(trimmed)
 				if err != nil {
@@ -139,13 +125,17 @@ Examples:
 				opts = append(opts, asc.WithBetaTestersGroupIDs([]string{id}))
 			}
 
+			requestCtx, cancel := shared.ContextWithTimeout(ctx)
 			firstPage, err := client.GetBetaTesters(requestCtx, resolvedAppID, opts...)
+			cancel()
 			if err != nil {
 				return fmt.Errorf("beta-testers export: failed to fetch: %w", err)
 			}
 
-			all, err := asc.PaginateAll(requestCtx, firstPage, func(ctx context.Context, nextURL string) (asc.PaginatedResponse, error) {
-				return client.GetBetaTesters(ctx, resolvedAppID, asc.WithBetaTestersNextURL(nextURL))
+			all, err := asc.PaginateAll(ctx, firstPage, func(ctx context.Context, nextURL string) (asc.PaginatedResponse, error) {
+				requestCtx, cancel := shared.ContextWithTimeout(ctx)
+				defer cancel()
+				return client.GetBetaTesters(requestCtx, resolvedAppID, asc.WithBetaTestersNextURL(nextURL))
 			})
 			if err != nil {
 				return fmt.Errorf("beta-testers export: %w", err)
@@ -158,7 +148,7 @@ Examples:
 
 			var groupMembership map[string][]string
 			if *includeGroups {
-				groupMembership, err = fetchTesterGroupMemberships(requestCtx, client, groupResolver)
+				groupMembership, err = fetchTesterGroupMemberships(ctx, client, groupResolver)
 				if err != nil {
 					return fmt.Errorf("beta-testers export: %w", err)
 				}
@@ -218,7 +208,7 @@ Examples:
 				return fmt.Errorf("beta-testers export: %w", err)
 			}
 
-			summary := &betaTestersExportSummary{
+			summary := &asc.BetaTestersExportSummary{
 				AppID:         resolvedAppID,
 				OutputFile:    filepath.Clean(outputValue),
 				Total:         len(rows),
@@ -255,8 +245,9 @@ func BetaTestersImportCommand() *ffcli.Command {
 	appID := fs.String("app", "", "App Store Connect app ID (or ASC_APP_ID env)")
 	inputPath := fs.String("input", "", "Input CSV file path (required)")
 	dryRun := fs.Bool("dry-run", false, "Validate and print plan without mutating network state")
+	confirm := fs.Bool("confirm", false, "Confirm creating and updating beta testers (required unless --dry-run)")
 	invite := fs.Bool("invite", false, "Invite newly created testers (default false)")
-	group := fs.String("group", "", "Beta group name or ID to apply to all rows (optional)")
+	group := shared.BindResourceIDFlag(fs, "group", "betaGroups", "Beta group name or ID to apply to all rows (optional)")
 	skipExisting := fs.Bool("skip-existing", false, "If tester already exists, do not modify group membership")
 	continueOnError := fs.Bool("continue-on-error", true, "Continue processing rows after failures (default true)")
 	format := shared.BindOutputFlagsWith(fs, "format", "json", "Summary output format: json (default), table, markdown")
@@ -277,34 +268,38 @@ CSV formats accepted:
 
 Groups are semicolon-delimited in canonical import/export files.
 For compatibility, comma-delimited groups are also accepted when no semicolon is present.
+Exports that neutralize spreadsheet formulas include an _asc_formula_escaping
+provenance column. Only rows carrying the supported marker have the export-added
+single quote removed; user-authored CSV apostrophes are preserved.
 
 Examples:
   asc testflight beta-testers import --app "APP_ID" --input "./testflight-testers.csv" --dry-run
-  asc testflight beta-testers import --app "APP_ID" --input "./testflight-testers.csv"
-  asc testflight beta-testers import --app "APP_ID" --input "./testflight-testers.csv" --invite
-  asc testflight beta-testers import --app "APP_ID" --input "./testflight-testers.csv" --group "Beta"`,
+  asc testflight beta-testers import --app "APP_ID" --input "./testflight-testers.csv" --confirm
+  asc testflight beta-testers import --app "APP_ID" --input "./testflight-testers.csv" --invite --confirm
+  asc testflight beta-testers import --app "APP_ID" --input "./testflight-testers.csv" --group "Beta" --confirm`,
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
 			resolvedAppID := shared.ResolveAppID(*appID)
 			if resolvedAppID == "" {
 				fmt.Fprintf(os.Stderr, "Error: --app is required (or set ASC_APP_ID)\n\n")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--app")
 			}
 
 			inputValue := strings.TrimSpace(*inputPath)
 			if inputValue == "" {
 				fmt.Fprintf(os.Stderr, "Error: --input is required\n\n")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--input")
+			}
+
+			if err := shared.RequireConfirmUnlessDryRun(*dryRun, *confirm); err != nil {
+				return err
 			}
 
 			client, err := shared.GetASCClient()
 			if err != nil {
 				return fmt.Errorf("beta-testers import: %w", err)
 			}
-
-			requestCtx, cancel := shared.ContextWithTimeout(ctx)
-			defer cancel()
 
 			parsedRows, err := readBetaTestersCSV(inputValue)
 			if err != nil {
@@ -325,7 +320,7 @@ Examples:
 			var groupResolver *betaGroupResolver
 			appliedGroupID := ""
 			if needsGroups {
-				groupResolver, err = newBetaGroupResolver(requestCtx, client, resolvedAppID)
+				groupResolver, err = newBetaGroupResolver(ctx, client, resolvedAppID)
 				if err != nil {
 					return fmt.Errorf("beta-testers import: %w", err)
 				}
@@ -339,13 +334,13 @@ Examples:
 				}
 			}
 
-			existingByEmail, err := fetchExistingTestersByEmail(requestCtx, client, resolvedAppID)
+			existingByEmail, err := fetchExistingTestersByEmail(ctx, client, resolvedAppID)
 			if err != nil {
 				return fmt.Errorf("beta-testers import: %w", err)
 			}
 
 			seenInput := make(map[string]int) // emailLower -> first row index seen
-			summary := &betaTestersImportSummary{
+			summary := &asc.BetaTestersImportSummary{
 				AppID:           resolvedAppID,
 				InputFile:       filepath.Clean(inputValue),
 				DryRun:          *dryRun,
@@ -362,7 +357,7 @@ Examples:
 				emailValue := strings.TrimSpace(row.email)
 				if emailValue == "" {
 					summary.Failed++
-					summary.Failures = append(summary.Failures, betaTestersImportFailure{
+					summary.Failures = append(summary.Failures, asc.BetaTestersImportFailure{
 						Row:   rowNumber,
 						Error: "email is required",
 					})
@@ -373,7 +368,7 @@ Examples:
 				}
 				if !isValidTesterEmail(emailValue) {
 					summary.Failed++
-					summary.Failures = append(summary.Failures, betaTestersImportFailure{
+					summary.Failures = append(summary.Failures, asc.BetaTestersImportFailure{
 						Row:   rowNumber,
 						Email: emailValue,
 						Error: "invalid email format",
@@ -387,7 +382,7 @@ Examples:
 				emailLower := strings.ToLower(emailValue)
 				if firstSeen, exists := seenInput[emailLower]; exists {
 					summary.Failed++
-					summary.Failures = append(summary.Failures, betaTestersImportFailure{
+					summary.Failures = append(summary.Failures, asc.BetaTestersImportFailure{
 						Row:   rowNumber,
 						Email: emailValue,
 						Error: fmt.Sprintf("duplicate email in input (already seen at row %d)", firstSeen),
@@ -404,7 +399,7 @@ Examples:
 					groupIDs, err = groupResolver.ResolveAll(row.groups)
 					if err != nil {
 						summary.Failed++
-						summary.Failures = append(summary.Failures, betaTestersImportFailure{
+						summary.Failures = append(summary.Failures, asc.BetaTestersImportFailure{
 							Row:   rowNumber,
 							Email: emailValue,
 							Error: err.Error(),
@@ -432,14 +427,19 @@ Examples:
 						continue
 					}
 
-					if err := client.AddBetaTesterToGroups(requestCtx, testerID, groupIDs); err != nil {
-						if errors.Is(err, asc.ErrConflict) {
-							// Relationship already exists; treat as idempotent success.
+					requestCtx, cancel := shared.ContextWithTimeout(ctx)
+					err := client.AddBetaTesterToGroups(requestCtx, testerID, groupIDs)
+					cancel()
+					if err != nil {
+						alreadySatisfied, verificationErr := betaTesterGroupConflictAlreadySatisfied(ctx, client, testerID, groupIDs, err)
+						if verificationErr != nil {
+							err = fmt.Errorf("%w (failed to verify beta group membership: %w)", err, verificationErr)
+						} else if alreadySatisfied {
 							summary.Updated++
 							continue
 						}
 						summary.Failed++
-						summary.Failures = append(summary.Failures, betaTestersImportFailure{
+						summary.Failures = append(summary.Failures, asc.BetaTestersImportFailure{
 							Row:   rowNumber,
 							Email: emailValue,
 							Error: err.Error(),
@@ -458,10 +458,12 @@ Examples:
 					continue
 				}
 
+				requestCtx, cancel := shared.ContextWithTimeout(ctx)
 				created, err := client.CreateBetaTester(requestCtx, emailValue, row.firstName, row.lastName, groupIDs)
+				cancel()
 				if err != nil {
 					summary.Failed++
-					summary.Failures = append(summary.Failures, betaTestersImportFailure{
+					summary.Failures = append(summary.Failures, asc.BetaTestersImportFailure{
 						Row:   rowNumber,
 						Email: emailValue,
 						Error: err.Error(),
@@ -475,7 +477,7 @@ Examples:
 				testerID := strings.TrimSpace(created.Data.ID)
 				if testerID == "" {
 					summary.Failed++
-					summary.Failures = append(summary.Failures, betaTestersImportFailure{
+					summary.Failures = append(summary.Failures, asc.BetaTestersImportFailure{
 						Row:   rowNumber,
 						Email: emailValue,
 						Error: "created tester returned empty id",
@@ -489,10 +491,12 @@ Examples:
 				existingByEmail[emailLower] = testerID
 
 				if *invite {
+					requestCtx, cancel := shared.ContextWithTimeout(ctx)
 					invitation, err := client.CreateBetaTesterInvitation(requestCtx, resolvedAppID, testerID)
+					cancel()
 					if err != nil {
 						summary.Failed++
-						summary.Failures = append(summary.Failures, betaTestersImportFailure{
+						summary.Failures = append(summary.Failures, asc.BetaTestersImportFailure{
 							Row:   rowNumber,
 							Email: emailValue,
 							Error: err.Error(),
@@ -504,7 +508,7 @@ Examples:
 					}
 					if invitation == nil || strings.TrimSpace(invitation.Data.ID) == "" {
 						summary.Failed++
-						summary.Failures = append(summary.Failures, betaTestersImportFailure{
+						summary.Failures = append(summary.Failures, asc.BetaTestersImportFailure{
 							Row:   rowNumber,
 							Email: emailValue,
 							Error: "invitation returned empty id",
@@ -538,7 +542,7 @@ Examples:
 	}
 }
 
-func renderImportSummaryTables(summary *betaTestersImportSummary, markdown bool) error {
+func renderImportSummaryTables(summary *asc.BetaTestersImportSummary, markdown bool) error {
 	if summary == nil {
 		return fmt.Errorf("summary is nil")
 	}
@@ -594,12 +598,16 @@ func newBetaGroupResolver(ctx context.Context, client *asc.Client, appID string)
 		return nil, fmt.Errorf("app ID is required")
 	}
 
-	firstPage, err := client.GetBetaGroups(ctx, appID, asc.WithBetaGroupsLimit(200))
+	requestCtx, cancel := shared.ContextWithTimeout(ctx)
+	firstPage, err := client.GetBetaGroups(requestCtx, appID, asc.WithBetaGroupsLimit(200))
+	cancel()
 	if err != nil {
 		return nil, err
 	}
 	all, err := asc.PaginateAll(ctx, firstPage, func(ctx context.Context, nextURL string) (asc.PaginatedResponse, error) {
-		return client.GetBetaGroups(ctx, appID, asc.WithBetaGroupsNextURL(nextURL))
+		requestCtx, cancel := shared.ContextWithTimeout(ctx)
+		defer cancel()
+		return client.GetBetaGroups(requestCtx, appID, asc.WithBetaGroupsNextURL(nextURL))
 	})
 	if err != nil {
 		return nil, err
@@ -659,7 +667,16 @@ func (r *betaGroupResolver) Resolve(value string) (string, error) {
 	case 1:
 		return ids[0], nil
 	default:
-		return "", fmt.Errorf("multiple beta groups named %q; use group ID", trimmed)
+		candidates := make([]shared.AmbiguousCandidate, 0, len(ids))
+		for _, id := range ids {
+			candidates = append(candidates, shared.AmbiguousCandidate{ID: id, Label: r.byID[id]})
+		}
+		return "", &shared.AmbiguousSelectionError{
+			Kind:        "beta group",
+			Description: fmt.Sprintf("%q", trimmed),
+			Candidates:  candidates,
+			Hint:        "Use one of these group IDs in the CSV groups column instead of the name.",
+		}
 	}
 }
 
@@ -698,12 +715,16 @@ func (r *betaGroupResolver) exportValueForID(groupID string) string {
 }
 
 func fetchExistingTestersByEmail(ctx context.Context, client *asc.Client, appID string) (map[string]string, error) {
-	first, err := client.GetBetaTesters(ctx, appID, asc.WithBetaTestersLimit(200))
+	requestCtx, cancel := shared.ContextWithTimeout(ctx)
+	first, err := client.GetBetaTesters(requestCtx, appID, asc.WithBetaTestersLimit(200))
+	cancel()
 	if err != nil {
 		return nil, err
 	}
 	all, err := asc.PaginateAll(ctx, first, func(ctx context.Context, nextURL string) (asc.PaginatedResponse, error) {
-		return client.GetBetaTesters(ctx, appID, asc.WithBetaTestersNextURL(nextURL))
+		requestCtx, cancel := shared.ContextWithTimeout(ctx)
+		defer cancel()
+		return client.GetBetaTesters(requestCtx, appID, asc.WithBetaTestersNextURL(nextURL))
 	})
 	if err != nil {
 		return nil, err
@@ -728,6 +749,57 @@ func fetchExistingTestersByEmail(ctx context.Context, client *asc.Client, appID 
 	return byEmail, nil
 }
 
+func betaTesterGroupConflictAlreadySatisfied(
+	ctx context.Context,
+	client *asc.Client,
+	testerID string,
+	groupIDs []string,
+	requestErr error,
+) (bool, error) {
+	if !isHTTPConflict(requestErr) {
+		return false, nil
+	}
+
+	requestedGroupIDs := uniqueSortedStrings(groupIDs)
+	if len(requestedGroupIDs) == 0 {
+		return false, nil
+	}
+
+	requestCtx, cancel := shared.ContextWithTimeout(ctx)
+	first, err := client.GetBetaTesterBetaGroupsRelationships(requestCtx, testerID, asc.WithLinkagesLimit(200))
+	cancel()
+	if err != nil {
+		return false, err
+	}
+
+	all, err := asc.PaginateAll(ctx, first, func(ctx context.Context, nextURL string) (asc.PaginatedResponse, error) {
+		requestCtx, cancel := shared.ContextWithTimeout(ctx)
+		defer cancel()
+		return client.GetBetaTesterBetaGroupsRelationships(requestCtx, testerID, asc.WithLinkagesNextURL(nextURL))
+	})
+	if err != nil {
+		return false, err
+	}
+	resp, ok := all.(*asc.LinkagesResponse)
+	if !ok || resp == nil {
+		return false, fmt.Errorf("unexpected beta tester group relationships response type")
+	}
+
+	presentGroupIDs := make(map[string]struct{}, len(resp.Data))
+	for _, linkage := range resp.Data {
+		groupID := strings.TrimSpace(linkage.ID)
+		if groupID != "" {
+			presentGroupIDs[groupID] = struct{}{}
+		}
+	}
+	for _, groupID := range requestedGroupIDs {
+		if _, ok := presentGroupIDs[groupID]; !ok {
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
 func fetchTesterGroupMemberships(ctx context.Context, client *asc.Client, resolver *betaGroupResolver) (map[string][]string, error) {
 	if client == nil {
 		return nil, fmt.Errorf("client is required")
@@ -740,12 +812,16 @@ func fetchTesterGroupMemberships(ctx context.Context, client *asc.Client, resolv
 	for _, groupID := range resolver.sortedGroupIDs {
 		exportValue := resolver.exportValueForID(groupID)
 
-		firstPage, err := client.GetBetaGroupTesters(ctx, groupID, asc.WithBetaGroupTestersLimit(200))
+		requestCtx, cancel := shared.ContextWithTimeout(ctx)
+		firstPage, err := client.GetBetaGroupTesters(requestCtx, groupID, asc.WithBetaGroupTestersLimit(200))
+		cancel()
 		if err != nil {
 			return nil, err
 		}
 		all, err := asc.PaginateAll(ctx, firstPage, func(ctx context.Context, nextURL string) (asc.PaginatedResponse, error) {
-			return client.GetBetaGroupTesters(ctx, groupID, asc.WithBetaGroupTestersNextURL(nextURL))
+			requestCtx, cancel := shared.ContextWithTimeout(ctx)
+			defer cancel()
+			return client.GetBetaGroupTesters(requestCtx, groupID, asc.WithBetaGroupTestersNextURL(nextURL))
 		})
 		if err != nil {
 			return nil, err
@@ -785,7 +861,11 @@ func readBetaTestersCSV(path string) ([]betaTestersCSVRow, error) {
 	header, err := reader.Read()
 	if err != nil {
 		if errors.Is(err, io.EOF) {
-			return nil, shared.UsageError("CSV file is empty")
+			return nil, shared.WithDiagnostic(
+				shared.UsageError("CSV file is empty"),
+				shared.DiagnosticFileInvalidFormat,
+				"--input",
+			)
 		}
 		return nil, fmt.Errorf("read header: %w", err)
 	}
@@ -841,34 +921,58 @@ func isAllEmpty(record []string) bool {
 
 func validateBetaTestersCSVHeader(header []string) (map[string]int, error) {
 	if len(header) == 0 {
-		return nil, shared.UsageError("CSV header row is required")
+		return nil, shared.WithDiagnostic(
+			shared.UsageError("CSV header row is required"),
+			shared.DiagnosticFileInvalidFormat,
+			"--input",
+		)
 	}
 
 	idx := make(map[string]int, len(header))
 	for i, raw := range header {
 		col := strings.ToLower(strings.TrimSpace(raw))
 		if col == "" {
-			return nil, shared.UsageError("CSV header contains an empty column name")
+			return nil, shared.WithDiagnostic(
+				shared.UsageError("CSV header contains an empty column name"),
+				shared.DiagnosticFileInvalidFormat,
+				"--input",
+			)
 		}
 		canonical, ok := canonicalBetaTestersCSVColumn(col)
 		if !ok {
-			return nil, shared.UsageErrorf("unknown CSV column %q (allowed: email, first_name, last_name, groups)", col)
+			return nil, shared.WithDiagnostic(
+				shared.UsageErrorf("unknown CSV column %q (allowed: email, first_name, last_name, groups, %s)", col, betaTestersFormulaEscapingColumn),
+				shared.DiagnosticFileInvalidFormat,
+				"--input",
+			)
 		}
 		col = canonical
 		if _, exists := idx[col]; exists {
-			return nil, shared.UsageErrorf("duplicate CSV column %q", col)
+			return nil, shared.WithDiagnostic(
+				shared.UsageErrorf("duplicate CSV column %q", col),
+				shared.DiagnosticFileInvalidFormat,
+				"--input",
+			)
 		}
 		idx[col] = i
 	}
 	if _, ok := idx["email"]; !ok {
-		return nil, shared.UsageError("CSV header must include required column \"email\"")
+		return nil, shared.WithDiagnostic(
+			shared.UsageError("CSV header must include required column \"email\""),
+			shared.DiagnosticFileInvalidFormat,
+			"--input",
+		)
 	}
 	return idx, nil
 }
 
 func parseBetaTestersCSVHeader(firstRow []string) (map[string]int, bool, error) {
 	if len(firstRow) == 0 {
-		return nil, false, shared.UsageError("CSV header row is required")
+		return nil, false, shared.WithDiagnostic(
+			shared.UsageError("CSV header row is required"),
+			shared.DiagnosticFileInvalidFormat,
+			"--input",
+		)
 	}
 	hasEmailToken := false
 	hasAtSignValue := false
@@ -917,22 +1021,32 @@ func canonicalBetaTestersCSVColumn(col string) (string, bool) {
 		return "last_name", true
 	case "groups":
 		return "groups", true
+	case betaTestersFormulaEscapingColumn:
+		return betaTestersFormulaEscapingColumn, true
 	default:
 		return "", false
 	}
 }
 
 func parseHeaderMappedBetaTesterCSVRow(record []string, headerIdx map[string]int) betaTestersCSVRow {
+	formulaEscaped := false
+	if idx, ok := headerIdx[betaTestersFormulaEscapingColumn]; ok && idx >= 0 && idx < len(record) {
+		formulaEscaped = strings.TrimSpace(record[idx]) == betaTestersFormulaEscapingVersion
+	}
 	get := func(col string) string {
 		i, ok := headerIdx[col]
 		if !ok || i < 0 || i >= len(record) {
 			return ""
 		}
-		return strings.TrimSpace(record[i])
+		value := record[i]
+		if formulaEscaped {
+			value = denormalizeSpreadsheetFormula(value)
+		}
+		return strings.TrimSpace(value)
 	}
 	groups := make([]string, 0)
 	if idx, ok := headerIdx["groups"]; ok && idx >= 0 && idx < len(record) {
-		groups = splitBetaTesterCSVGroups(record[idx])
+		groups = splitBetaTesterCSVGroups(record[idx], formulaEscaped)
 	}
 	return betaTestersCSVRow{
 		email:     get("email"),
@@ -944,7 +1058,11 @@ func parseHeaderMappedBetaTesterCSVRow(record []string, headerIdx map[string]int
 
 func parseLegacyBetaTesterCSVRow(record []string) (betaTestersCSVRow, error) {
 	if len(record) < 3 || len(record) > 4 {
-		return betaTestersCSVRow{}, shared.UsageError("legacy CSV rows must have 3 or 4 columns: first_name,last_name,email[,groups]")
+		return betaTestersCSVRow{}, shared.WithDiagnostic(
+			shared.UsageError("legacy CSV rows must have 3 or 4 columns: first_name,last_name,email[,groups]"),
+			shared.DiagnosticFileInvalidFormat,
+			"--input",
+		)
 	}
 	row := betaTestersCSVRow{
 		firstName: strings.TrimSpace(record[0]),
@@ -952,12 +1070,15 @@ func parseLegacyBetaTesterCSVRow(record []string) (betaTestersCSVRow, error) {
 		email:     strings.TrimSpace(record[2]),
 	}
 	if len(record) >= 4 {
-		row.groups = splitBetaTesterCSVGroups(record[3])
+		row.groups = splitBetaTesterCSVGroups(record[3], false)
 	}
 	return row, nil
 }
 
-func splitBetaTesterCSVGroups(value string) []string {
+func splitBetaTesterCSVGroups(value string, formulaEscaped bool) []string {
+	if formulaEscaped {
+		value = denormalizeSpreadsheetFormula(value)
+	}
 	trimmed := strings.TrimSpace(value)
 	if trimmed == "" {
 		return nil
@@ -989,6 +1110,75 @@ func isValidTesterEmail(value string) bool {
 		return false
 	}
 	return strings.EqualFold(addr.Address, trimmed)
+}
+
+// spreadsheetFormulaMarkers are the characters that Excel, LibreOffice Calc, and
+// Google Sheets treat as the start of a formula when they open a CSV file.
+const spreadsheetFormulaMarkers = "=+-@"
+
+// spreadsheetTextPrefix neutralizes a formula-leading cell. Spreadsheet software
+// reads a leading apostrophe as "the rest of this cell is text" and does not
+// display it. Exported rows carry a provenance marker so import can strip only
+// prefixes written by asc and leave user-authored apostrophes unchanged.
+const spreadsheetTextPrefix = "'"
+
+const (
+	betaTestersFormulaEscapingColumn  = "_asc_formula_escaping"
+	betaTestersFormulaEscapingVersion = "apostrophe-v1"
+)
+
+func neutralizeSpreadsheetFormulaRow(row []string) []string {
+	safe := make([]string, len(row))
+	for i, cell := range row {
+		safe[i] = neutralizeSpreadsheetFormula(cell)
+	}
+	return safe
+}
+
+func rowNeedsSpreadsheetFormulaEscaping(row []string) bool {
+	for _, cell := range row {
+		if neutralizeSpreadsheetFormula(cell) != cell {
+			return true
+		}
+	}
+	return false
+}
+
+// neutralizeSpreadsheetFormula prefixes externally derived cells whose first
+// effective character would start a spreadsheet formula. Leading whitespace and
+// control characters are skipped when looking for that character, because
+// spreadsheet software ignores them too. A cell that already begins with
+// literal apostrophes in front of a formula character gains one more; the
+// provenance-marked import path can then remove exactly one and recover the
+// original value. Safe cells are returned unchanged.
+func neutralizeSpreadsheetFormula(value string) string {
+	if !isSpreadsheetFormulaCell(strings.TrimLeft(value, spreadsheetTextPrefix)) {
+		return value
+	}
+	return spreadsheetTextPrefix + value
+}
+
+// denormalizeSpreadsheetFormula reverses neutralizeSpreadsheetFormula for rows
+// carrying the asc export provenance marker. Exactly one prefix apostrophe is
+// removed, which also restores values whose originals begin with apostrophes.
+func denormalizeSpreadsheetFormula(value string) string {
+	if !strings.HasPrefix(value, spreadsheetTextPrefix) {
+		return value
+	}
+	if !isSpreadsheetFormulaCell(strings.TrimLeft(value, spreadsheetTextPrefix)) {
+		return value
+	}
+	return strings.TrimPrefix(value, spreadsheetTextPrefix)
+}
+
+func isSpreadsheetFormulaCell(value string) bool {
+	for _, r := range value {
+		if unicode.IsSpace(r) || unicode.IsControl(r) {
+			continue
+		}
+		return strings.ContainsRune(spreadsheetFormulaMarkers, r)
+	}
+	return false
 }
 
 func writeCSVFileAtomicNoSymlink(outputPath string, header []string, rows [][]string) error {
@@ -1032,11 +1222,27 @@ func writeCSVFileAtomicNoSymlink(outputPath string, header []string, rows [][]st
 	}
 
 	w := csv.NewWriter(tempFile)
-	if err := w.Write(header); err != nil {
+	formulaEscaping := false
+	for _, row := range rows {
+		if rowNeedsSpreadsheetFormulaEscaping(row) {
+			formulaEscaping = true
+			break
+		}
+	}
+
+	csvHeader := append([]string(nil), header...)
+	if formulaEscaping {
+		csvHeader = append(csvHeader, betaTestersFormulaEscapingColumn)
+	}
+	if err := w.Write(csvHeader); err != nil {
 		return err
 	}
 	for _, row := range rows {
-		if err := w.Write(row); err != nil {
+		csvRow := row
+		if formulaEscaping {
+			csvRow = append(neutralizeSpreadsheetFormulaRow(row), betaTestersFormulaEscapingVersion)
+		}
+		if err := w.Write(csvRow); err != nil {
 			return err
 		}
 	}

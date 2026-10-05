@@ -12,10 +12,29 @@ type AppScreenshotSetWithScreenshots struct {
 	Screenshots []Resource[AppScreenshotAttributes]  `json:"screenshots"`
 }
 
-// AppScreenshotListResult represents screenshot list output by localization.
-type AppScreenshotListResult struct {
+// AppScreenshotLocalizationListResult groups one App Store version
+// localization with its screenshot sets.
+type AppScreenshotLocalizationListResult struct {
+	Locale                string                            `json:"locale"`
 	VersionLocalizationID string                            `json:"versionLocalizationId"`
 	Sets                  []AppScreenshotSetWithScreenshots `json:"sets"`
+}
+
+// AppScreenshotListResult represents screenshot list output by localization.
+// Localizations is populated instead of VersionLocalizationID and Sets when a
+// caller lists every localization of a version without selecting a locale.
+type AppScreenshotListResult struct {
+	VersionLocalizationID string                                `json:"versionLocalizationId"`
+	Locale                string                                `json:"locale,omitempty"`
+	Sets                  []AppScreenshotSetWithScreenshots     `json:"sets"`
+	Localizations         []AppScreenshotLocalizationListResult `json:"localizations,omitempty"`
+}
+
+// AppScreenshotSetListResult represents screenshot sets and their screenshots
+// for a non-version localization, such as a custom product page or treatment.
+type AppScreenshotSetListResult struct {
+	LocalizationID string                            `json:"localizationId"`
+	Sets           []AppScreenshotSetWithScreenshots `json:"sets"`
 }
 
 // AppPreviewSetWithPreviews groups a set with its previews.
@@ -93,11 +112,12 @@ type AppScreenshotFanoutUploadResult struct {
 
 // AppPreviewUploadResult represents preview upload output.
 type AppPreviewUploadResult struct {
-	VersionLocalizationID string                  `json:"versionLocalizationId"`
-	SetID                 string                  `json:"setId"`
-	PreviewType           string                  `json:"previewType"`
-	DryRun                bool                    `json:"dryRun,omitempty"`
-	Results               []AssetUploadResultItem `json:"results"`
+	VersionLocalizationID string                   `json:"versionLocalizationId"`
+	SetID                 string                   `json:"setId"`
+	PreviewType           string                   `json:"previewType"`
+	DryRun                bool                     `json:"dryRun,omitempty"`
+	Results               []AssetUploadResultItem  `json:"results"`
+	Failures              []AssetUploadFailureItem `json:"failures,omitempty"`
 }
 
 // CustomProductPageScreenshotUploadResult represents custom product page screenshot upload output.
@@ -134,7 +154,10 @@ func appScreenshotSetsRows(resp *AppScreenshotSetsResponse) ([]string, [][]strin
 	headers := []string{"ID", "Display Type"}
 	rows := make([][]string, 0, len(resp.Data))
 	for _, item := range resp.Data {
-		rows = append(rows, []string{item.ID, item.Attributes.ScreenshotDisplayType})
+		rows = append(rows, []string{
+			SanitizeTerminalText(item.ID),
+			SanitizeTerminalText(item.Attributes.ScreenshotDisplayType),
+		})
 	}
 	return headers, rows
 }
@@ -143,15 +166,11 @@ func appScreenshotsRows(resp *AppScreenshotsResponse) ([]string, [][]string) {
 	headers := []string{"ID", "File Name", "File Size", "State"}
 	rows := make([][]string, 0, len(resp.Data))
 	for _, item := range resp.Data {
-		state := ""
-		if item.Attributes.AssetDeliveryState != nil {
-			state = item.Attributes.AssetDeliveryState.State
-		}
 		rows = append(rows, []string{
-			item.ID,
-			item.Attributes.FileName,
+			SanitizeTerminalText(item.ID),
+			SanitizeTerminalText(item.Attributes.FileName),
 			fmt.Sprintf("%d", item.Attributes.FileSize),
-			state,
+			SanitizeTerminalText(assetDeliveryStateValue(item.Attributes.AssetDeliveryState)),
 		})
 	}
 	return headers, rows
@@ -161,7 +180,10 @@ func appPreviewSetsRows(resp *AppPreviewSetsResponse) ([]string, [][]string) {
 	headers := []string{"ID", "Preview Type"}
 	rows := make([][]string, 0, len(resp.Data))
 	for _, item := range resp.Data {
-		rows = append(rows, []string{item.ID, item.Attributes.PreviewType})
+		rows = append(rows, []string{
+			SanitizeTerminalText(item.ID),
+			SanitizeTerminalText(item.Attributes.PreviewType),
+		})
 	}
 	return headers, rows
 }
@@ -170,42 +192,66 @@ func appPreviewsRows(resp *AppPreviewsResponse) ([]string, [][]string) {
 	headers := []string{"ID", "File Name", "File Size", "Poster Frame", "State"}
 	rows := make([][]string, 0, len(resp.Data))
 	for _, item := range resp.Data {
-		state := ""
-		if item.Attributes.AssetDeliveryState != nil {
-			state = item.Attributes.AssetDeliveryState.State
-		}
 		rows = append(rows, []string{
-			item.ID,
-			item.Attributes.FileName,
+			SanitizeTerminalText(item.ID),
+			SanitizeTerminalText(item.Attributes.FileName),
 			fmt.Sprintf("%d", item.Attributes.FileSize),
-			item.Attributes.PreviewFrameTimeCode,
-			state,
+			SanitizeTerminalText(item.Attributes.PreviewFrameTimeCode),
+			SanitizeTerminalText(assetDeliveryStateValue(item.Attributes.AssetDeliveryState)),
 		})
 	}
 	return headers, rows
 }
 
 func appScreenshotListResultRows(result *AppScreenshotListResult) ([]string, [][]string) {
+	if len(result.Localizations) == 0 {
+		return appScreenshotSetsWithScreenshotsRows(result.Sets)
+	}
+	return appScreenshotLocalizationListResultRows(result.Localizations)
+}
+
+func appScreenshotLocalizationListResultRows(localizations []AppScreenshotLocalizationListResult) ([]string, [][]string) {
+	setHeaders, _ := appScreenshotSetsWithScreenshotsRows(nil)
+	headers := append([]string{"Locale"}, setHeaders...)
+	var rows [][]string
+	for _, localization := range localizations {
+		locale := SanitizeTerminalText(localization.Locale)
+		_, setRows := appScreenshotSetsWithScreenshotsRows(localization.Sets)
+		if len(setRows) == 0 {
+			placeholder := make([]string, len(headers))
+			placeholder[0] = locale
+			rows = append(rows, placeholder)
+			continue
+		}
+		for _, setRow := range setRows {
+			rows = append(rows, append([]string{locale}, setRow...))
+		}
+	}
+	return headers, rows
+}
+
+func appScreenshotSetListResultRows(result *AppScreenshotSetListResult) ([]string, [][]string) {
+	return appScreenshotSetsWithScreenshotsRows(result.Sets)
+}
+
+func appScreenshotSetsWithScreenshotsRows(sets []AppScreenshotSetWithScreenshots) ([]string, [][]string) {
 	headers := []string{"Set ID", "Display Type", "Screenshot ID", "File Name", "File Size", "State"}
 	var rows [][]string
-	for _, set := range result.Sets {
-		displayType := set.Set.Attributes.ScreenshotDisplayType
+	for _, set := range sets {
+		setID := SanitizeTerminalText(set.Set.ID)
+		displayType := SanitizeTerminalText(set.Set.Attributes.ScreenshotDisplayType)
 		if len(set.Screenshots) == 0 {
-			rows = append(rows, []string{set.Set.ID, displayType, "", "", "", ""})
+			rows = append(rows, []string{setID, displayType, "", "", "", ""})
 			continue
 		}
 		for _, item := range set.Screenshots {
-			state := ""
-			if item.Attributes.AssetDeliveryState != nil {
-				state = item.Attributes.AssetDeliveryState.State
-			}
 			rows = append(rows, []string{
-				set.Set.ID,
+				setID,
 				displayType,
-				item.ID,
-				item.Attributes.FileName,
+				SanitizeTerminalText(item.ID),
+				SanitizeTerminalText(item.Attributes.FileName),
 				fmt.Sprintf("%d", item.Attributes.FileSize),
-				state,
+				SanitizeTerminalText(assetDeliveryStateValue(item.Attributes.AssetDeliveryState)),
 			})
 		}
 	}
@@ -216,24 +262,21 @@ func appPreviewListResultRows(result *AppPreviewListResult) ([]string, [][]strin
 	headers := []string{"Set ID", "Preview Type", "Preview ID", "File Name", "File Size", "Poster Frame", "State"}
 	var rows [][]string
 	for _, set := range result.Sets {
-		previewType := set.Set.Attributes.PreviewType
+		setID := SanitizeTerminalText(set.Set.ID)
+		previewType := SanitizeTerminalText(set.Set.Attributes.PreviewType)
 		if len(set.Previews) == 0 {
-			rows = append(rows, []string{set.Set.ID, previewType, "", "", "", "", ""})
+			rows = append(rows, []string{setID, previewType, "", "", "", "", ""})
 			continue
 		}
 		for _, item := range set.Previews {
-			state := ""
-			if item.Attributes.AssetDeliveryState != nil {
-				state = item.Attributes.AssetDeliveryState.State
-			}
 			rows = append(rows, []string{
-				set.Set.ID,
+				setID,
 				previewType,
-				item.ID,
-				item.Attributes.FileName,
+				SanitizeTerminalText(item.ID),
+				SanitizeTerminalText(item.Attributes.FileName),
 				fmt.Sprintf("%d", item.Attributes.FileSize),
-				item.Attributes.PreviewFrameTimeCode,
-				state,
+				SanitizeTerminalText(item.Attributes.PreviewFrameTimeCode),
+				SanitizeTerminalText(assetDeliveryStateValue(item.Attributes.AssetDeliveryState)),
 			})
 		}
 	}
@@ -243,9 +286,9 @@ func appPreviewListResultRows(result *AppPreviewListResult) ([]string, [][]strin
 func appScreenshotUploadResultMainRows(result *AppScreenshotUploadResult) ([]string, [][]string) {
 	headers := []string{"Localization ID", "Set ID", "Display Type", "Dry Run", "Resumed", "Total", "Uploaded", "Skipped", "Pending", "Failed", "Failure Artifact"}
 	rows := [][]string{{
-		result.VersionLocalizationID,
-		result.SetID,
-		result.DisplayType,
+		SanitizeTerminalText(result.VersionLocalizationID),
+		SanitizeTerminalText(result.SetID),
+		SanitizeTerminalText(result.DisplayType),
 		fmt.Sprintf("%t", result.DryRun),
 		fmt.Sprintf("%t", result.Resumed),
 		fmt.Sprintf("%d", result.Total),
@@ -253,7 +296,7 @@ func appScreenshotUploadResultMainRows(result *AppScreenshotUploadResult) ([]str
 		fmt.Sprintf("%d", result.Skipped),
 		fmt.Sprintf("%d", result.Pending),
 		fmt.Sprintf("%d", result.Failed),
-		result.FailureArtifactPath,
+		SanitizeTerminalText(result.FailureArtifactPath),
 	}}
 	return headers, rows
 }
@@ -261,11 +304,11 @@ func appScreenshotUploadResultMainRows(result *AppScreenshotUploadResult) ([]str
 func appScreenshotFanoutUploadResultMainRows(result *AppScreenshotFanoutUploadResult) ([]string, [][]string) {
 	headers := []string{"App ID", "Version", "Version ID", "Platform", "Display Type", "Dry Run", "Localizations"}
 	rows := [][]string{{
-		result.AppID,
-		result.Version,
-		result.VersionID,
-		result.Platform,
-		result.DisplayType,
+		SanitizeTerminalText(result.AppID),
+		SanitizeTerminalText(result.Version),
+		SanitizeTerminalText(result.VersionID),
+		SanitizeTerminalText(result.Platform),
+		SanitizeTerminalText(result.DisplayType),
 		fmt.Sprintf("%t", result.DryRun),
 		fmt.Sprintf("%d", len(result.Localizations)),
 	}}
@@ -281,15 +324,15 @@ func appScreenshotFanoutUploadLocalizationRows(result *AppScreenshotFanoutUpload
 			total = len(item.Results) + item.Pending
 		}
 		rows = append(rows, []string{
-			item.Locale,
-			item.VersionLocalizationID,
-			item.SetID,
+			SanitizeTerminalText(item.Locale),
+			SanitizeTerminalText(item.VersionLocalizationID),
+			SanitizeTerminalText(item.SetID),
 			fmt.Sprintf("%d", total),
 			fmt.Sprintf("%d", item.Uploaded),
 			fmt.Sprintf("%d", item.Skipped),
 			fmt.Sprintf("%d", item.Pending),
 			fmt.Sprintf("%d", item.Failed),
-			item.FailureArtifactPath,
+			SanitizeTerminalText(item.FailureArtifactPath),
 			summarizeAssetUploadStates(item.Results),
 		})
 	}
@@ -300,20 +343,17 @@ func appScreenshotFanoutUploadResultItemRows(result *AppScreenshotFanoutUploadRe
 	headers := []string{"Locale", "File Name", "Asset ID", "State"}
 	rows := make([][]string, 0)
 	for _, localization := range result.Localizations {
+		locale := SanitizeTerminalText(localization.Locale)
 		if len(localization.Results) == 0 {
-			rows = append(rows, []string{localization.Locale, "", "", ""})
+			rows = append(rows, []string{locale, "", "", ""})
 			continue
 		}
 		for _, item := range localization.Results {
-			state := item.State
-			if item.Skipped && state == "" {
-				state = "skipped"
-			}
 			rows = append(rows, []string{
-				localization.Locale,
-				item.FileName,
-				item.AssetID,
-				state,
+				locale,
+				SanitizeTerminalText(item.FileName),
+				SanitizeTerminalText(item.AssetID),
+				SanitizeTerminalText(assetUploadItemState(item)),
 			})
 		}
 	}
@@ -324,12 +364,13 @@ func appScreenshotFanoutUploadFailureRows(result *AppScreenshotFanoutUploadResul
 	headers := []string{"Locale", "File Name", "File Path", "Error"}
 	rows := make([][]string, 0)
 	for _, localization := range result.Localizations {
+		locale := SanitizeTerminalText(localization.Locale)
 		for _, item := range localization.Failures {
 			rows = append(rows, []string{
-				localization.Locale,
-				item.FileName,
-				item.FilePath,
-				item.Error,
+				locale,
+				SanitizeTerminalText(item.FileName),
+				SanitizeTerminalText(item.FilePath),
+				SanitizeTerminalText(item.Error),
 			})
 		}
 	}
@@ -338,25 +379,42 @@ func appScreenshotFanoutUploadFailureRows(result *AppScreenshotFanoutUploadResul
 
 func appPreviewUploadResultMainRows(result *AppPreviewUploadResult) ([]string, [][]string) {
 	headers := []string{"Localization ID", "Set ID", "Preview Type", "Dry Run"}
-	rows := [][]string{{result.VersionLocalizationID, result.SetID, result.PreviewType, fmt.Sprintf("%t", result.DryRun)}}
+	rows := [][]string{{
+		SanitizeTerminalText(result.VersionLocalizationID),
+		SanitizeTerminalText(result.SetID),
+		SanitizeTerminalText(result.PreviewType),
+		fmt.Sprintf("%t", result.DryRun),
+	}}
 	return headers, rows
 }
 
 func customProductPageScreenshotUploadResultMainRows(result *CustomProductPageScreenshotUploadResult) ([]string, [][]string) {
 	headers := []string{"Localization ID", "Set ID", "Display Type"}
-	rows := [][]string{{result.CustomProductPageLocalizationID, result.SetID, result.DisplayType}}
+	rows := [][]string{{
+		SanitizeTerminalText(result.CustomProductPageLocalizationID),
+		SanitizeTerminalText(result.SetID),
+		SanitizeTerminalText(result.DisplayType),
+	}}
 	return headers, rows
 }
 
 func experimentTreatmentLocalizationScreenshotUploadResultMainRows(result *ExperimentTreatmentLocalizationScreenshotUploadResult) ([]string, [][]string) {
 	headers := []string{"Localization ID", "Set ID", "Display Type"}
-	rows := [][]string{{result.ExperimentTreatmentLocalizationID, result.SetID, result.DisplayType}}
+	rows := [][]string{{
+		SanitizeTerminalText(result.ExperimentTreatmentLocalizationID),
+		SanitizeTerminalText(result.SetID),
+		SanitizeTerminalText(result.DisplayType),
+	}}
 	return headers, rows
 }
 
 func customProductPagePreviewUploadResultMainRows(result *CustomProductPagePreviewUploadResult) ([]string, [][]string) {
 	headers := []string{"Localization ID", "Set ID", "Preview Type"}
-	rows := [][]string{{result.CustomProductPageLocalizationID, result.SetID, result.PreviewType}}
+	rows := [][]string{{
+		SanitizeTerminalText(result.CustomProductPageLocalizationID),
+		SanitizeTerminalText(result.SetID),
+		SanitizeTerminalText(result.PreviewType),
+	}}
 	return headers, rows
 }
 
@@ -364,13 +422,27 @@ func assetUploadResultItemRows(results []AssetUploadResultItem) ([]string, [][]s
 	headers := []string{"File Name", "Asset ID", "State"}
 	rows := make([][]string, 0, len(results))
 	for _, item := range results {
-		state := item.State
-		if item.Skipped && state == "" {
-			state = "skipped"
-		}
-		rows = append(rows, []string{item.FileName, item.AssetID, state})
+		rows = append(rows, []string{
+			SanitizeTerminalText(item.FileName),
+			SanitizeTerminalText(item.AssetID),
+			SanitizeTerminalText(assetUploadItemState(item)),
+		})
 	}
 	return headers, rows
+}
+
+func assetDeliveryStateValue(state *AssetDeliveryState) string {
+	if state == nil {
+		return ""
+	}
+	return state.State
+}
+
+func assetUploadItemState(item AssetUploadResultItem) string {
+	if item.State == "" && item.Skipped {
+		return "skipped"
+	}
+	return item.State
 }
 
 func summarizeAssetUploadStates(results []AssetUploadResultItem) string {
@@ -381,10 +453,7 @@ func summarizeAssetUploadStates(results []AssetUploadResultItem) string {
 	counts := make(map[string]int)
 	states := make([]string, 0, len(results))
 	for _, item := range results {
-		state := item.State
-		if item.Skipped && state == "" {
-			state = "skipped"
-		}
+		state := SanitizeTerminalText(assetUploadItemState(item))
 		if state == "" {
 			state = "uploaded"
 		}
@@ -407,7 +476,11 @@ func assetUploadFailureItemRows(results []AssetUploadFailureItem) ([]string, [][
 	headers := []string{"File Name", "File Path", "Error"}
 	rows := make([][]string, 0, len(results))
 	for _, item := range results {
-		rows = append(rows, []string{item.FileName, item.FilePath, item.Error})
+		rows = append(rows, []string{
+			SanitizeTerminalText(item.FileName),
+			SanitizeTerminalText(item.FilePath),
+			SanitizeTerminalText(item.Error),
+		})
 	}
 	return headers, rows
 }
@@ -417,8 +490,8 @@ func screenshotSizesRows(result *ScreenshotSizesResult) ([]string, [][]string) {
 	rows := make([][]string, 0, len(result.Sizes))
 	for _, item := range result.Sizes {
 		rows = append(rows, []string{
-			item.DisplayType,
-			item.Family,
+			SanitizeTerminalText(item.DisplayType),
+			SanitizeTerminalText(item.Family),
 			formatScreenshotDimensions(item.Dimensions),
 		})
 	}
@@ -427,6 +500,6 @@ func screenshotSizesRows(result *ScreenshotSizesResult) ([]string, [][]string) {
 
 func assetDeleteResultRows(result *AssetDeleteResult) ([]string, [][]string) {
 	headers := []string{"ID", "Deleted"}
-	rows := [][]string{{result.ID, fmt.Sprintf("%t", result.Deleted)}}
+	rows := [][]string{{SanitizeTerminalText(result.ID), fmt.Sprintf("%t", result.Deleted)}}
 	return headers, rows
 }

@@ -35,6 +35,53 @@ func TestRunScreenshotsUploadResumeRejectsSelectorFlags(t *testing.T) {
 	}
 }
 
+func TestRunScreenshotsUploadResumeRejectsExecutionModeFlags(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+	}{
+		{
+			name: "skip-existing",
+			args: []string{"--skip-existing"},
+		},
+		{
+			name: "replace",
+			args: []string{"--replace"},
+		},
+		{
+			name: "confirm",
+			args: []string{"--confirm"},
+		},
+		{
+			name: "dry-run",
+			args: []string{"--dry-run"},
+		},
+		{
+			name: "max-screenshots",
+			args: []string{"--max-screenshots", "5"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, stderr := captureOutput(t, func() {
+				runArgs := append([]string{
+					"screenshots", "upload",
+					"--resume", "artifact.json",
+				}, tt.args...)
+				code := cmd.Run(runArgs, "1.2.3")
+				if code != cmd.ExitUsage {
+					t.Fatalf("expected exit code %d, got %d", cmd.ExitUsage, code)
+				}
+			})
+
+			if !strings.Contains(stderr, "--resume cannot be combined with --skip-existing, --replace, --confirm, --dry-run, or --max-screenshots") {
+				t.Fatalf("expected resume execution-mode conflict message, got %q", stderr)
+			}
+		})
+	}
+}
+
 func TestRunScreenshotsUploadWritesFailureArtifactAndResumeCompletes(t *testing.T) {
 	setupAuth(t)
 	t.Setenv("ASC_BYPASS_KEYCHAIN", "1")
@@ -75,6 +122,11 @@ func TestRunScreenshotsUploadWritesFailureArtifactAndResumeCompletes(t *testing.
 		switch {
 		case req.Method == http.MethodGet && req.URL.Path == "/v1/appStoreVersionLocalizations/LOC_123/appScreenshotSets":
 			return screenshotsUploadJSONResponse(http.StatusOK, `{"data":[{"type":"appScreenshotSets","id":"set-1","attributes":{"screenshotDisplayType":"APP_IPHONE_65"}}],"links":{}}`)
+		case req.Method == http.MethodGet && req.URL.Path == "/v1/appScreenshotSets/set-1/appScreenshots":
+			if phase == "resume" {
+				return screenshotsUploadJSONResponse(http.StatusOK, `{"data":[{"type":"appScreenshots","id":"new-1"}],"links":{}}`)
+			}
+			return screenshotsUploadJSONResponse(http.StatusOK, `{"data":[],"links":{}}`)
 		case req.Method == http.MethodGet && req.URL.Path == "/v1/appScreenshotSets/set-1/relationships/appScreenshots":
 			if phase == "resume" {
 				return screenshotsUploadJSONResponse(http.StatusOK, `{"data":[{"type":"appScreenshots","id":"new-1"}],"links":{}}`)
@@ -106,7 +158,7 @@ func TestRunScreenshotsUploadWritesFailureArtifactAndResumeCompletes(t *testing.
 			return screenshotsUploadJSONResponse(http.StatusOK, fmt.Sprintf(`{"data":{"type":"appScreenshots","id":"%s","attributes":{"uploaded":true}}}`, id))
 		case req.Method == http.MethodGet && strings.HasPrefix(req.URL.Path, "/v1/appScreenshots/"):
 			id := strings.TrimPrefix(req.URL.Path, "/v1/appScreenshots/")
-			return screenshotsUploadJSONResponse(http.StatusOK, fmt.Sprintf(`{"data":{"type":"appScreenshots","id":"%s","attributes":{"assetDeliveryState":{"state":"COMPLETE"}}}}`, id))
+			return screenshotsUploadJSONResponse(http.StatusOK, fmt.Sprintf(`{"data":{"type":"appScreenshots","id":"%s","attributes":{"sourceFileChecksum":"settled","assetDeliveryState":{"state":"COMPLETE"}}}}`, id))
 		case req.Method == http.MethodPatch && req.URL.Path == "/v1/appScreenshotSets/set-1/relationships/appScreenshots":
 			relationshipPatchCount++
 			body, readErr := io.ReadAll(req.Body)
@@ -135,21 +187,25 @@ func TestRunScreenshotsUploadWritesFailureArtifactAndResumeCompletes(t *testing.
 			"--version-localization", "LOC_123",
 			"--path", workDir,
 			"--device-type", "IPHONE_65",
+			"--concurrency", "1",
 			"--output", "json",
 		}, "1.2.3")
-		if code != cmd.ExitError {
-			t.Fatalf("expected exit code %d, got %d", cmd.ExitError, code)
+		if code != cmd.ExitHTTPInternalServer {
+			t.Fatalf("expected exit code %d, got %d", cmd.ExitHTTPInternalServer, code)
 		}
 	})
 
-	if stderr != "" {
-		t.Fatalf("expected empty stderr for reported upload failure, got %q", stderr)
-	}
 	if err := json.Unmarshal([]byte(stdout), &firstResult); err != nil {
 		t.Fatalf("failed to parse first stdout JSON: %v\nstdout=%s", err, stdout)
 	}
 	if firstResult.FailureArtifactPath == "" {
 		t.Fatalf("expected failureArtifactPath in stdout, got %s", stdout)
+	}
+	if !strings.Contains(stderr, "Error: screenshots upload: 2 of 3 file(s) not uploaded: ") || !strings.Contains(stderr, "upload create failed") {
+		t.Fatalf("expected partial failure and its cause on stderr, got %q", stderr)
+	}
+	if !strings.Contains(stderr, fmt.Sprintf("Hint: resume with `asc screenshots upload --resume \"%s\"`", firstResult.FailureArtifactPath)) {
+		t.Fatalf("expected resume hint on stderr, got %q", stderr)
 	}
 	if firstResult.Pending != 2 {
 		t.Fatalf("expected pending=2 after partial failure, got %d", firstResult.Pending)
@@ -232,6 +288,52 @@ func TestRunScreenshotsUploadWritesFailureArtifactAndResumeCompletes(t *testing.
 	}
 }
 
+func TestRunScreenshotsUploadWarnsWhenFileNamesAlreadyInSet(t *testing.T) {
+	setupAuth(t)
+	t.Setenv("ASC_BYPASS_KEYCHAIN", "1")
+	t.Setenv("ASC_CONFIG_PATH", filepath.Join(t.TempDir(), "nonexistent.json"))
+	t.Setenv("ASC_APP_ID", "")
+
+	workDir := t.TempDir()
+	writeCmdtestScreenshotPNG(t, workDir, "01-home.png")
+	writeCmdtestScreenshotPNG(t, workDir, "02-settings.png")
+
+	originalTransport := http.DefaultTransport
+	t.Cleanup(func() {
+		http.DefaultTransport = originalTransport
+	})
+	http.DefaultTransport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		switch {
+		case req.Method == http.MethodGet && req.URL.Path == "/v1/appStoreVersionLocalizations/LOC_123/appScreenshotSets":
+			return screenshotsUploadJSONResponse(http.StatusOK, `{"data":[{"type":"appScreenshotSets","id":"set-1","attributes":{"screenshotDisplayType":"APP_IPHONE_65"}}],"links":{}}`)
+		case req.Method == http.MethodGet && req.URL.Path == "/v1/appScreenshotSets/set-1/appScreenshots":
+			return screenshotsUploadJSONResponse(http.StatusOK, `{"data":[{"type":"appScreenshots","id":"old-1","attributes":{"fileName":"01-home.png"}}],"links":{}}`)
+		default:
+			t.Fatalf("unexpected request: %s %s", req.Method, req.URL.String())
+			return nil, nil
+		}
+	})
+
+	_, stderr := captureOutput(t, func() {
+		code := cmd.Run([]string{
+			"screenshots", "upload",
+			"--version-localization", "LOC_123",
+			"--path", workDir,
+			"--device-type", "IPHONE_65",
+			"--dry-run",
+			"--output", "json",
+		}, "1.2.3")
+		if code != cmd.ExitSuccess {
+			t.Fatalf("expected exit code %d, got %d", cmd.ExitSuccess, code)
+		}
+	})
+
+	want := "Warning: screenshots upload: 1 file(s) already in the target screenshot set (01-home.png); uploading them again creates duplicates. Use --skip-existing to upload only missing files, --replace --confirm to replace the set, or --resume with the failure artifact to finish a failed upload.\n"
+	if stderr != want {
+		t.Fatalf("stderr = %q, want %q", stderr, want)
+	}
+}
+
 func TestRunScreenshotsUploadFanoutPrintsPartialResultsOnLocaleFailure(t *testing.T) {
 	setupAuth(t)
 	t.Setenv("ASC_BYPASS_KEYCHAIN", "1")
@@ -271,7 +373,6 @@ func TestRunScreenshotsUploadFanoutPrintsPartialResultsOnLocaleFailure(t *testin
 		http.DefaultTransport = originalTransport
 	})
 
-	createCount := 0
 	http.DefaultTransport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
 		switch {
 		case req.Method == http.MethodGet && req.URL.Path == "/v1/appStoreVersions/version-1":
@@ -284,19 +385,44 @@ func TestRunScreenshotsUploadFanoutPrintsPartialResultsOnLocaleFailure(t *testin
 			return screenshotsUploadJSONResponse(http.StatusOK, `{"data":[{"type":"appScreenshotSets","id":"set-fr","attributes":{"screenshotDisplayType":"APP_IPHONE_65"}}],"links":{}}`)
 		case req.Method == http.MethodGet && req.URL.Path == "/v1/appScreenshotSets/set-en/relationships/appScreenshots":
 			return screenshotsUploadJSONResponse(http.StatusOK, `{"data":[],"links":{}}`)
+		case req.Method == http.MethodGet && req.URL.Path == "/v1/appScreenshotSets/set-en/appScreenshots":
+			return screenshotsUploadJSONResponse(http.StatusOK, `{"data":[],"links":{}}`)
 		case req.Method == http.MethodGet && req.URL.Path == "/v1/appScreenshotSets/set-fr/relationships/appScreenshots":
 			return screenshotsUploadJSONResponse(http.StatusOK, `{"data":[],"links":{}}`)
+		case req.Method == http.MethodGet && req.URL.Path == "/v1/appScreenshotSets/set-fr/appScreenshots":
+			return screenshotsUploadJSONResponse(http.StatusOK, `{"data":[],"links":{}}`)
 		case req.Method == http.MethodPost && req.URL.Path == "/v1/appScreenshots":
-			createCount++
-			switch createCount {
-			case 1:
+			var payload struct {
+				Data struct {
+					Type       string `json:"type"`
+					Attributes struct {
+						FileName string `json:"fileName"`
+						FileSize int64  `json:"fileSize"`
+					} `json:"attributes"`
+					Relationships struct {
+						AppScreenshotSet struct {
+							Data struct {
+								ID string `json:"id"`
+							} `json:"data"`
+						} `json:"appScreenshotSet"`
+					} `json:"relationships"`
+				} `json:"data"`
+			}
+			if err := json.NewDecoder(req.Body).Decode(&payload); err != nil {
+				t.Fatalf("decode screenshot create request: %v", err)
+			}
+			if payload.Data.Type != "appScreenshots" {
+				t.Fatalf("expected screenshot create type appScreenshots, got %q", payload.Data.Type)
+			}
+			switch {
+			case payload.Data.Relationships.AppScreenshotSet.Data.ID == "set-en" && payload.Data.Attributes.FileName == "01-home.png" && payload.Data.Attributes.FileSize == int64(enSize):
 				return screenshotsUploadJSONResponse(http.StatusCreated, fmt.Sprintf(`{"data":{"type":"appScreenshots","id":"new-en-1","attributes":{"uploadOperations":[{"method":"PUT","url":"https://upload.example/new-en-1","length":%d,"offset":0}]}}}`, enSize))
-			case 2:
+			case payload.Data.Relationships.AppScreenshotSet.Data.ID == "set-fr" && payload.Data.Attributes.FileName == "01-home.png" && payload.Data.Attributes.FileSize == int64(frFirstSize):
 				return screenshotsUploadJSONResponse(http.StatusCreated, fmt.Sprintf(`{"data":{"type":"appScreenshots","id":"new-fr-1","attributes":{"uploadOperations":[{"method":"PUT","url":"https://upload.example/new-fr-1","length":%d,"offset":0}]}}}`, frFirstSize))
-			case 3:
+			case payload.Data.Relationships.AppScreenshotSet.Data.ID == "set-fr" && payload.Data.Attributes.FileName == "02-settings.png" && payload.Data.Attributes.FileSize > 0:
 				return screenshotsUploadJSONResponse(http.StatusInternalServerError, `{"errors":[{"status":"500","code":"INTERNAL_ERROR","detail":"upload create failed"}]}`)
 			default:
-				t.Fatalf("unexpected extra screenshot create: %d", createCount)
+				t.Fatalf("unexpected screenshot create request: %#v", payload.Data)
 				return nil, nil
 			}
 		case req.Method == http.MethodPut && req.URL.Host == "upload.example":
@@ -306,9 +432,9 @@ func TestRunScreenshotsUploadFanoutPrintsPartialResultsOnLocaleFailure(t *testin
 		case req.Method == http.MethodPatch && req.URL.Path == "/v1/appScreenshots/new-fr-1":
 			return screenshotsUploadJSONResponse(http.StatusOK, `{"data":{"type":"appScreenshots","id":"new-fr-1","attributes":{"uploaded":true}}}`)
 		case req.Method == http.MethodGet && req.URL.Path == "/v1/appScreenshots/new-en-1":
-			return screenshotsUploadJSONResponse(http.StatusOK, `{"data":{"type":"appScreenshots","id":"new-en-1","attributes":{"assetDeliveryState":{"state":"COMPLETE"}}}}`)
+			return screenshotsUploadJSONResponse(http.StatusOK, `{"data":{"type":"appScreenshots","id":"new-en-1","attributes":{"sourceFileChecksum":"settled","assetDeliveryState":{"state":"COMPLETE"}}}}`)
 		case req.Method == http.MethodGet && req.URL.Path == "/v1/appScreenshots/new-fr-1":
-			return screenshotsUploadJSONResponse(http.StatusOK, `{"data":{"type":"appScreenshots","id":"new-fr-1","attributes":{"assetDeliveryState":{"state":"COMPLETE"}}}}`)
+			return screenshotsUploadJSONResponse(http.StatusOK, `{"data":{"type":"appScreenshots","id":"new-fr-1","attributes":{"sourceFileChecksum":"settled","assetDeliveryState":{"state":"COMPLETE"}}}}`)
 		case req.Method == http.MethodPatch && req.URL.Path == "/v1/appScreenshotSets/set-en/relationships/appScreenshots":
 			body, readErr := io.ReadAll(req.Body)
 			if readErr != nil {
@@ -350,15 +476,16 @@ func TestRunScreenshotsUploadFanoutPrintsPartialResultsOnLocaleFailure(t *testin
 			"--version-id", "version-1",
 			"--path", workDir,
 			"--device-type", "IPHONE_65",
+			"--concurrency", "1",
 			"--output", "json",
 		}, "1.2.3")
-		if code != cmd.ExitError {
-			t.Fatalf("expected exit code %d, got %d", cmd.ExitError, code)
+		if code != cmd.ExitHTTPInternalServer {
+			t.Fatalf("expected exit code %d, got %d", cmd.ExitHTTPInternalServer, code)
 		}
 	})
 
-	if stderr != "" {
-		t.Fatalf("expected empty stderr for reported fan-out upload failure, got %q", stderr)
+	if !strings.Contains(stderr, "Error: screenshots upload: 1 of 2 file(s) not uploaded: ") || !strings.Contains(stderr, "Hint: resume with `asc screenshots upload --resume ") {
+		t.Fatalf("expected fan-out partial failure and resume hint on stderr, got %q", stderr)
 	}
 	if err := json.Unmarshal([]byte(stdout), &payload); err != nil {
 		t.Fatalf("failed to parse fan-out stdout JSON: %v\nstdout=%s", err, stdout)

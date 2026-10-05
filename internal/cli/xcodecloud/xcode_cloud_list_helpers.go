@@ -2,7 +2,6 @@ package xcodecloud
 
 import (
 	"context"
-	"flag"
 	"fmt"
 	"os"
 	"strings"
@@ -40,7 +39,8 @@ func runXcodeCloudPaginatedList(
 	defer cancel()
 
 	if paginate {
-		resp, err := shared.PaginateWithSpinner(requestCtx,
+		resp, err := shared.PaginateWithSpinner(
+			requestCtx,
 			func(ctx context.Context) (asc.PaginatedResponse, error) {
 				return fetchPage(ctx, client, 200, nextURL)
 			},
@@ -62,10 +62,14 @@ func runXcodeCloudPaginatedList(
 	return shared.PrintOutput(resp, output, pretty)
 }
 
+// runXcodeCloudPaginatedParentList lists a paginated child collection scoped to
+// a parent resource. parentHint, when non-empty, is appended to the missing-flag
+// error so callers learn how to discover the parent ID.
 func runXcodeCloudPaginatedParentList(
 	ctx context.Context,
 	parentID string,
 	parentFlag string,
+	parentHint string,
 	limit int,
 	next string,
 	paginate bool,
@@ -77,8 +81,12 @@ func runXcodeCloudPaginatedParentList(
 ) error {
 	resolvedParentID := strings.TrimSpace(parentID)
 	if resolvedParentID == "" && strings.TrimSpace(next) == "" {
-		fmt.Fprintf(os.Stderr, "Error: --%s is required\n", parentFlag)
-		return flag.ErrHelp
+		if hint := strings.TrimSpace(parentHint); hint != "" {
+			fmt.Fprintf(os.Stderr, "Error: --%s is required. %s\n", parentFlag, hint)
+		} else {
+			fmt.Fprintf(os.Stderr, "Error: --%s is required\n", parentFlag)
+		}
+		return shared.MissingRequiredUsageError("--" + parentFlag)
 	}
 
 	return runXcodeCloudPaginatedList(

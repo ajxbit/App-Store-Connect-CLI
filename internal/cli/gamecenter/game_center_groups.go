@@ -25,18 +25,17 @@ func GameCenterGroupsCommand() *ffcli.Command {
 
 Examples:
   asc game-center groups list --app "APP_ID"
-  asc game-center groups get --id "GROUP_ID"
+  asc game-center groups view --id "GROUP_ID"
   asc game-center groups create --reference-name "Group 1"
   asc game-center groups update --id "GROUP_ID" --reference-name "New Name"
   asc game-center groups delete --id "GROUP_ID" --confirm
   asc game-center groups achievements list --group-id "GROUP_ID"
-  asc game-center groups achievements set --group-id "GROUP_ID" --ids "ACH_1,ACH_2"
+  asc game-center groups achievements set --group-id "GROUP_ID" --ids "ACH_1,ACH_2" --confirm
   asc game-center groups leaderboards list --group-id "GROUP_ID"
-  asc game-center groups leaderboards set --group-id "GROUP_ID" --ids "LB_1,LB_2"
+  asc game-center groups leaderboards set --group-id "GROUP_ID" --ids "LB_1,LB_2" --confirm
   asc game-center groups leaderboard-sets list --group-id "GROUP_ID"
   asc game-center groups activities list --group-id "GROUP_ID"
-  asc game-center groups challenges list --group-id "GROUP_ID"
-  asc game-center groups challenges set --group-id "GROUP_ID" --ids "CH_1,CH_2"`,
+  asc game-center groups challenges list --group-id "GROUP_ID"`,
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
 		Subcommands: []*ffcli.Command{
@@ -82,17 +81,17 @@ Examples:
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
 			if *limit != 0 && (*limit < 1 || *limit > 200) {
-				return fmt.Errorf("game-center groups list: --limit must be between 1 and 200")
+				return shared.UsageError("game-center groups list: --limit must be between 1 and 200")
 			}
 			if err := shared.ValidateNextURL(*next); err != nil {
-				return fmt.Errorf("game-center groups list: %w", err)
+				return shared.UsageErrorf("game-center groups list: %v", err)
 			}
 
 			resolvedAppID := shared.ResolveAppID(*appID)
 			nextURL := strings.TrimSpace(*next)
 			if resolvedAppID == "" && nextURL == "" {
 				fmt.Fprintln(os.Stderr, "Error: --app is required (or set ASC_APP_ID)")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--app")
 			}
 
 			client, err := shared.GetASCClient()
@@ -149,31 +148,31 @@ Examples:
 
 // GameCenterGroupsGetCommand returns the groups get subcommand.
 func GameCenterGroupsGetCommand() *ffcli.Command {
-	fs := flag.NewFlagSet("get", flag.ExitOnError)
+	fs := flag.NewFlagSet("view", flag.ExitOnError)
 
-	groupID := fs.String("id", "", "Game Center group ID")
+	groupID := shared.BindResourceIDFlag(fs, "id", "gameCenterGroups", "Game Center group ID")
 	output := shared.BindOutputFlags(fs)
 
 	return &ffcli.Command{
-		Name:       "get",
-		ShortUsage: "asc game-center groups get --id \"GROUP_ID\"",
-		ShortHelp:  "Get a Game Center group by ID.",
-		LongHelp: `Get a Game Center group by ID.
+		Name:       "view",
+		ShortUsage: "asc game-center groups view --id \"GROUP_ID\"",
+		ShortHelp:  "View a Game Center group by ID.",
+		LongHelp: `View a Game Center group by ID.
 
 Examples:
-  asc game-center groups get --id "GROUP_ID"`,
+  asc game-center groups view --id "GROUP_ID"`,
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
 			id := strings.TrimSpace(*groupID)
 			if id == "" {
 				fmt.Fprintln(os.Stderr, "Error: --id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--id")
 			}
 
 			client, err := shared.GetASCClient()
 			if err != nil {
-				return fmt.Errorf("game-center groups get: %w", err)
+				return fmt.Errorf("game-center groups view: %w", err)
 			}
 
 			requestCtx, cancel := shared.ContextWithTimeout(ctx)
@@ -181,7 +180,7 @@ Examples:
 
 			resp, err := client.GetGameCenterGroup(requestCtx, id)
 			if err != nil {
-				return fmt.Errorf("game-center groups get: failed to fetch: %w", err)
+				return fmt.Errorf("game-center groups view: failed to fetch: %w", err)
 			}
 
 			return shared.PrintOutput(resp, *output.Output, *output.Pretty)
@@ -235,7 +234,7 @@ Examples:
 func GameCenterGroupsUpdateCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("update", flag.ExitOnError)
 
-	groupID := fs.String("id", "", "Game Center group ID")
+	groupID := shared.BindResourceIDFlag(fs, "id", "gameCenterGroups", "Game Center group ID")
 	referenceName := fs.String("reference-name", "", "Reference name for the group")
 	output := shared.BindOutputFlags(fs)
 
@@ -253,12 +252,12 @@ Examples:
 			id := strings.TrimSpace(*groupID)
 			if id == "" {
 				fmt.Fprintln(os.Stderr, "Error: --id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--id")
 			}
 
 			if strings.TrimSpace(*referenceName) == "" {
 				fmt.Fprintln(os.Stderr, "Error: --reference-name is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--reference-name")
 			}
 			value := strings.TrimSpace(*referenceName)
 
@@ -284,7 +283,7 @@ Examples:
 func GameCenterGroupsDeleteCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("delete", flag.ExitOnError)
 
-	groupID := fs.String("id", "", "Game Center group ID")
+	groupID := shared.BindResourceIDFlag(fs, "id", "gameCenterGroups", "Game Center group ID")
 	confirm := fs.Bool("confirm", false, "Confirm deletion")
 	output := shared.BindOutputFlags(fs)
 
@@ -302,11 +301,11 @@ Examples:
 			id := strings.TrimSpace(*groupID)
 			if id == "" {
 				fmt.Fprintln(os.Stderr, "Error: --id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--id")
 			}
 			if !*confirm {
 				fmt.Fprintln(os.Stderr, "Error: --confirm is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--confirm")
 			}
 
 			client, err := shared.GetASCClient()
@@ -337,13 +336,13 @@ func GameCenterGroupAchievementsCommand() *ffcli.Command {
 
 	return &ffcli.Command{
 		Name:       "achievements",
-		ShortUsage: "asc game-center groups achievements set --group-id \"GROUP_ID\" --ids \"ACH_1,ACH_2\"",
+		ShortUsage: "asc game-center groups achievements set --group-id \"GROUP_ID\" --ids \"ACH_1,ACH_2\" --confirm",
 		ShortHelp:  "Manage group achievements relationships.",
 		LongHelp: `Manage group achievements relationships.
 
 Examples:
   asc game-center groups achievements list --group-id "GROUP_ID"
-  asc game-center groups achievements set --group-id "GROUP_ID" --ids "ACH_1,ACH_2"`,
+  asc game-center groups achievements set --group-id "GROUP_ID" --ids "ACH_1,ACH_2" --confirm`,
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
 		Subcommands: []*ffcli.Command{
@@ -360,7 +359,7 @@ Examples:
 func GameCenterGroupAchievementsListCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("list", flag.ExitOnError)
 
-	groupID := fs.String("group-id", "", "Game Center group ID")
+	groupID := shared.BindResourceIDFlag(fs, "group-id", "gameCenterGroups", "Game Center group ID")
 	limit := fs.Int("limit", 0, "Maximum results per page (1-200)")
 	next := fs.String("next", "", "Fetch next page using a links.next URL")
 	paginate := fs.Bool("paginate", false, "Automatically fetch all pages (aggregate results)")
@@ -382,16 +381,16 @@ Examples:
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
 			if *limit != 0 && (*limit < 1 || *limit > 200) {
-				return fmt.Errorf("game-center groups achievements list: --limit must be between 1 and 200")
+				return shared.UsageError("game-center groups achievements list: --limit must be between 1 and 200")
 			}
 			if err := shared.ValidateNextURL(*next); err != nil {
-				return fmt.Errorf("game-center groups achievements list: %w", err)
+				return shared.UsageErrorf("game-center groups achievements list: %v", err)
 			}
 
 			id := strings.TrimSpace(*groupID)
 			if id == "" && strings.TrimSpace(*next) == "" {
 				fmt.Fprintln(os.Stderr, "Error: --group-id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--group-id")
 			}
 
 			client, err := shared.GetASCClient()
@@ -453,32 +452,38 @@ Examples:
 func GameCenterGroupAchievementsSetCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("set", flag.ExitOnError)
 
-	groupID := fs.String("group-id", "", "Game Center group ID")
-	ids := fs.String("ids", "", "Comma-separated achievement IDs")
+	groupID := shared.BindResourceIDFlag(fs, "group-id", "gameCenterGroups", "Game Center group ID")
+	ids := shared.BindOnceCSVFlag(fs, "ids", "Comma-separated achievement IDs")
 	v2 := fs.Bool("v2", false, "Use v2 relationships endpoint")
+	confirm := fs.Bool("confirm", false, "Confirm replacing all relationships (required)")
 	output := shared.BindOutputFlags(fs)
 
 	return &ffcli.Command{
 		Name:       "set",
-		ShortUsage: "asc game-center groups achievements set --group-id \"GROUP_ID\" --ids \"ACH_1,ACH_2\"",
+		ShortUsage: "asc game-center groups achievements set --group-id \"GROUP_ID\" --ids \"ACH_1,ACH_2\" --confirm",
 		ShortHelp:  "Replace group achievements relationships.",
 		LongHelp: `Replace group achievements relationships.
 
+Because replacement can remove existing relationships, --confirm is required.
+
 Examples:
-  asc game-center groups achievements set --group-id "GROUP_ID" --ids "ACH_1,ACH_2"
-  asc game-center groups achievements set --group-id "GROUP_ID" --ids "ACH_1,ACH_2" --v2`,
+  asc game-center groups achievements set --group-id "GROUP_ID" --ids "ACH_1,ACH_2" --confirm
+  asc game-center groups achievements set --group-id "GROUP_ID" --ids "ACH_1,ACH_2" --v2 --confirm`,
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
 			id := strings.TrimSpace(*groupID)
 			if id == "" {
 				fmt.Fprintln(os.Stderr, "Error: --group-id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--group-id")
 			}
-			idsValue := shared.SplitCSV(*ids)
+			idsValue := shared.SplitCSV(ids.String())
 			if len(idsValue) == 0 {
 				fmt.Fprintln(os.Stderr, "Error: --ids is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--ids")
+			}
+			if err := validateGameCenterReplacementConfirm(fs, *confirm); err != nil {
+				return err
 			}
 
 			client, err := shared.GetASCClient()
@@ -511,13 +516,13 @@ func GameCenterGroupLeaderboardsCommand() *ffcli.Command {
 
 	return &ffcli.Command{
 		Name:       "leaderboards",
-		ShortUsage: "asc game-center groups leaderboards set --group-id \"GROUP_ID\" --ids \"LB_1,LB_2\"",
+		ShortUsage: "asc game-center groups leaderboards set --group-id \"GROUP_ID\" --ids \"LB_1,LB_2\" --confirm",
 		ShortHelp:  "Manage group leaderboards relationships.",
 		LongHelp: `Manage group leaderboards relationships.
 
 Examples:
   asc game-center groups leaderboards list --group-id "GROUP_ID"
-  asc game-center groups leaderboards set --group-id "GROUP_ID" --ids "LB_1,LB_2"`,
+  asc game-center groups leaderboards set --group-id "GROUP_ID" --ids "LB_1,LB_2" --confirm`,
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
 		Subcommands: []*ffcli.Command{
@@ -534,7 +539,7 @@ Examples:
 func GameCenterGroupLeaderboardsListCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("list", flag.ExitOnError)
 
-	groupID := fs.String("group-id", "", "Game Center group ID")
+	groupID := shared.BindResourceIDFlag(fs, "group-id", "gameCenterGroups", "Game Center group ID")
 	limit := fs.Int("limit", 0, "Maximum results per page (1-200)")
 	next := fs.String("next", "", "Fetch next page using a links.next URL")
 	paginate := fs.Bool("paginate", false, "Automatically fetch all pages (aggregate results)")
@@ -556,16 +561,16 @@ Examples:
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
 			if *limit != 0 && (*limit < 1 || *limit > 200) {
-				return fmt.Errorf("game-center groups leaderboards list: --limit must be between 1 and 200")
+				return shared.UsageError("game-center groups leaderboards list: --limit must be between 1 and 200")
 			}
 			if err := shared.ValidateNextURL(*next); err != nil {
-				return fmt.Errorf("game-center groups leaderboards list: %w", err)
+				return shared.UsageErrorf("game-center groups leaderboards list: %v", err)
 			}
 
 			id := strings.TrimSpace(*groupID)
 			if id == "" && strings.TrimSpace(*next) == "" {
 				fmt.Fprintln(os.Stderr, "Error: --group-id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--group-id")
 			}
 
 			client, err := shared.GetASCClient()
@@ -627,32 +632,38 @@ Examples:
 func GameCenterGroupLeaderboardsSetCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("set", flag.ExitOnError)
 
-	groupID := fs.String("group-id", "", "Game Center group ID")
-	ids := fs.String("ids", "", "Comma-separated leaderboard IDs")
+	groupID := shared.BindResourceIDFlag(fs, "group-id", "gameCenterGroups", "Game Center group ID")
+	ids := shared.BindOnceCSVFlag(fs, "ids", "Comma-separated leaderboard IDs")
 	v2 := fs.Bool("v2", false, "Use v2 relationships endpoint")
+	confirm := fs.Bool("confirm", false, "Confirm replacing all relationships (required)")
 	output := shared.BindOutputFlags(fs)
 
 	return &ffcli.Command{
 		Name:       "set",
-		ShortUsage: "asc game-center groups leaderboards set --group-id \"GROUP_ID\" --ids \"LB_1,LB_2\"",
+		ShortUsage: "asc game-center groups leaderboards set --group-id \"GROUP_ID\" --ids \"LB_1,LB_2\" --confirm",
 		ShortHelp:  "Replace group leaderboards relationships.",
 		LongHelp: `Replace group leaderboards relationships.
 
+Because replacement can remove existing relationships, --confirm is required.
+
 Examples:
-  asc game-center groups leaderboards set --group-id "GROUP_ID" --ids "LB_1,LB_2"
-  asc game-center groups leaderboards set --group-id "GROUP_ID" --ids "LB_1,LB_2" --v2`,
+  asc game-center groups leaderboards set --group-id "GROUP_ID" --ids "LB_1,LB_2" --confirm
+  asc game-center groups leaderboards set --group-id "GROUP_ID" --ids "LB_1,LB_2" --v2 --confirm`,
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
 			id := strings.TrimSpace(*groupID)
 			if id == "" {
 				fmt.Fprintln(os.Stderr, "Error: --group-id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--group-id")
 			}
-			idsValue := shared.SplitCSV(*ids)
+			idsValue := shared.SplitCSV(ids.String())
 			if len(idsValue) == 0 {
 				fmt.Fprintln(os.Stderr, "Error: --ids is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--ids")
+			}
+			if err := validateGameCenterReplacementConfirm(fs, *confirm); err != nil {
+				return err
 			}
 
 			client, err := shared.GetASCClient()
@@ -706,7 +717,7 @@ Examples:
 func GameCenterGroupLeaderboardSetsListCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("list", flag.ExitOnError)
 
-	groupID := fs.String("group-id", "", "Game Center group ID")
+	groupID := shared.BindResourceIDFlag(fs, "group-id", "gameCenterGroups", "Game Center group ID")
 	limit := fs.Int("limit", 0, "Maximum results per page (1-200)")
 	next := fs.String("next", "", "Fetch next page using a links.next URL")
 	paginate := fs.Bool("paginate", false, "Automatically fetch all pages (aggregate results)")
@@ -728,16 +739,16 @@ Examples:
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
 			if *limit != 0 && (*limit < 1 || *limit > 200) {
-				return fmt.Errorf("game-center groups leaderboard-sets list: --limit must be between 1 and 200")
+				return shared.UsageError("game-center groups leaderboard-sets list: --limit must be between 1 and 200")
 			}
 			if err := shared.ValidateNextURL(*next); err != nil {
-				return fmt.Errorf("game-center groups leaderboard-sets list: %w", err)
+				return shared.UsageErrorf("game-center groups leaderboard-sets list: %v", err)
 			}
 
 			id := strings.TrimSpace(*groupID)
 			if id == "" && strings.TrimSpace(*next) == "" {
 				fmt.Fprintln(os.Stderr, "Error: --group-id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--group-id")
 			}
 
 			client, err := shared.GetASCClient()
@@ -822,7 +833,7 @@ Examples:
 func GameCenterGroupActivitiesListCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("list", flag.ExitOnError)
 
-	groupID := fs.String("group-id", "", "Game Center group ID")
+	groupID := shared.BindResourceIDFlag(fs, "group-id", "gameCenterGroups", "Game Center group ID")
 	limit := fs.Int("limit", 0, "Maximum results per page (1-200)")
 	next := fs.String("next", "", "Fetch next page using a links.next URL")
 	paginate := fs.Bool("paginate", false, "Automatically fetch all pages (aggregate results)")
@@ -842,16 +853,16 @@ Examples:
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
 			if *limit != 0 && (*limit < 1 || *limit > 200) {
-				return fmt.Errorf("game-center groups activities list: --limit must be between 1 and 200")
+				return shared.UsageError("game-center groups activities list: --limit must be between 1 and 200")
 			}
 			if err := shared.ValidateNextURL(*next); err != nil {
-				return fmt.Errorf("game-center groups activities list: %w", err)
+				return shared.UsageErrorf("game-center groups activities list: %v", err)
 			}
 
 			id := strings.TrimSpace(*groupID)
 			if id == "" && strings.TrimSpace(*next) == "" {
 				fmt.Fprintln(os.Stderr, "Error: --group-id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--group-id")
 			}
 
 			client, err := shared.GetASCClient()
@@ -900,18 +911,20 @@ func GameCenterGroupChallengesCommand() *ffcli.Command {
 
 	return &ffcli.Command{
 		Name:       "challenges",
-		ShortUsage: "asc game-center groups challenges set --group-id \"GROUP_ID\" --ids \"CH_1,CH_2\"",
-		ShortHelp:  "Manage group challenges relationships.",
-		LongHelp: `Manage group challenges relationships.
+		ShortUsage: "asc game-center groups challenges list --group-id \"GROUP_ID\"",
+		ShortHelp:  "List group challenges relationships.",
+		LongHelp: `List group challenges relationships.
+
+App Store Connect exposes a group's challenge relationships as read-only. To add
+a challenge to a group, create it with:
+  asc game-center challenges create --group-id "GROUP_ID" --reference-name "Weekly" --vendor-id "grp.com.example.weekly" --leaderboard-id "LEADERBOARD_ID"
 
 Examples:
-  asc game-center groups challenges list --group-id "GROUP_ID"
-  asc game-center groups challenges set --group-id "GROUP_ID" --ids "CH_1,CH_2"`,
+  asc game-center groups challenges list --group-id "GROUP_ID"`,
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
 		Subcommands: []*ffcli.Command{
 			GameCenterGroupChallengesListCommand(),
-			GameCenterGroupChallengesSetCommand(),
 		},
 		Exec: func(ctx context.Context, args []string) error {
 			return flag.ErrHelp
@@ -923,7 +936,7 @@ Examples:
 func GameCenterGroupChallengesListCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("list", flag.ExitOnError)
 
-	groupID := fs.String("group-id", "", "Game Center group ID")
+	groupID := shared.BindResourceIDFlag(fs, "group-id", "gameCenterGroups", "Game Center group ID")
 	limit := fs.Int("limit", 0, "Maximum results per page (1-200)")
 	next := fs.String("next", "", "Fetch next page using a links.next URL")
 	paginate := fs.Bool("paginate", false, "Automatically fetch all pages (aggregate results)")
@@ -943,16 +956,16 @@ Examples:
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
 			if *limit != 0 && (*limit < 1 || *limit > 200) {
-				return fmt.Errorf("game-center groups challenges list: --limit must be between 1 and 200")
+				return shared.UsageError("game-center groups challenges list: --limit must be between 1 and 200")
 			}
 			if err := shared.ValidateNextURL(*next); err != nil {
-				return fmt.Errorf("game-center groups challenges list: %w", err)
+				return shared.UsageErrorf("game-center groups challenges list: %v", err)
 			}
 
 			id := strings.TrimSpace(*groupID)
 			if id == "" && strings.TrimSpace(*next) == "" {
 				fmt.Fprintln(os.Stderr, "Error: --group-id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--group-id")
 			}
 
 			client, err := shared.GetASCClient()
@@ -995,54 +1008,6 @@ Examples:
 	}
 }
 
-// GameCenterGroupChallengesSetCommand returns the group challenges set subcommand.
-func GameCenterGroupChallengesSetCommand() *ffcli.Command {
-	fs := flag.NewFlagSet("set", flag.ExitOnError)
-
-	groupID := fs.String("group-id", "", "Game Center group ID")
-	ids := fs.String("ids", "", "Comma-separated challenge IDs")
-	output := shared.BindOutputFlags(fs)
-
-	return &ffcli.Command{
-		Name:       "set",
-		ShortUsage: "asc game-center groups challenges set --group-id \"GROUP_ID\" --ids \"CH_1,CH_2\"",
-		ShortHelp:  "Replace group challenges relationships.",
-		LongHelp: `Replace group challenges relationships.
-
-Examples:
-  asc game-center groups challenges set --group-id "GROUP_ID" --ids "CH_1,CH_2"`,
-		FlagSet:   fs,
-		UsageFunc: shared.DefaultUsageFunc,
-		Exec: func(ctx context.Context, args []string) error {
-			id := strings.TrimSpace(*groupID)
-			if id == "" {
-				fmt.Fprintln(os.Stderr, "Error: --group-id is required")
-				return flag.ErrHelp
-			}
-			idsValue := shared.SplitCSV(*ids)
-			if len(idsValue) == 0 {
-				fmt.Fprintln(os.Stderr, "Error: --ids is required")
-				return flag.ErrHelp
-			}
-
-			client, err := shared.GetASCClient()
-			if err != nil {
-				return fmt.Errorf("game-center groups challenges set: %w", err)
-			}
-
-			requestCtx, cancel := shared.ContextWithTimeout(ctx)
-			defer cancel()
-
-			if err := client.UpdateGameCenterGroupChallenges(requestCtx, id, idsValue); err != nil {
-				return fmt.Errorf("game-center groups challenges set: failed to update: %w", err)
-			}
-
-			result := &asc.LinkagesResponse{Data: resourceDataList(asc.ResourceTypeGameCenterChallenges, idsValue)}
-			return shared.PrintOutput(result, *output.Output, *output.Pretty)
-		},
-	}
-}
-
 // GameCenterGroupDetailsCommand returns the group details command group.
 func GameCenterGroupDetailsCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("details", flag.ExitOnError)
@@ -1070,7 +1035,7 @@ Examples:
 func GameCenterGroupDetailsListCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("list", flag.ExitOnError)
 
-	groupID := fs.String("group-id", "", "Game Center group ID")
+	groupID := shared.BindResourceIDFlag(fs, "group-id", "gameCenterGroups", "Game Center group ID")
 	limit := fs.Int("limit", 0, "Maximum results per page (1-200)")
 	next := fs.String("next", "", "Fetch next page using a links.next URL")
 	paginate := fs.Bool("paginate", false, "Automatically fetch all pages (aggregate results)")
@@ -1090,17 +1055,17 @@ Examples:
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
 			if *limit != 0 && (*limit < 1 || *limit > 200) {
-				return fmt.Errorf("game-center groups details list: --limit must be between 1 and 200")
+				return shared.UsageError("game-center groups details list: --limit must be between 1 and 200")
 			}
 			if err := shared.ValidateNextURL(*next); err != nil {
-				return fmt.Errorf("game-center groups details list: %w", err)
+				return shared.UsageErrorf("game-center groups details list: %v", err)
 			}
 
 			id := strings.TrimSpace(*groupID)
 			nextURL := strings.TrimSpace(*next)
 			if id == "" && nextURL == "" {
 				fmt.Fprintln(os.Stderr, "Error: --group-id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--group-id")
 			}
 
 			client, err := shared.GetASCClient()

@@ -8,7 +8,7 @@ The App Store Connect CLI (`asc`) is distributed as a single binary with no runt
 
 * **Operating System**: macOS or Linux
 * **Architecture**: x86\_64 (amd64) or ARM64 (arm64/aarch64)
-* **Go**: 1.26+ (only required for source builds)
+* **Go**: Not required for released binaries. Source builds use the version declared by `go.mod`.
 
 ## Homebrew (recommended)
 
@@ -56,11 +56,11 @@ For automated setups or environments without Homebrew:
   </Step>
 
   <Step title="Download the latest release">
-    Fetches the appropriate binary from [GitHub Releases](https://github.com/rudrankriyam/App-Store-Connect-CLI/releases/latest)
+    Fetches the appropriate binary from [GitHub Releases](https://github.com/rorkai/App-Store-Connect-CLI/releases/latest)
   </Step>
 
   <Step title="Verify checksums">
-    Validates the downloaded binary using SHA-256 checksums (if `shasum` or `sha256sum` is available)
+    Validates the downloaded binary against the release SHA-256 checksums. The script aborts if verification cannot run (missing `checksums.txt`, missing `shasum`/`sha256sum`, or an unlisted asset); set `ASC_INSTALL_INSECURE=1` to explicitly skip verification in emergencies. A checksum mismatch always aborts.
   </Step>
 
   <Step title="Install to bin directory">
@@ -102,7 +102,7 @@ For maximum control, download binaries directly from GitHub:
 
 <Steps>
   <Step title="Visit releases page">
-    Go to [github.com/rudrankriyam/App-Store-Connect-CLI/releases/latest](https://github.com/rudrankriyam/App-Store-Connect-CLI/releases/latest)
+    Go to [github.com/rorkai/App-Store-Connect-CLI/releases/latest](https://github.com/rorkai/App-Store-Connect-CLI/releases/latest)
   </Step>
 
   <Step title="Download your platform binary">
@@ -134,7 +134,7 @@ For contributors or custom builds:
 <Steps>
   <Step title="Clone the repository">
     ```bash  theme={null}
-    git clone https://github.com/rudrankriyam/App-Store-Connect-CLI.git
+    git clone https://github.com/rorkai/App-Store-Connect-CLI.git
     cd App-Store-Connect-CLI
     ```
   </Step>
@@ -157,7 +157,7 @@ For contributors or custom builds:
 </Steps>
 
 <Note>
-  See [CONTRIBUTING.md](https://github.com/rudrankriyam/App-Store-Connect-CLI/blob/main/CONTRIBUTING.md) for development setup, testing, and PR guidelines.
+  See [CONTRIBUTING.md](https://github.com/rorkai/App-Store-Connect-CLI/blob/main/CONTRIBUTING.md) for development setup, testing, and PR guidelines.
 </Note>
 
 ### Development tools
@@ -179,6 +179,34 @@ ASC_BYPASS_KEYCHAIN=1 make test
 <Warning>
   Always use `ASC_BYPASS_KEYCHAIN=1` when running tests to avoid macOS keychain prompts and environment bleed-through.
 </Warning>
+
+## Agent skills
+
+`asc` can install the App Store Connect workflow skills globally so your agent can use them across projects:
+
+```bash  theme={null}
+asc install-skills
+```
+
+`asc install-skills` checks out reviewed commit
+`f52c4f04323bb2dfb21ca8be82e6494e9cd0b4d8` and copies its 25 skills directly
+into the standard global agent-skills directory. It verifies the complete pack
+and every installed file before succeeding, preserves unrelated skills and
+unrelated lock entries, and pins the 25 ASC lock entries to the same reviewed
+commit so external checks cannot update them from a mutable branch. It rolls
+back the pack if any replacement fails. Only
+`git` is required; the command does not execute Node.js, `npx`, npm packages,
+or repository scripts.
+
+```bash  theme={null}
+git --version
+asc install-skills
+```
+
+<Note>
+  Upgrading the skill pack is an explicit change to the pinned commit and the
+  reviewed 25-skill manifest in `internal/cli/install/install.go`.
+</Note>
 
 ## Shell completion
 
@@ -218,7 +246,7 @@ Reload your shell to activate completions.
   </Tab>
 
   <Tab title="Manual">
-    Download the latest binary from [releases](https://github.com/rudrankriyam/App-Store-Connect-CLI/releases/latest) and replace your existing binary.
+    Download the latest binary from [releases](https://github.com/rorkai/App-Store-Connect-CLI/releases/latest) and replace your existing binary.
   </Tab>
 
   <Tab title="Source">
@@ -250,7 +278,7 @@ Reload your shell to activate completions.
     Optionally remove keychain entries:
 
     ```bash  theme={null}
-    asc auth logout --all        # before removing binary
+    asc auth logout --all --confirm  # before removing binary
     ```
   </Tab>
 </Tabs>

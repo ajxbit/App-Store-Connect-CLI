@@ -25,7 +25,7 @@ func LocalizationsPreviewSetsCommand() *ffcli.Command {
 
 Examples:
   asc localizations preview-sets list --localization-id "LOCALIZATION_ID"
-  asc localizations preview-sets get --id "PREVIEW_SET_ID"
+  asc localizations preview-sets view --id "PREVIEW_SET_ID"
   asc localizations preview-sets links --localization-id "LOCALIZATION_ID"`,
 		FlagSet:   fs,
 		UsageFunc: shared.VisibleUsageFunc,
@@ -53,6 +53,7 @@ Examples:
   asc localizations preview-sets list --localization-id "LOCALIZATION_ID"`,
 		ParentFlag:  "localization-id",
 		ParentUsage: "App Store version localization ID",
+		ParentType:  "appStoreVersionLocalizations",
 		LimitMax:    200,
 		ErrorPrefix: "localizations preview-sets list",
 		FetchPage: func(ctx context.Context, client *asc.Client, localizationID string, limit int, next string) (asc.PaginatedResponse, error) {
@@ -72,17 +73,18 @@ Examples:
 // LocalizationsPreviewSetsGetCommand returns the preview sets get subcommand.
 func LocalizationsPreviewSetsGetCommand() *ffcli.Command {
 	return shared.BuildIDGetCommand(shared.IDGetCommandConfig{
-		FlagSetName: "localizations preview-sets get",
-		Name:        "get",
-		ShortUsage:  "asc localizations preview-sets get --id \"PREVIEW_SET_ID\"",
-		ShortHelp:   "Get an app preview set by ID.",
-		LongHelp: `Get an app preview set by ID.
+		FlagSetName: "localizations preview-sets view",
+		Name:        "view",
+		ShortUsage:  "asc localizations preview-sets view --id \"PREVIEW_SET_ID\"",
+		ShortHelp:   "View an app preview set by ID.",
+		LongHelp: `View an app preview set by ID.
 
 Examples:
-  asc localizations preview-sets get --id "PREVIEW_SET_ID"`,
+  asc localizations preview-sets view --id "PREVIEW_SET_ID"`,
 		IDFlag:      "id",
 		IDUsage:     "App preview set ID",
-		ErrorPrefix: "localizations preview-sets get",
+		IDType:      "appPreviewSets",
+		ErrorPrefix: "localizations preview-sets view",
 		Fetch: func(ctx context.Context, client *asc.Client, id string) (any, error) {
 			return client.GetAppPreviewSet(ctx, id)
 		},
@@ -102,6 +104,7 @@ Examples:
   asc localizations preview-sets links --localization-id "LOCALIZATION_ID"`,
 		ParentFlag:  "localization-id",
 		ParentUsage: "App Store version localization ID",
+		ParentType:  "appStoreVersionLocalizations",
 		LimitMax:    200,
 		ErrorPrefix: "localizations preview-sets links",
 		FetchPage: func(ctx context.Context, client *asc.Client, localizationID string, limit int, next string) (asc.PaginatedResponse, error) {
@@ -130,7 +133,7 @@ func LocalizationsScreenshotSetsCommand() *ffcli.Command {
 
 Examples:
   asc localizations screenshot-sets list --localization-id "LOCALIZATION_ID"
-  asc localizations screenshot-sets get --id "SCREENSHOT_SET_ID"
+  asc localizations screenshot-sets view --id "SCREENSHOT_SET_ID"
   asc localizations screenshot-sets delete --id "SCREENSHOT_SET_ID" --confirm
   asc localizations screenshot-sets links --localization-id "LOCALIZATION_ID"`,
 		FlagSet:   fs,
@@ -150,17 +153,18 @@ Examples:
 // LocalizationsScreenshotSetsGetCommand returns the screenshot sets get subcommand.
 func LocalizationsScreenshotSetsGetCommand() *ffcli.Command {
 	return shared.BuildIDGetCommand(shared.IDGetCommandConfig{
-		FlagSetName: "localizations screenshot-sets get",
-		Name:        "get",
-		ShortUsage:  "asc localizations screenshot-sets get --id \"SCREENSHOT_SET_ID\"",
-		ShortHelp:   "Get an app screenshot set by ID.",
-		LongHelp: `Get an app screenshot set by ID.
+		FlagSetName: "localizations screenshot-sets view",
+		Name:        "view",
+		ShortUsage:  "asc localizations screenshot-sets view --id \"SCREENSHOT_SET_ID\"",
+		ShortHelp:   "View an app screenshot set by ID.",
+		LongHelp: `View an app screenshot set by ID.
 
 Examples:
-  asc localizations screenshot-sets get --id "SCREENSHOT_SET_ID"`,
+  asc localizations screenshot-sets view --id "SCREENSHOT_SET_ID"`,
 		IDFlag:      "id",
 		IDUsage:     "App screenshot set ID",
-		ErrorPrefix: "localizations screenshot-sets get",
+		IDType:      "appScreenshotSets",
+		ErrorPrefix: "localizations screenshot-sets view",
 		Fetch: func(ctx context.Context, client *asc.Client, id string) (any, error) {
 			return client.GetAppScreenshotSet(ctx, id)
 		},
@@ -171,7 +175,7 @@ Examples:
 func LocalizationsScreenshotSetsDeleteCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("localizations screenshot-sets delete", flag.ExitOnError)
 
-	setID := fs.String("id", "", "App screenshot set ID")
+	setID := shared.BindResourceIDFlag(fs, "id", "appScreenshotSets", "App screenshot set ID")
 	confirm := fs.Bool("confirm", false, "Confirm deletion")
 	output := shared.BindOutputFlags(fs)
 
@@ -189,11 +193,11 @@ Examples:
 			trimmedID := strings.TrimSpace(*setID)
 			if trimmedID == "" {
 				fmt.Fprintln(os.Stderr, "Error: --id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--id")
 			}
 			if !*confirm {
 				fmt.Fprintln(os.Stderr, "Error: --confirm is required to delete")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--confirm")
 			}
 
 			client, err := shared.GetASCClient()
@@ -231,6 +235,7 @@ Examples:
   asc localizations screenshot-sets list --localization-id "LOCALIZATION_ID"`,
 		ParentFlag:  "localization-id",
 		ParentUsage: "App Store version localization ID",
+		ParentType:  "appStoreVersionLocalizations",
 		LimitMax:    200,
 		ErrorPrefix: "localizations screenshot-sets list",
 		FetchPage: func(ctx context.Context, client *asc.Client, localizationID string, limit int, next string) (asc.PaginatedResponse, error) {
@@ -260,6 +265,7 @@ Examples:
   asc localizations screenshot-sets links --localization-id "LOCALIZATION_ID"`,
 		ParentFlag:  "localization-id",
 		ParentUsage: "App Store version localization ID",
+		ParentType:  "appStoreVersionLocalizations",
 		LimitMax:    200,
 		ErrorPrefix: "localizations screenshot-sets links",
 		FetchPage: func(ctx context.Context, client *asc.Client, localizationID string, limit int, next string) (asc.PaginatedResponse, error) {

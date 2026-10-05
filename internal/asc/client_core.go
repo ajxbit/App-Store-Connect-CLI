@@ -30,6 +30,9 @@ const (
 	tokenLifetime = 10 * time.Minute
 	// jwtRefreshSkew refreshes a token a bit early to avoid edge-of-expiry races.
 	jwtRefreshSkew = 30 * time.Second
+	// jwtIssuedAtSkew backdates the issued-at claim so a client clock running
+	// ahead of Apple's does not produce a token rejected as issued in the future.
+	jwtIssuedAtSkew = 60 * time.Second
 
 	// Retry defaults
 	DefaultMaxRetries = 3
@@ -39,6 +42,14 @@ const (
 	defaultMaxIdleConns         = 128
 	defaultMaxIdleConnsPerHost  = 32
 	defaultMutatingRequestLimit = 8
+
+	// BulkMutatingRequestLimit is the client-wide ceiling on concurrent
+	// mutating requests. Ordinary writes are held to
+	// defaultMutatingRequestLimit beneath it; only writes whose context is
+	// marked with WithBulkMutatingRequestLimit may use the extra slots, so a
+	// bulk fan-out can run more writes at once without raising the limit for
+	// every other command.
+	BulkMutatingRequestLimit = 16
 )
 
 var retryLogger = slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
@@ -233,6 +244,10 @@ func envValue(name string) (string, bool) {
 type RetryableError struct {
 	Err        error
 	RetryAfter time.Duration
+	// PreserveErrorOnDeadline requests terminal classification when a computed
+	// fallback wait cannot finish before the context deadline. Explicit context
+	// cancellation still takes precedence.
+	PreserveErrorOnDeadline bool
 }
 
 func (e *RetryableError) Error() string {
@@ -241,6 +256,16 @@ func (e *RetryableError) Error() string {
 
 func (e *RetryableError) Unwrap() error {
 	return e.Err
+}
+
+// HTTPStatusCode reports the HTTP status code carried by the wrapped error,
+// or 0 when no status is known (e.g., transport failures).
+func (e *RetryableError) HTTPStatusCode() int {
+	var statusErr interface{ HTTPStatusCode() int }
+	if errors.As(e.Err, &statusErr) {
+		return statusErr.HTTPStatusCode()
+	}
+	return 0
 }
 
 // IsRetryable checks if an error indicates the request can be retried.
@@ -257,11 +282,73 @@ func GetRetryAfter(err error) time.Duration {
 	return 0
 }
 
+type retryBudgetExceededError struct {
+	retries int
+	err     error
+}
+
+func (e *retryBudgetExceededError) Error() string {
+	return fmt.Sprintf("retry limit exceeded after %d retries: %v", e.retries, e.err)
+}
+
+func (e *retryBudgetExceededError) Unwrap() error {
+	return e.err
+}
+
+// IsRetryBudgetExhausted reports whether the retry helper consumed its
+// configured request retry budget before returning the error. Callers with a
+// second, higher-level recovery loop should not replay the same request after
+// this marker is present.
+func IsRetryBudgetExhausted(err error) bool {
+	var exhausted *retryBudgetExceededError
+	return errors.As(err, &exhausted)
+}
+
+type retryCancelledError struct {
+	contextErr error
+	err        error
+}
+
+func (e *retryCancelledError) Error() string {
+	return fmt.Sprintf("retry cancelled: %v", e.contextErr)
+}
+
+func (e *retryCancelledError) Unwrap() []error {
+	return []error{e.contextErr, e.err}
+}
+
+// retryDelayExceededError marks a retryable failure whose requested or
+// computed delay could not be honored by this request. It preserves the
+// original retryable cause for status and Retry-After inspection, while
+// allowing outer recovery loops to treat the already-diagnosed wait as
+// terminal.
+type retryDelayExceededError struct {
+	err error
+}
+
+func (e *retryDelayExceededError) Error() string {
+	return e.err.Error()
+}
+
+func (e *retryDelayExceededError) Unwrap() error {
+	return e.err
+}
+
+// IsRetryDelayExceeded reports whether a retryable failure was returned after
+// its server-provided delay could not be honored by the request. The original
+// retryable cause remains available through the error chain.
+func IsRetryDelayExceeded(err error) bool {
+	var delayErr *retryDelayExceededError
+	return errors.As(err, &delayErr)
+}
+
 // RetryOptions configures retry behavior.
 //   - MaxRetries: Number of retry attempts. 0 = no retries (fail fast),
 //     negative = use DefaultMaxRetries.
 //   - BaseDelay: Initial delay between retries (with exponential backoff).
-//   - MaxDelay: Maximum delay cap for backoff.
+//   - MaxDelay: Maximum delay cap for backoff and honored Retry-After hints;
+//     an explicit hint above this cap fails fast with the requested and
+//     configured durations instead of sleeping at the cap.
 type RetryOptions struct {
 	MaxRetries int           // 0=disabled, negative=default, positive=retry count
 	BaseDelay  time.Duration // Initial delay for exponential backoff
@@ -325,6 +412,14 @@ func ResolveRetryOptions() RetryOptions {
 // WithRetry executes a function with retry logic for rate limiting.
 // It uses exponential backoff with jitter and respects Retry-After headers.
 func WithRetry[T any](ctx context.Context, fn func() (T, error), opts RetryOptions) (T, error) {
+	return withRetry(ctx, fn, opts, IsRetryable)
+}
+
+// withRetry executes a function with the shared backoff policy, retrying only
+// the errors accepted by shouldRetry. Callers that can replay a request safely
+// only under narrower conditions (writes, which are retryable when App Store
+// Connect rejects them outright) supply their own predicate.
+func withRetry[T any](ctx context.Context, fn func() (T, error), opts RetryOptions, shouldRetry func(error) bool) (T, error) {
 	var zero T
 	debugEnabled := ResolveDebugEnabled()
 
@@ -352,18 +447,36 @@ func WithRetry[T any](ctx context.Context, fn func() (T, error), opts RetryOptio
 		}
 
 		// Check if error is retryable
-		if !IsRetryable(err) {
+		if !shouldRetry(err) {
 			return zero, err
 		}
 
-		// Check if we've exceeded max retries
-		if retryCount >= opts.MaxRetries {
-			return zero, fmt.Errorf("retry limit exceeded after %d retries: %w", retryCount+1, err)
+		// Calculate delay
+		retryAfter := GetRetryAfter(err)
+		delay := retryAfter
+		if retryAfter > 0 {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return zero, &retryCancelledError{contextErr: ctxErr, err: err}
+			}
+			if deadline, ok := ctx.Deadline(); ok {
+				remaining := time.Until(deadline)
+				if delay >= remaining {
+					if delay > opts.MaxDelay {
+						return zero, &retryDelayExceededError{err: fmt.Errorf(
+							"%s: upstream server asked to wait %s, exceeding the %s retry cap and the context deadline (%s remaining); raise ASC_MAX_DELAY and the request timeout to wait longer: %w",
+							retryDelayCategory(err), delay, opts.MaxDelay, remaining.Round(time.Millisecond), err,
+						)}
+					}
+					return zero, &retryDelayExceededError{err: fmt.Errorf(
+						"%s: upstream server asked to wait %s, which cannot be honored before the context deadline (%s remaining): %w",
+						retryDelayCategory(err), delay, remaining.Round(time.Millisecond), err,
+					)}
+				}
+			}
 		}
 
-		// Calculate delay
-		delay := GetRetryAfter(err)
-		if delay == 0 {
+		switch {
+		case delay <= 0:
 			// Exponential backoff with jitter, capped to prevent overflow
 			expDelay := opts.BaseDelay
 			if retryCount > 0 && retryCount < 31 { // Prevent overflow for reasonable retry counts
@@ -378,6 +491,39 @@ func WithRetry[T any](ctx context.Context, fn func() (T, error), opts RetryOptio
 			if delay < 0 {
 				delay = expDelay / 2 // minimum delay
 			}
+		case delay > opts.MaxDelay:
+			// The server asked for longer than this run is willing to wait.
+			// Retrying at the cap would just collect the same rejection, and
+			// sleeping the full hint hides the response behind an eventual
+			// context deadline, so report both numbers now.
+			category := retryDelayCategory(err)
+			return zero, &retryDelayExceededError{err: fmt.Errorf(
+				"%s: upstream server asked to wait %s, exceeding the %s retry cap (raise ASC_MAX_DELAY to wait longer): %w",
+				category, delay, opts.MaxDelay, err,
+			)}
+		}
+
+		if retryPreservesErrorOnDeadline(err) {
+			if deadline, ok := ctx.Deadline(); ok && time.Until(deadline) <= delay {
+				if ctx.Err() == nil {
+					remaining := time.Until(deadline)
+					return zero, &retryDelayExceededError{err: fmt.Errorf(
+						"%s: computed fallback backoff %s cannot be honored before the context deadline (%s remaining): %w",
+						retryDelayCategory(err), delay, remaining.Round(time.Millisecond), err,
+					)}
+				}
+			}
+		}
+
+		// Check if we've exceeded max retries after classifying any explicit
+		// Retry-After hint. A final attempt carrying an unhonored hint must
+		// remain terminal to outer recovery loops instead of being hidden by
+		// the retry-budget marker.
+		if retryCount >= opts.MaxRetries {
+			if contextErr := ctx.Err(); contextErr != nil {
+				return zero, &retryCancelledError{contextErr: contextErr, err: err}
+			}
+			return zero, &retryBudgetExceededError{retries: retryCount + 1, err: err}
 		}
 
 		if ResolveRetryLogEnabled() {
@@ -385,7 +531,8 @@ func WithRetry[T any](ctx context.Context, fn func() (T, error), opts RetryOptio
 		}
 
 		if debugEnabled {
-			debugLogger.Info("⟳ Retrying request",
+			debugLogger.Info(
+				"⟳ Retrying request",
 				"attempt", retryCount+1,
 				"max_retries", opts.MaxRetries,
 				"delay", delay.String(),
@@ -398,11 +545,31 @@ func WithRetry[T any](ctx context.Context, fn func() (T, error), opts RetryOptio
 		// Wait with context cancellation support
 		select {
 		case <-ctx.Done():
-			return zero, fmt.Errorf("retry cancelled: %w", ctx.Err())
+			// Preserve the last retryable failure as well as the cancellation
+			// cause. Callers that reconcile an ambiguous mutation must not lose
+			// a 429 (or its Retry-After hint) when the wait outlives the request
+			// deadline.
+			return zero, &retryCancelledError{
+				contextErr: ctx.Err(),
+				err:        &retryBudgetExceededError{retries: retryCount, err: err},
+			}
 		case <-time.After(delay):
 			// Continue to next retry
 		}
 	}
+}
+
+func retryPreservesErrorOnDeadline(err error) bool {
+	retryErr, ok := errors.AsType[*RetryableError](err)
+	return ok && retryErr.PreserveErrorOnDeadline
+}
+
+func retryDelayCategory(err error) string {
+	var statusErr interface{ HTTPStatusCode() int }
+	if errors.As(err, &statusErr) && statusErr.HTTPStatusCode() == http.StatusTooManyRequests {
+		return "rate limited"
+	}
+	return "retry delayed"
 }
 
 func logRetry(delay time.Duration, attempt, maxRetries int, err error) {
@@ -485,6 +652,9 @@ type Client struct {
 
 	mutatingRequestLimiterOnce sync.Once
 	mutatingRequestLimiter     chan struct{}
+
+	bulkMutatingRequestLimiterOnce sync.Once
+	bulkMutatingRequestLimiter     chan struct{}
 }
 
 // NewClient creates a new ASC client.
@@ -576,4 +746,31 @@ func (c *Client) getMutatingRequestLimiter() chan struct{} {
 		}
 	})
 	return c.mutatingRequestLimiter
+}
+
+// getBulkMutatingRequestLimiter returns the client-wide write ceiling shared
+// by bulk and ordinary mutating requests.
+func (c *Client) getBulkMutatingRequestLimiter() chan struct{} {
+	c.bulkMutatingRequestLimiterOnce.Do(func() {
+		if c.bulkMutatingRequestLimiter == nil {
+			c.bulkMutatingRequestLimiter = make(chan struct{}, BulkMutatingRequestLimit)
+		}
+	})
+	return c.bulkMutatingRequestLimiter
+}
+
+type bulkMutatingRequestLimitKey struct{}
+
+// WithBulkMutatingRequestLimit marks ctx for a bulk write fan-out. Mutating
+// requests sent with the returned context share the client-wide
+// BulkMutatingRequestLimit instead of the lower default limit for ordinary
+// writes. Retry and backoff behavior is unchanged. Callers must size their
+// worker pools to at most BulkMutatingRequestLimit.
+func WithBulkMutatingRequestLimit(ctx context.Context) context.Context {
+	return context.WithValue(ctx, bulkMutatingRequestLimitKey{}, true)
+}
+
+func usesBulkMutatingRequestLimit(ctx context.Context) bool {
+	bulk, _ := ctx.Value(bulkMutatingRequestLimitKey{}).(bool)
+	return bulk
 }

@@ -3,9 +3,44 @@ package shared
 import (
 	"fmt"
 	"os"
+	"time"
+
+	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/asc"
 )
 
 var mkdirTempForTest = os.MkdirTemp
+
+// SetASCClientFactoryForTesting replaces the general command ASC client factory.
+// It returns a restore function to reset the previous handler.
+func SetASCClientFactoryForTesting(fn func() (*asc.Client, error)) func() {
+	ascClientFactoryMu.Lock()
+	previous := ascClientFactory
+	if fn == nil {
+		ascClientFactory = getASCClient
+	} else {
+		ascClientFactory = fn
+	}
+	ascClientFactoryMu.Unlock()
+	return func() {
+		ascClientFactoryMu.Lock()
+		ascClientFactory = previous
+		ascClientFactoryMu.Unlock()
+	}
+}
+
+// SetAvailabilityClientFactory replaces the ASC client factory for availability tests.
+// It returns a restore function to reset the previous handler.
+func SetAvailabilityClientFactory(fn func() (*asc.Client, error)) func() {
+	previous := availabilityClientFactory
+	if fn == nil {
+		availabilityClientFactory = getASCClient
+	} else {
+		availabilityClientFactory = fn
+	}
+	return func() {
+		availabilityClientFactory = previous
+	}
+}
 
 // ResetTierCacheForTest routes tier-cache reads and writes to an isolated temp dir for tests.
 func ResetTierCacheForTest() {
@@ -40,4 +75,19 @@ func resetTierCacheDirOverrideForTest() {
 		return
 	}
 	_ = os.RemoveAll(override)
+}
+
+// SetPricingNowForTesting replaces the clock pricing commands use to decide
+// today's pricing date, such as the default --start-date and the current
+// price. It returns a restore function to reset the clock.
+func SetPricingNowForTesting(fn func() time.Time) func() {
+	previous := pricingNow
+	if fn == nil {
+		pricingNow = time.Now
+	} else {
+		pricingNow = fn
+	}
+	return func() {
+		pricingNow = previous
+	}
 }

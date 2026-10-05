@@ -63,7 +63,7 @@ func TestBuildsParityValidationErrors(t *testing.T) {
 		{
 			name:    "builds links invalid type",
 			args:    []string{"builds", "links", "view", "--build-id", "BUILD_ID", "--type", "nope"},
-			wantErr: "--type must be one of",
+			wantErr: `--type "nope" is not a valid relationship type; must be one of`,
 		},
 		{
 			name:    "builds links invalid limit for single",
@@ -224,7 +224,7 @@ func TestTestFlightRelationshipsValidationErrors(t *testing.T) {
 		{
 			name:    "beta-groups relationships invalid type",
 			args:    []string{"testflight", "groups", "links", "view", "--group-id", "GROUP_ID", "--type", "nope"},
-			wantErr: "--type must be one of",
+			wantErr: `--type "nope" is not a valid relationship type; must be one of`,
 		},
 		{
 			name:    "beta-testers relationships missing type",
@@ -239,7 +239,7 @@ func TestTestFlightRelationshipsValidationErrors(t *testing.T) {
 		{
 			name:    "beta-testers relationships invalid type",
 			args:    []string{"testflight", "testers", "links", "view", "--tester-id", "TESTER_ID", "--type", "nope"},
-			wantErr: "--type must be one of",
+			wantErr: `--type "nope" is not a valid relationship type; must be one of`,
 		},
 		{
 			name:    "testers metrics missing tester-id",
@@ -252,11 +252,6 @@ func TestTestFlightRelationshipsValidationErrors(t *testing.T) {
 			wantErr: "--app is required",
 		},
 		{
-			name:    "testers metrics invalid period",
-			args:    []string{"testflight", "testers", "metrics", "--tester-id", "TESTER_ID", "--app", "APP_ID", "--period", "P1D"},
-			wantErr: "--period must be one of",
-		},
-		{
 			name:    "testers metrics invalid limit",
 			args:    []string{"testflight", "testers", "metrics", "--tester-id", "TESTER_ID", "--app", "APP_ID", "--limit", "500"},
 			wantErr: "--limit must be between 1 and 200",
@@ -264,6 +259,41 @@ func TestTestFlightRelationshipsValidationErrors(t *testing.T) {
 	}
 
 	runValidationTests(t, tests)
+}
+
+func TestTestFlightMetricsInvalidPeriodReturnsValidationError(t *testing.T) {
+	t.Setenv("ASC_APP_ID", "")
+
+	root := RootCommand("1.2.3")
+	root.FlagSet.SetOutput(io.Discard)
+	args := []string{"testflight", "testers", "metrics", "--tester-id", "TESTER_ID", "--app", "APP_ID", "--period", "P1D"}
+	var runErr error
+	stdout, stderr := captureOutput(t, func() {
+		if err := root.Parse(args); err != nil {
+			t.Fatalf("parse error: %v", err)
+		}
+		runErr = root.Run(context.Background())
+	})
+
+	const wantMessage = "--period must be one of: P7D, P30D, P90D, P365D"
+
+	if stdout != "" {
+		t.Fatalf("expected empty stdout, got %q", stdout)
+	}
+	// The check runs before any request, so it reports itself and exits with
+	// usage semantics (#518); ffcli renders the usage page after it.
+	if !strings.Contains(stderr, "Error: "+wantMessage+"\n") {
+		t.Fatalf("stderr = %q, want it to contain %q", stderr, "Error: "+wantMessage+"\n")
+	}
+	if runErr == nil {
+		t.Fatal("expected validation error")
+	}
+	if !errors.Is(runErr, flag.ErrHelp) {
+		t.Fatalf("errors.Is(flag.ErrHelp) = false, want usage exit semantics: %v", runErr)
+	}
+	if got := runErr.Error(); got != wantMessage {
+		t.Fatalf("error = %q, want %q", got, wantMessage)
+	}
 }
 
 func TestPreReleaseRelationshipsValidationErrors(t *testing.T) {
@@ -287,7 +317,7 @@ func TestPreReleaseRelationshipsValidationErrors(t *testing.T) {
 		{
 			name:    "pre-release links invalid type",
 			args:    []string{"testflight", "pre-release", "links", "view", "--id", "PR_ID", "--type", "nope"},
-			wantErr: "--type must be one of",
+			wantErr: `--type "nope" is not a valid relationship type; must be one of`,
 		},
 		{
 			name:    "pre-release links invalid limit for single",
@@ -378,11 +408,6 @@ func TestParityRelatedCommandsValidationErrors(t *testing.T) {
 			wantErr: "--id is required",
 		},
 		{
-			name:    "beta-build-localizations build get removed",
-			args:    []string{"beta-build-localizations", "build", "get"},
-			wantErr: "No canonical replacement exists yet",
-		},
-		{
 			name:    "pre-release app view missing id",
 			args:    []string{"testflight", "pre-release", "app", "view"},
 			wantErr: "--id is required",
@@ -395,74 +420,4 @@ func TestParityRelatedCommandsValidationErrors(t *testing.T) {
 	}
 
 	runValidationTests(t, tests)
-}
-
-func TestBuildsRemovedGetCommandsPointToCanonicalView(t *testing.T) {
-	t.Setenv("ASC_APP_ID", "")
-
-	tests := []struct {
-		name    string
-		args    []string
-		wantErr string
-	}{
-		{
-			name:    "builds app get",
-			args:    []string{"builds", "app", "get"},
-			wantErr: "Error: `asc builds app get` was removed. Use `asc builds app view` instead.",
-		},
-		{
-			name:    "builds pre-release-version get",
-			args:    []string{"builds", "pre-release-version", "get"},
-			wantErr: "Error: `asc builds pre-release-version get` was removed. Use `asc builds pre-release-version view` instead.",
-		},
-		{
-			name:    "builds beta-app-review-submission get",
-			args:    []string{"builds", "beta-app-review-submission", "get"},
-			wantErr: "Error: `asc builds beta-app-review-submission get` was removed. Use `asc builds beta-app-review-submission view` instead.",
-		},
-		{
-			name:    "builds build-beta-detail get",
-			args:    []string{"builds", "build-beta-detail", "get"},
-			wantErr: "Error: `asc builds build-beta-detail get` was removed. Use `asc builds build-beta-detail view` instead.",
-		},
-		{
-			name:    "builds app-encryption-declaration get",
-			args:    []string{"builds", "app-encryption-declaration", "get"},
-			wantErr: "Error: `asc builds app-encryption-declaration get` was removed. Use `asc builds app-encryption-declaration view` instead.",
-		},
-		{
-			name:    "builds uploads get",
-			args:    []string{"builds", "uploads", "get"},
-			wantErr: "Error: `asc builds uploads get` was removed. Use `asc builds uploads view` instead.",
-		},
-		{
-			name:    "builds uploads files get",
-			args:    []string{"builds", "uploads", "files", "get"},
-			wantErr: "Error: `asc builds uploads files get` was removed. Use `asc builds uploads files view` instead.",
-		},
-	}
-
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			root := RootCommand("1.2.3")
-			root.FlagSet.SetOutput(io.Discard)
-
-			stdout, stderr := captureOutput(t, func() {
-				if err := root.Parse(test.args); err != nil {
-					t.Fatalf("parse error: %v", err)
-				}
-				err := root.Run(context.Background())
-				if !errors.Is(err, flag.ErrHelp) {
-					t.Fatalf("expected ErrHelp, got %v", err)
-				}
-			})
-
-			if stdout != "" {
-				t.Fatalf("expected empty stdout, got %q", stdout)
-			}
-			if !strings.Contains(stderr, test.wantErr) {
-				t.Fatalf("expected stderr to contain %q, got %q", test.wantErr, stderr)
-			}
-		})
-	}
 }

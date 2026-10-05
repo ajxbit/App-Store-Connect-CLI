@@ -17,15 +17,67 @@ import (
 
 var versionRequested bool
 
+// rootGettingStartedSamples teaches the discovery loop on the first help
+// screen: find the right command, diagnose credentials, locate an app, then
+// inspect it. Every sample is a copy-paste-valid long-form invocation, and
+// placeholders stay bare uppercase so shells do not read them as redirection.
+const rootGettingStartedSamples = `  Find the command, with examples:
+    asc search "upload a build" --output json
+  Diagnose local auth configuration:
+    asc auth doctor
+  List your apps and their IDs:
+    asc apps list --paginate --output table
+  Show a one-screen release overview:
+    asc status --app APP_ID
+
+  Add --help to any command; replace placeholders like APP_ID with real values.
+  Any flag that takes a value accepts @env:NAME or @file:PATH; escape a literal @ as @@.
+  --output and the root --profile, --report, --report-file are read literally.`
+
+// rootLongHelp renders the GETTING STARTED block shown between USAGE and the
+// grouped command listing.
+func rootLongHelp() string {
+	return shared.Bold("GETTING STARTED") + "\n" + rootGettingStartedSamples
+}
+
 // RootCommand returns the root command
 func RootCommand(version string) *ffcli.Command {
+	catalog := registry.NewCatalog(version)
+	root := newRootCommand(version, catalog.All())
+	catalog.SetCompletionRootFlagSet(root.FlagSet)
+	return root
+}
+
+func rootCommandForArgs(version string, args []string) *ffcli.Command {
+	catalog := registry.NewCatalog(version)
+	root := newRootCommand(version, catalog.MetadataCommands())
+	catalog.SetCompletionRootFlagSet(root.FlagSet)
+	// Command discovery must understand the same liberal `--bool false` form
+	// as final parsing. Otherwise the separated value looks positional and the
+	// lazy catalog can materialize the wrong command tree.
+	commandName := getCommandName(root, normalizeSpacedBooleanFlags(root, args))
+	parts := strings.Fields(commandName)
+	if len(parts) < 2 {
+		return root
+	}
+
+	root.Subcommands = catalog.CommandsFor(parts[1])
+	for _, subcommand := range root.Subcommands {
+		if strings.EqualFold(subcommand.Name, parts[1]) {
+			shared.WrapCommandOutputValidation(subcommand)
+			break
+		}
+	}
+	return root
+}
+
+func newRootCommand(version string, subcommands []*ffcli.Command) *ffcli.Command {
 	versionRequested = false
-	subcommands := registry.Subcommands(version)
 	root := &ffcli.Command{
 		Name:        "asc",
 		ShortUsage:  "asc <subcommand> [flags]",
-		ShortHelp:   "Unofficial. asc is a fast, lightweight cli for App Store Connect. Built by AI agents, for AI agents.",
-		LongHelp:    "",
+		ShortHelp:   "asc is a fast, lightweight CLI for App Store Connect from Rork.",
+		LongHelp:    rootLongHelp(),
 		FlagSet:     flag.NewFlagSet("asc", flag.ExitOnError),
 		UsageFunc:   RootUsageFunc,
 		Subcommands: subcommands,

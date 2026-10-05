@@ -96,6 +96,7 @@ const (
 	ResourceTypeAnalyticsReportInstances                        ResourceType = "analyticsReportInstances"
 	ResourceTypeAnalyticsReportSegments                         ResourceType = "analyticsReportSegments"
 	ResourceTypeInAppPurchases                                  ResourceType = "inAppPurchases"
+	ResourceTypeInAppPurchaseVersions                           ResourceType = "inAppPurchaseVersions"
 	ResourceTypeInAppPurchaseLocalizations                      ResourceType = "inAppPurchaseLocalizations"
 	ResourceTypeInAppPurchaseImages                             ResourceType = "inAppPurchaseImages"
 	ResourceTypeInAppPurchaseAppStoreReviewScreenshots          ResourceType = "inAppPurchaseAppStoreReviewScreenshots"
@@ -111,8 +112,10 @@ const (
 	ResourceTypeInAppPurchaseSubmissions                        ResourceType = "inAppPurchaseSubmissions"
 	ResourceTypeSubscriptionGroups                              ResourceType = "subscriptionGroups"
 	ResourceTypeSubscriptionGroupLocalizations                  ResourceType = "subscriptionGroupLocalizations"
+	ResourceTypeSubscriptionGroupVersions                       ResourceType = "subscriptionGroupVersions"
 	ResourceTypeSubscriptionGroupSubmissions                    ResourceType = "subscriptionGroupSubmissions"
 	ResourceTypeSubscriptions                                   ResourceType = "subscriptions"
+	ResourceTypeSubscriptionVersions                            ResourceType = "subscriptionVersions"
 	ResourceTypeSubscriptionLocalizations                       ResourceType = "subscriptionLocalizations"
 	ResourceTypeSubscriptionImages                              ResourceType = "subscriptionImages"
 	ResourceTypeSubscriptionIntroductoryOffers                  ResourceType = "subscriptionIntroductoryOffers"
@@ -153,8 +156,10 @@ const (
 	ResourceTypeAlternativeDistributionDomains                  ResourceType = "alternativeDistributionDomains"
 	ResourceTypeAlternativeDistributionKeys                     ResourceType = "alternativeDistributionKeys"
 	ResourceTypeAlternativeDistributionPackages                 ResourceType = "alternativeDistributionPackages"
+	ResourceTypeGameCenterScoreModerations                      ResourceType = "gameCenterScoreModerations"
 	ResourceTypeGameCenterDetails                               ResourceType = "gameCenterDetails"
 	ResourceTypeGameCenterAppVersions                           ResourceType = "gameCenterAppVersions"
+	ResourceTypeGameCenterDetailPlayers                         ResourceType = "gameCenterDetailPlayers"
 	ResourceTypeGameCenterEnabledVersions                       ResourceType = "gameCenterEnabledVersions"
 	ResourceTypeGameCenterAchievements                          ResourceType = "gameCenterAchievements"
 	ResourceTypeGameCenterAchievementVersions                   ResourceType = "gameCenterAchievementVersions"
@@ -201,6 +206,71 @@ type Resource[T any] struct {
 	Attributes    T               `json:"attributes"`
 	Relationships json.RawMessage `json:"relationships,omitempty"`
 	Links         json.RawMessage `json:"links,omitempty"`
+
+	attributesDecoded bool
+	attributesPresent bool
+	attributesNull    bool
+}
+
+// UnmarshalJSON records whether attributes was absent, null, or present so
+// sparse JSON:API responses can be rendered without inventing an attributes
+// object that Apple did not return.
+func (r *Resource[T]) UnmarshalJSON(data []byte) error {
+	var decoded struct {
+		Type          ResourceType    `json:"type"`
+		ID            string          `json:"id"`
+		Attributes    json.RawMessage `json:"attributes"`
+		Relationships json.RawMessage `json:"relationships,omitempty"`
+		Links         json.RawMessage `json:"links,omitempty"`
+	}
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+
+	*r = Resource[T]{
+		Type:              decoded.Type,
+		ID:                decoded.ID,
+		Relationships:     decoded.Relationships,
+		Links:             decoded.Links,
+		attributesDecoded: true,
+		attributesPresent: decoded.Attributes != nil,
+		attributesNull:    bytes.Equal(bytes.TrimSpace(decoded.Attributes), []byte("null")),
+	}
+	if !r.attributesPresent {
+		return nil
+	}
+	return json.Unmarshal(decoded.Attributes, &r.Attributes)
+}
+
+// MarshalJSON preserves decoded attribute presence while keeping the existing
+// behavior for resources constructed directly by callers.
+func (r Resource[T]) MarshalJSON() ([]byte, error) {
+	var attributes json.RawMessage
+	if !r.attributesDecoded || r.attributesPresent {
+		if r.attributesNull {
+			attributes = json.RawMessage("null")
+		} else {
+			encoded, err := json.Marshal(r.Attributes)
+			if err != nil {
+				return nil, err
+			}
+			attributes = encoded
+		}
+	}
+
+	return json.Marshal(struct {
+		Type          ResourceType    `json:"type"`
+		ID            string          `json:"id"`
+		Attributes    json.RawMessage `json:"attributes,omitempty"`
+		Relationships json.RawMessage `json:"relationships,omitempty"`
+		Links         json.RawMessage `json:"links,omitempty"`
+	}{
+		Type:          r.Type,
+		ID:            r.ID,
+		Attributes:    attributes,
+		Relationships: r.Relationships,
+		Links:         r.Links,
+	})
 }
 
 // Response is a generic ASC API response wrapper.
@@ -214,6 +284,11 @@ type Response[T any] struct {
 // GetLinks returns the links field for pagination.
 func (r *Response[T]) GetLinks() *Links {
 	return &r.Links
+}
+
+// GetMeta returns the raw metadata field (e.g. paging totals).
+func (r *Response[T]) GetMeta() json.RawMessage {
+	return r.Meta
 }
 
 // GetData returns the data field for aggregation.
@@ -289,9 +364,10 @@ type PaginatedResponse interface {
 
 // Links represents pagination links.
 type Links struct {
-	Self string `json:"self,omitempty"`
-	Next string `json:"next,omitempty"`
-	Prev string `json:"prev,omitempty"`
+	Self  string `json:"self,omitempty"`
+	First string `json:"first,omitempty"`
+	Next  string `json:"next,omitempty"`
+	Prev  string `json:"prev,omitempty"`
 }
 
 // Platform represents an Apple platform.
@@ -334,7 +410,9 @@ type Relationship struct {
 
 // RelationshipList represents a relationship containing multiple resources.
 type RelationshipList struct {
-	Data []ResourceData `json:"data"`
+	Data  []ResourceData  `json:"data"`
+	Links json.RawMessage `json:"links,omitempty"`
+	Meta  json.RawMessage `json:"meta,omitempty"`
 }
 
 // RelationshipRequest represents a relationship list payload.

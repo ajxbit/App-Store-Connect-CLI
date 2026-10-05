@@ -72,7 +72,7 @@ func TestPublishTestflightExistingBuildIDSkipsUpload(t *testing.T) {
 		if err := root.Parse([]string{
 			"publish", "testflight",
 			"--app", "123",
-			"--build", "build-1",
+			"--build-id", "build-1",
 			"--group", "group-1",
 		}); err != nil {
 			t.Fatalf("parse error: %v", err)
@@ -96,6 +96,67 @@ func TestPublishTestflightExistingBuildIDSkipsUpload(t *testing.T) {
 	}
 	if strings.Contains(stdout, `"notificationAction":`) {
 		t.Fatalf("expected notificationAction to be omitted when --notify is not set, got %q", stdout)
+	}
+}
+
+func TestPublishTestflightExistingBuildDoesNotRetryPostUploadPropagationError(t *testing.T) {
+	setupAuth(t)
+	t.Setenv("ASC_CONFIG_PATH", filepath.Join(t.TempDir(), "nonexistent.json"))
+	t.Setenv("ASC_APP_ID", "")
+
+	originalTransport := http.DefaultTransport
+	t.Cleanup(func() {
+		http.DefaultTransport = originalTransport
+	})
+
+	requestCount := 0
+	http.DefaultTransport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		requestCount++
+		switch requestCount {
+		case 1:
+			if req.Method != http.MethodGet || req.URL.Path != "/v1/apps/123/betaGroups" {
+				t.Fatalf("unexpected request %d: %s %s", requestCount, req.Method, req.URL.String())
+			}
+			return jsonHTTPResponse(http.StatusOK, `{"data":[{"type":"betaGroups","id":"group-1","attributes":{"name":"External","isInternalGroup":false}}]}`), nil
+		case 2:
+			if req.Method != http.MethodGet || req.URL.Path != "/v1/builds/build-1" {
+				t.Fatalf("unexpected request %d: %s %s", requestCount, req.Method, req.URL.String())
+			}
+			return jsonHTTPResponse(http.StatusOK, `{"data":{"type":"builds","id":"build-1","attributes":{"version":"42","processingState":"VALID"}}}`), nil
+		case 3:
+			if req.Method != http.MethodPost || req.URL.Path != "/v1/builds/build-1/relationships/betaGroups" {
+				t.Fatalf("unexpected request %d: %s %s", requestCount, req.Method, req.URL.String())
+			}
+			return jsonHTTPResponse(http.StatusNotFound, `{"errors":[{"status":"404","code":"NOT_FOUND","title":"The specified resource does not exist","detail":"There is no resource of type 'builds' with id 'build-1'"}]}`), nil
+		default:
+			t.Fatalf("existing-build mode unexpectedly retried with request %d: %s %s", requestCount, req.Method, req.URL.String())
+			return nil, nil
+		}
+	})
+
+	root := RootCommand("1.2.3")
+	root.FlagSet.SetOutput(io.Discard)
+	var runErr error
+	stdout, stderr := captureOutput(t, func() {
+		if err := root.Parse([]string{
+			"publish", "testflight",
+			"--app", "123",
+			"--build-id", "build-1",
+			"--group", "group-1",
+		}); err != nil {
+			t.Fatalf("parse error: %v", err)
+		}
+		runErr = root.Run(context.Background())
+	})
+
+	if runErr == nil || !strings.Contains(runErr.Error(), "failed to add groups") {
+		t.Fatalf("expected existing-build relationship failure, got %v", runErr)
+	}
+	if requestCount != 3 {
+		t.Fatalf("request count = %d, want 3 with no confirming GET or retry", requestCount)
+	}
+	if stdout != "" || stderr != "" {
+		t.Fatalf("existing-build failure must not emit uploaded-build recovery output: stdout=%q stderr=%q", stdout, stderr)
 	}
 }
 
@@ -162,7 +223,7 @@ func TestPublishTestflightExistingBuildIDAllowsInternalGroup(t *testing.T) {
 		if err := root.Parse([]string{
 			"publish", "testflight",
 			"--app", "123",
-			"--build", "build-1",
+			"--build-id", "build-1",
 			"--group", "group-internal",
 		}); err != nil {
 			t.Fatalf("parse error: %v", err)
@@ -273,7 +334,7 @@ func TestPublishTestflightExistingBuildIDNotifyUsesBuildBetaNotificationsEndpoin
 		if err := root.Parse([]string{
 			"publish", "testflight",
 			"--app", "123",
-			"--build", "build-1",
+			"--build-id", "build-1",
 			"--group", "group-internal",
 			"--notify",
 		}); err != nil {
@@ -367,7 +428,7 @@ func TestPublishTestflightExistingBuildIDAddsInternalGroupWithAccessToAllBuilds(
 		if err := root.Parse([]string{
 			"publish", "testflight",
 			"--app", "123",
-			"--build", "build-1",
+			"--build-id", "build-1",
 			"--group", "group-internal",
 		}); err != nil {
 			t.Fatalf("parse error: %v", err)
@@ -493,7 +554,7 @@ func TestPublishTestflightExistingBuildIDWithInternalAllBuildsGroupStillNotifies
 		if err := root.Parse([]string{
 			"publish", "testflight",
 			"--app", "123",
-			"--build", "build-1",
+			"--build-id", "build-1",
 			"--group", "group-internal",
 			"--notify",
 		}); err != nil {
@@ -597,7 +658,7 @@ func TestPublishTestflightExistingBuildIDNotifySkipsManualNotificationWhenAutoNo
 		if err := root.Parse([]string{
 			"publish", "testflight",
 			"--app", "123",
-			"--build", "build-1",
+			"--build-id", "build-1",
 			"--group", "group-internal",
 			"--notify",
 		}); err != nil {
@@ -695,7 +756,7 @@ func TestPublishTestflightExistingBuildIDAddsInternalAndExternalGroupsWhenIntern
 		if err := root.Parse([]string{
 			"publish", "testflight",
 			"--app", "123",
-			"--build", "build-1",
+			"--build-id", "build-1",
 			"--group", "group-internal,group-external",
 		}); err != nil {
 			t.Fatalf("parse error: %v", err)
@@ -808,7 +869,7 @@ func TestPublishTestflightExistingBuildIDNotifyTreatsAutoNotifyConflictAsAlready
 		if err := root.Parse([]string{
 			"publish", "testflight",
 			"--app", "123",
-			"--build", "build-1",
+			"--build-id", "build-1",
 			"--group", "group-internal",
 			"--notify",
 		}); err != nil {
@@ -913,7 +974,7 @@ func TestPublishTestflightExistingBuildIDNotifyPreservesPartialSuccessMessageWhe
 		if err := root.Parse([]string{
 			"publish", "testflight",
 			"--app", "123",
-			"--build", "build-1",
+			"--build-id", "build-1",
 			"--group", "group-internal",
 			"--notify",
 		}); err != nil {

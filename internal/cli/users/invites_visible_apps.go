@@ -41,7 +41,7 @@ Examples:
 func UsersInvitesVisibleAppsListCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("visible-apps list", flag.ExitOnError)
 
-	id := fs.String("id", "", "Invitation ID")
+	id := shared.BindResourceIDFlag(fs, "id", "userInvitations", "Invitation ID")
 	limit := fs.Int("limit", 0, "Maximum results per page (1-200)")
 	next := fs.String("next", "", "Fetch next page using a links.next URL")
 	paginate := fs.Bool("paginate", false, "Automatically fetch all pages (aggregate results)")
@@ -62,18 +62,18 @@ Examples:
 			idValue := strings.TrimSpace(*id)
 			if idValue == "" && strings.TrimSpace(*next) == "" {
 				fmt.Fprintln(os.Stderr, "Error: --id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--id")
 			}
 			if *limit != 0 && (*limit < 1 || *limit > 200) {
-				return fmt.Errorf("users invites visible-apps list: --limit must be between 1 and 200")
+				return shared.UsageError("users invites visible-apps list: --limit must be between 1 and 200")
 			}
 			if err := shared.ValidateNextURL(*next); err != nil {
-				return fmt.Errorf("users invites visible-apps list: %w", err)
+				return shared.UsageErrorf("users invites visible-apps list: %v", err)
 			}
 			if idValue == "" && strings.TrimSpace(*next) != "" {
 				derivedID, err := extractUserInvitationIDFromNextURL(*next)
 				if err != nil {
-					return fmt.Errorf("users invites visible-apps list: %w", err)
+					return shared.UsageErrorf("users invites visible-apps list: %v", err)
 				}
 				idValue = derivedID
 			}
@@ -94,7 +94,7 @@ Examples:
 			if *paginate {
 				if idValue == "" {
 					fmt.Fprintln(os.Stderr, "Error: --id is required")
-					return flag.ErrHelp
+					return shared.MissingRequiredUsageError("--id")
 				}
 				paginateOpts := append(opts, asc.WithUserInvitationVisibleAppsLimit(200))
 				firstPage, err := client.GetUserInvitationVisibleApps(requestCtx, idValue, paginateOpts...)

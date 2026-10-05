@@ -1,0 +1,61 @@
+name: WinGet smoke
+
+on:
+  workflow_dispatch:
+    inputs:
+      package_id:
+        description: WinGet package identifier
+        required: true
+        default: Rorkai.ASC
+      command:
+        description: Command and moniker to verify
+        required: true
+        default: asc
+
+permissions: {}
+
+jobs:
+  smoke:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    env:
+      WINGET_PACKAGE_ID: ${{ inputs.package_id }}
+      WINGET_COMMAND: ${{ inputs.command }}
+    steps:
+      - name: Validate inputs
+        shell: pwsh
+        run: |
+          if ($env:WINGET_PACKAGE_ID -notmatch '^[A-Za-z0-9][A-Za-z0-9.-]*[A-Za-z0-9]$') {
+            throw "Invalid package_id: $env:WINGET_PACKAGE_ID"
+          }
+          if ($env:WINGET_COMMAND -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]*$') {
+            throw "Invalid command: $env:WINGET_COMMAND"
+          }
+
+      - name: Verify WinGet source
+        shell: pwsh
+        run: |
+          winget --version
+          winget source update --disable-interactivity
+
+      - name: Verify package discovery
+        shell: pwsh
+        run: |
+          winget search --moniker $env:WINGET_COMMAND --exact --source winget --disable-interactivity
+          winget show --id $env:WINGET_PACKAGE_ID --exact --source winget --disable-interactivity
+
+      - name: Install by exact moniker
+        shell: pwsh
+        run: |
+          winget install --moniker $env:WINGET_COMMAND --exact --source winget --disable-interactivity --accept-source-agreements --accept-package-agreements
+          winget list --id $env:WINGET_PACKAGE_ID --exact --source winget --disable-interactivity
+          $env:Path = [Environment]::GetEnvironmentVariable('Path', 'Machine') + ';' + [Environment]::GetEnvironmentVariable('Path', 'User')
+          $resolved = Get-Command $env:WINGET_COMMAND -ErrorAction Stop
+          & $resolved.Source --help
+          & $resolved.Source version
+
+      - name: Uninstall package
+        if: always()
+        shell: pwsh
+        run: |
+          winget uninstall --id $env:WINGET_PACKAGE_ID --exact --source winget --disable-interactivity --accept-source-agreements

@@ -25,7 +25,7 @@ func AndroidIosMappingCommand() *ffcli.Command {
 
 Examples:
   asc android-ios-mapping list --app "APP_ID"
-  asc android-ios-mapping get --mapping-id "MAPPING_ID"
+  asc android-ios-mapping view --mapping-id "MAPPING_ID"
   asc android-ios-mapping create --app "APP_ID" --android-package-name "com.example.android" --fingerprints "SHA1,SHA2"
   asc android-ios-mapping update --mapping-id "MAPPING_ID" --android-package-name "com.example.android.new"
   asc android-ios-mapping delete --mapping-id "MAPPING_ID" --confirm`,
@@ -70,13 +70,13 @@ Examples:
 			resolvedAppID := shared.ResolveAppID(*appID)
 			if resolvedAppID == "" {
 				fmt.Fprintln(os.Stderr, "Error: --app is required (or set ASC_APP_ID)")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--app")
 			}
 			if *limit != 0 && (*limit < 1 || *limit > 200) {
-				return fmt.Errorf("android-ios-mapping list: --limit must be between 1 and 200")
+				return shared.UsageError("android-ios-mapping list: --limit must be between 1 and 200")
 			}
 			if err := shared.ValidateNextURL(*next); err != nil {
-				return fmt.Errorf("android-ios-mapping list: %w", err)
+				return shared.UsageErrorf("android-ios-mapping list: %v", err)
 			}
 			fieldValues, err := normalizeAndroidIosMappingFields(*fields)
 			if err != nil {
@@ -126,45 +126,46 @@ Examples:
 
 // AndroidIosMappingGetCommand returns the mapping get subcommand.
 func AndroidIosMappingGetCommand() *ffcli.Command {
-	fs := flag.NewFlagSet("get", flag.ExitOnError)
+	fs := flag.NewFlagSet("view", flag.ExitOnError)
 
-	id := fs.String("mapping-id", "", "Mapping ID")
+	id := shared.BindResourceIDFlag(fs, "mapping-id", "androidToIosAppMappingDetails", "Mapping ID")
 	fields := fs.String("fields", "", "Fields to return (comma-separated: "+strings.Join(androidIosMappingFieldsList(), ", ")+")")
 	output := shared.BindOutputFlags(fs)
 
 	return &ffcli.Command{
-		Name:       "get",
-		ShortUsage: "asc android-ios-mapping get --mapping-id \"MAPPING_ID\"",
-		ShortHelp:  "Get an Android-to-iOS app mapping by ID.",
-		LongHelp: `Get an Android-to-iOS app mapping by ID.
+		Name:       "view",
+		ShortUsage: "asc android-ios-mapping view --mapping-id \"MAPPING_ID\"",
+		ShortHelp:  "View an Android-to-iOS app mapping by ID.",
+		LongHelp: `View an Android-to-iOS app mapping by ID.
 
 Examples:
-  asc android-ios-mapping get --mapping-id "MAPPING_ID"`,
+  asc android-ios-mapping view --mapping-id "MAPPING_ID"`,
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
 			if strings.TrimSpace(*id) == "" {
 				fmt.Fprintln(os.Stderr, "Error: --mapping-id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--mapping-id")
 			}
 			fieldValues, err := normalizeAndroidIosMappingFields(*fields)
 			if err != nil {
-				return fmt.Errorf("android-ios-mapping get: %w", err)
+				return fmt.Errorf("android-ios-mapping view: %w", err)
 			}
 
 			client, err := shared.GetASCClient()
 			if err != nil {
-				return fmt.Errorf("android-ios-mapping get: %w", err)
+				return fmt.Errorf("android-ios-mapping view: %w", err)
 			}
 
 			requestCtx, cancel := shared.ContextWithTimeout(ctx)
 			defer cancel()
 
-			resp, err := client.GetAndroidToIosAppMappingDetail(requestCtx, strings.TrimSpace(*id),
+			resp, err := client.GetAndroidToIosAppMappingDetail(
+				requestCtx, strings.TrimSpace(*id),
 				asc.WithAndroidToIosAppMappingDetailsFields(fieldValues),
 			)
 			if err != nil {
-				return fmt.Errorf("android-ios-mapping get: failed to fetch: %w", err)
+				return fmt.Errorf("android-ios-mapping view: failed to fetch: %w", err)
 			}
 
 			return shared.PrintOutput(resp, *output.Output, *output.Pretty)
@@ -178,7 +179,7 @@ func AndroidIosMappingCreateCommand() *ffcli.Command {
 
 	appID := fs.String("app", "", "App Store Connect app ID (or ASC_APP_ID)")
 	packageName := fs.String("android-package-name", "", "Android package name (e.g., com.example.android)")
-	fingerprints := fs.String("fingerprints", "", "Signing key fingerprints (comma-separated)")
+	fingerprints := shared.BindOnceCSVFlag(fs, "fingerprints", "Signing key fingerprints (comma-separated)")
 	output := shared.BindOutputFlags(fs)
 
 	return &ffcli.Command{
@@ -195,17 +196,17 @@ Examples:
 			resolvedAppID := shared.ResolveAppID(*appID)
 			if resolvedAppID == "" {
 				fmt.Fprintln(os.Stderr, "Error: --app is required (or set ASC_APP_ID)")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--app")
 			}
 			packageValue := strings.TrimSpace(*packageName)
 			if packageValue == "" {
 				fmt.Fprintln(os.Stderr, "Error: --android-package-name is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--android-package-name")
 			}
-			fingerprintValues := shared.SplitCSV(*fingerprints)
+			fingerprintValues := shared.SplitCSV(fingerprints.String())
 			if len(fingerprintValues) == 0 {
 				fmt.Fprintln(os.Stderr, "Error: --fingerprints is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--fingerprints")
 			}
 
 			client, err := shared.GetASCClient()
@@ -233,9 +234,9 @@ Examples:
 func AndroidIosMappingUpdateCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("update", flag.ExitOnError)
 
-	id := fs.String("mapping-id", "", "Mapping ID")
+	id := shared.BindResourceIDFlag(fs, "mapping-id", "androidToIosAppMappingDetails", "Mapping ID")
 	packageName := fs.String("android-package-name", "", "Android package name (e.g., com.example.android)")
-	fingerprints := fs.String("fingerprints", "", "Signing key fingerprints (comma-separated)")
+	fingerprints := shared.BindOnceCSVFlag(fs, "fingerprints", "Signing key fingerprints (comma-separated)")
 	clearPackageName := fs.Bool("clear-android-package-name", false, "Clear the Android package name")
 	clearFingerprints := fs.Bool("clear-fingerprints", false, "Clear signing key fingerprints")
 	output := shared.BindOutputFlags(fs)
@@ -257,7 +258,7 @@ Examples:
 			trimmedID := strings.TrimSpace(*id)
 			if trimmedID == "" {
 				fmt.Fprintln(os.Stderr, "Error: --mapping-id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--mapping-id")
 			}
 
 			seen := map[string]bool{}
@@ -286,7 +287,7 @@ Examples:
 				attrs.PackageName = &asc.NullableString{}
 			}
 			if seen["fingerprints"] {
-				fingerprintValues := shared.SplitCSV(*fingerprints)
+				fingerprintValues := shared.SplitCSV(fingerprints.String())
 				if len(fingerprintValues) == 0 {
 					return fmt.Errorf("android-ios-mapping update: --fingerprints must include at least one value")
 				}
@@ -318,7 +319,7 @@ Examples:
 func AndroidIosMappingDeleteCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("delete", flag.ExitOnError)
 
-	id := fs.String("mapping-id", "", "Mapping ID")
+	id := shared.BindResourceIDFlag(fs, "mapping-id", "androidToIosAppMappingDetails", "Mapping ID")
 	confirm := fs.Bool("confirm", false, "Confirm deletion")
 	output := shared.BindOutputFlags(fs)
 
@@ -336,11 +337,11 @@ Examples:
 			trimmedID := strings.TrimSpace(*id)
 			if trimmedID == "" {
 				fmt.Fprintln(os.Stderr, "Error: --mapping-id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--mapping-id")
 			}
 			if !*confirm {
 				fmt.Fprintln(os.Stderr, "Error: --confirm is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--confirm")
 			}
 
 			client, err := shared.GetASCClient()

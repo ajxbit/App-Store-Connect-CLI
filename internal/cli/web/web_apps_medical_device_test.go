@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"flag"
+	"slices"
 	"strings"
 	"testing"
 
@@ -18,7 +19,10 @@ func TestWebAppsMedicalDeviceSetValidationErrors(t *testing.T) {
 	}{
 		{name: "missing app", args: []string{"--declared", "false"}, wantErr: "--app is required"},
 		{name: "missing declared", args: []string{"--app", "app-1"}, wantErr: "--declared is required"},
-		{name: "true unsupported", args: []string{"--app", "app-1", "--declared", "true"}, wantErr: "--declared true is not yet supported"},
+		{name: "missing confirmation", args: []string{"--app", "app-1", "--declared", "true"}, wantErr: "--confirm is required"},
+		{name: "blank regions", args: []string{"--app", "app-1", "--declared", "true", "--countries-or-regions", " ", "--confirm"}, wantErr: "--countries-or-regions must not be empty"},
+		{name: "regions with false", args: []string{"--app", "app-1", "--declared", "false", "--countries-or-regions", "EEA"}, wantErr: "--countries-or-regions requires --declared true"},
+		{name: "blank regions with false", args: []string{"--app", "app-1", "--declared", "false", "--countries-or-regions", ""}, wantErr: "--countries-or-regions must not be empty"},
 	}
 
 	for _, tc := range tests {
@@ -44,7 +48,7 @@ func TestWebAppsMedicalDeviceSetValidationErrors(t *testing.T) {
 	}
 }
 
-func TestWebAppsMedicalDeviceSetResolvesSessionBeforeTimeoutContext(t *testing.T) {
+func TestWebAppsMedicalDeviceSetResolvesSessionWithoutRequestDeadline(t *testing.T) {
 	origResolveSession := resolveSessionFn
 	t.Cleanup(func() {
 		resolveSessionFn = origResolveSession
@@ -71,11 +75,11 @@ func TestWebAppsMedicalDeviceSetResolvesSessionBeforeTimeoutContext(t *testing.T
 		t.Fatalf("expected resolveSession error %v, got %v", resolveErr, err)
 	}
 	if hadDeadline {
-		t.Fatal("expected resolveSession to run before timeout context creation")
+		t.Fatal("expected session resolution to run without the request deadline")
 	}
 }
 
-func TestWebAppsMedicalDeviceSetUpdatesDeclaration(t *testing.T) {
+func TestWebAppsMedicalDeviceSetUpdatesDeclarationWithoutConfirmation(t *testing.T) {
 	origResolveSession := resolveSessionFn
 	origNewWebClient := newWebClientFn
 	origSet := setWebMedicalDeviceDeclarationFn
@@ -141,6 +145,89 @@ func TestWebAppsMedicalDeviceSetUpdatesDeclaration(t *testing.T) {
 	}
 	if gotDeclared {
 		t.Fatal("expected declared=false")
+	}
+}
+
+func TestWebAppsMedicalDeviceSetTruePassesSelectedRegions(t *testing.T) {
+	origResolveSession := resolveSessionFn
+	origNewWebClient := newWebClientFn
+	origSetWithOptions := setWebMedicalDeviceDeclarationWithOptionsFn
+	t.Cleanup(func() {
+		resolveSessionFn = origResolveSession
+		newWebClientFn = origNewWebClient
+		setWebMedicalDeviceDeclarationWithOptionsFn = origSetWithOptions
+	})
+
+	resolveSessionFn = func(ctx context.Context, appleID, password, twoFactorCode string) (*webcore.AuthSession, string, error) {
+		return &webcore.AuthSession{PublicProviderID: "account-123"}, "cache", nil
+	}
+	newWebClientFn = func(session *webcore.AuthSession) *webcore.Client {
+		return &webcore.Client{}
+	}
+
+	var gotDeclared bool
+	var gotRegions []string
+	setWebMedicalDeviceDeclarationWithOptionsFn = func(ctx context.Context, client *webcore.Client, accountID, appID string, declared bool, options webcore.MedicalDeviceDeclarationOptions) (*webcore.MedicalDeviceDeclarationResult, error) {
+		gotDeclared = declared
+		gotRegions = options.CountriesOrRegions
+		return &webcore.MedicalDeviceDeclarationResult{AppID: appID, Declared: declared, Changed: true}, nil
+	}
+
+	cmd := WebAppsMedicalDeviceSetCommand()
+	if err := cmd.FlagSet.Parse([]string{
+		"--app", "app-1",
+		"--declared", "true",
+		"--countries-or-regions", "GBR,EEA",
+		"--confirm",
+		"--output", "json",
+	}); err != nil {
+		t.Fatalf("parse error: %v", err)
+	}
+	stdout, stderr := captureWebCommandOutput(t, func() {
+		if err := cmd.Exec(context.Background(), nil); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	})
+	if stderr != "" {
+		t.Fatalf("expected empty stderr, got %q", stderr)
+	}
+	if !gotDeclared || !slices.Equal(gotRegions, []string{"EEA", "GBR"}) {
+		t.Fatalf("unexpected options: declared=%t regions=%v", gotDeclared, gotRegions)
+	}
+	if !strings.Contains(stdout, `"declared":true`) {
+		t.Fatalf("expected declared=true in stdout, got %q", stdout)
+	}
+}
+
+func TestWebAppsMedicalDeviceSetRejectsInvalidRegionBeforeSession(t *testing.T) {
+	origResolveSession := resolveSessionFn
+	t.Cleanup(func() { resolveSessionFn = origResolveSession })
+	called := false
+	resolveSessionFn = func(ctx context.Context, appleID, password, twoFactorCode string) (*webcore.AuthSession, string, error) {
+		called = true
+		return nil, "", errors.New("session must not be resolved")
+	}
+
+	cmd := WebAppsMedicalDeviceSetCommand()
+	if err := cmd.FlagSet.Parse([]string{
+		"--app", "app-1",
+		"--declared", "true",
+		"--countries-or-regions", "CAN",
+		"--confirm",
+	}); err != nil {
+		t.Fatalf("parse error: %v", err)
+	}
+	_, stderr := captureWebCommandOutput(t, func() {
+		err := cmd.Exec(context.Background(), nil)
+		if !errors.Is(err, flag.ErrHelp) {
+			t.Fatalf("expected flag.ErrHelp, got %v", err)
+		}
+	})
+	if !strings.Contains(stderr, "unsupported medical device country/region") {
+		t.Fatalf("expected invalid-region error, got %q", stderr)
+	}
+	if called {
+		t.Fatal("session was resolved before region validation")
 	}
 }
 

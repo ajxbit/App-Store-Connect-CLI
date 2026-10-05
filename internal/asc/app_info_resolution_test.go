@@ -1,6 +1,41 @@
 package asc
 
-import "testing"
+import (
+	"context"
+	"net/http"
+	"reflect"
+	"strings"
+	"testing"
+)
+
+func TestListAppInfoCandidatesForAppFollowsEveryPage(t *testing.T) {
+	requests := make([]string, 0, 2)
+	client := newTestClient(
+		t, func(req *http.Request) {
+			requests = append(requests, req.URL.String())
+		},
+		jsonResponse(http.StatusOK, `{"data":[{"type":"appInfos","id":"info-old","attributes":{"state":"REPLACED_WITH_NEW_INFO"}}],"links":{"next":"https://api.appstoreconnect.apple.com/v1/apps/app-1/appInfos?cursor=next"}}`),
+		jsonResponse(http.StatusOK, `{"data":[{"type":"appInfos","id":"info-current","attributes":{"state":"READY_FOR_DISTRIBUTION"}}],"links":{}}`),
+	)
+
+	got, err := client.ListAppInfoCandidatesForApp(context.Background(), "app-1")
+	if err != nil {
+		t.Fatalf("ListAppInfoCandidatesForApp() error = %v", err)
+	}
+	want := []AppInfoCandidate{{ID: "info-current", State: "READY_FOR_DISTRIBUTION"}, {ID: "info-old", State: "REPLACED_WITH_NEW_INFO"}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("ListAppInfoCandidatesForApp() = %+v, want %+v", got, want)
+	}
+	if len(requests) != 2 {
+		t.Fatalf("requests = %v, want two pages", requests)
+	}
+	if !strings.Contains(requests[0], "limit=200") || !strings.Contains(requests[0], "fields%5BappInfos%5D=state") {
+		t.Fatalf("first request = %q, want maximum page size and state field", requests[0])
+	}
+	if !strings.Contains(requests[1], "cursor=next") {
+		t.Fatalf("second request = %q, want continuation URL", requests[1])
+	}
+}
 
 func TestAutoResolveAppInfoIDByVersionState(t *testing.T) {
 	tests := []struct {

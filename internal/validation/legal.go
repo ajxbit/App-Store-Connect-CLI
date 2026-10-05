@@ -3,15 +3,20 @@ package validation
 import (
 	"net/url"
 	"regexp"
+	"strconv"
 	"strings"
+	"time"
 )
 
 const AppleStandardEULAURL = "https://www.apple.com/legal/internet-services/itunes/dev/stdeula/"
 
 var (
 	descriptionURLPattern = regexp.MustCompile(`(?i)https?://[^\s]+`)
-	termsKeywordPattern   = regexp.MustCompile(`(?i)\bterms of use\b|\bterms\b|\beula\b`)
-	termsURLPattern       = regexp.MustCompile(`(^|[^a-z0-9])(terms?|eula|tos|termsofservice)([^a-z0-9]|$)`)
+	// App Store Connect stores copyright as free text, so the leading acquisition
+	// year may be preceded by copyright markers and may be written as a range.
+	copyrightYearPattern = regexp.MustCompile(`(?i)^(?:(?:copyright|copr\.|\(c\)|©)[\s.,]*)*([0-9]{4})(?:\s*[-–—]\s*[0-9]{4})?(?:[\s,.;:]|$)`)
+	termsKeywordPattern  = regexp.MustCompile(`(?i)\bterms of use\b|\bterms\b|\beula\b`)
+	termsURLPattern      = regexp.MustCompile(`(^|[^a-z0-9])(terms?|eula|tos|termsofservice)([^a-z0-9]|$)`)
 )
 
 func legalChecks(copyright string, hasActiveMonetization bool, hasReviewRelevantSubscriptions bool, versionLocs []VersionLocalization, appInfoLocs []AppInfoLocalization) []CheckResult {
@@ -27,12 +32,23 @@ func legalChecks(copyright string, hasActiveMonetization bool, hasReviewRelevant
 			Message:      "copyright is required",
 			Remediation:  "Set copyright via: asc versions update --version-id VERSION_ID --copyright \"2026 Your Company\"",
 		})
+	} else if !hasValidLeadingCopyrightYear(copyright, time.Now().Year()) {
+		// App Store Connect accepts copyright as free text, so this is advisory:
+		// it flags values that do not lead with the acquisition year Apple asks for.
+		checks = append(checks, CheckResult{
+			ID:           "legal.format.copyright_year",
+			Severity:     SeverityWarning,
+			Field:        "copyright",
+			ResourceType: "appStoreVersion",
+			Message:      "copyright does not start with the four-digit year the rights were obtained",
+			Remediation:  "Apple recommends a current or past year followed by the rights owner, for example: \"2020 Your Company\"",
+		})
 	}
 
 	// URL format checks on version localizations.
 	for _, loc := range versionLocs {
 		if u := strings.TrimSpace(loc.SupportURL); u != "" {
-			if !isValidHTTPURL(u) {
+			if !IsValidHTTPURL(u) {
 				checks = append(checks, CheckResult{
 					ID:           "legal.format.support_url",
 					Severity:     SeverityWarning,
@@ -46,7 +62,7 @@ func legalChecks(copyright string, hasActiveMonetization bool, hasReviewRelevant
 			}
 		}
 		if u := strings.TrimSpace(loc.MarketingURL); u != "" {
-			if !isValidHTTPURL(u) {
+			if !IsValidHTTPURL(u) {
 				checks = append(checks, CheckResult{
 					ID:           "legal.format.marketing_url",
 					Severity:     SeverityWarning,
@@ -92,7 +108,7 @@ func legalChecks(copyright string, hasActiveMonetization bool, hasReviewRelevant
 			})
 		}
 
-		if privacyURL != "" && !isValidHTTPURL(privacyURL) {
+		if privacyURL != "" && !IsValidHTTPURL(privacyURL) {
 			checks = append(checks, CheckResult{
 				ID:           "legal.format.privacy_policy_url",
 				Severity:     SeverityWarning,
@@ -106,7 +122,7 @@ func legalChecks(copyright string, hasActiveMonetization bool, hasReviewRelevant
 		}
 
 		if u := strings.TrimSpace(loc.PrivacyChoicesURL); u != "" {
-			if !isValidHTTPURL(u) {
+			if !IsValidHTTPURL(u) {
 				checks = append(checks, CheckResult{
 					ID:           "legal.format.privacy_choices_url",
 					Severity:     SeverityWarning,
@@ -124,12 +140,31 @@ func legalChecks(copyright string, hasActiveMonetization bool, hasReviewRelevant
 	return checks
 }
 
+// hasValidLeadingCopyrightYear reports whether the copyright value leads with a
+// four-digit acquisition year, allowing the copyright markers and year ranges
+// App Store Connect accepts (for example "© 2026 Acme" or "2019-2026 Acme").
+func hasValidLeadingCopyrightYear(value string, currentYear int) bool {
+	// Collapse Unicode whitespace so the pattern only has to handle ASCII gaps.
+	normalized := strings.Join(strings.Fields(value), " ")
+	if normalized == "" {
+		return false
+	}
+
+	match := copyrightYearPattern.FindStringSubmatch(normalized)
+	if len(match) != 2 {
+		return false
+	}
+
+	year, err := strconv.Atoi(match[1])
+	return err == nil && year > 0 && year <= currentYear
+}
+
 // HasTermsOfUseLink reports whether a description includes a functional Terms of Use / EULA link.
 func HasTermsOfUseLink(description string) bool {
 	for _, match := range descriptionURLPattern.FindAllStringIndex(description, -1) {
 		rawURL := description[match[0]:match[1]]
 		normalizedURL := normalizeDescriptionURL(rawURL)
-		if !isValidHTTPURL(normalizedURL) {
+		if !IsValidHTTPURL(normalizedURL) {
 			continue
 		}
 		if isAppleStandardEULAURL(normalizedURL) || urlLooksLikeTermsLink(normalizedURL) {
@@ -162,8 +197,11 @@ func urlLooksLikeTermsLink(raw string) bool {
 	return termsURLPattern.MatchString(lower)
 }
 
-// isValidHTTPURL returns true for absolute HTTP/HTTPS URLs with a hostname and no raw whitespace.
-func isValidHTTPURL(s string) bool {
+// IsValidHTTPURL reports whether a value is an absolute HTTP/HTTPS URL with a
+// hostname and no raw whitespace, matching the URL syntax App Store Connect
+// accepts for metadata URL fields. It is exported so offline metadata checks
+// apply the same rule as the online validation report.
+func IsValidHTTPURL(s string) bool {
 	s = strings.TrimSpace(s)
 	if s == "" || strings.ContainsAny(s, " \t\r\n") {
 		return false

@@ -36,7 +36,7 @@ asc analytics sales \
   --type SALES \
   --subtype SUMMARY \
   --frequency WEEKLY \
-  --date "2024-01-20"
+  --date "2024-01-21"
 ```
 
 ### Download Monthly Sales Report
@@ -76,7 +76,16 @@ Request custom analytics reports for detailed app metrics.
 
 <Steps>
   <Step title="Request analytics report">
-    Create a request for ongoing analytics access:
+    Request ongoing analytics access and reuse an existing active request when possible:
+
+    ```bash  theme={null}
+    asc analytics request \
+      --app "YOUR_APP_ID" \
+      --access-type ONGOING \
+      --reuse-existing
+    ```
+
+    Or create a request directly:
 
     ```bash  theme={null}
     asc analytics request \
@@ -218,18 +227,13 @@ if [ $(date +%u) -eq 1 ]; then
     --output "$REPORT_DIR/weekly-sales.txt"
 fi
 
-# 3. Request analytics if not already requested
-echo "Checking for analytics request..."
-REQUESTS=$(asc analytics requests --app "$ASC_APP_ID" --output json)
-
-if [ "$(echo $REQUESTS | jq '.data | length')" -eq 0 ]; then
-  echo "Creating analytics request..."
-  asc analytics request --app "$ASC_APP_ID" --access-type ONGOING
-fi
+# 3. Request analytics access, reusing an active request when possible
+echo "Requesting analytics access..."
+REQUEST=$(asc analytics request --app "$ASC_APP_ID" --access-type ONGOING --reuse-existing --output json)
+REQUEST_ID=$(echo "$REQUEST" | jq -r '.requestId')
 
 # 4. Download available analytics instances
-REQUEST_ID=$(echo $REQUESTS | jq -r '.data[0].id')
-if [ -n "$REQUEST_ID" ]; then
+if [ -n "$REQUEST_ID" ] && [ "$REQUEST_ID" != "null" ]; then
   echo "Downloading analytics instances..."
   REPORTS=$(asc analytics view --request-id "$REQUEST_ID" --output json)
   
@@ -265,7 +269,7 @@ jobs:
       
       - name: Install asc CLI
         run: |
-          curl -fsSL https://raw.githubusercontent.com/rudrankriyam/App-Store-Connect-CLI/main/install.sh | bash
+          curl -fsSL https://raw.githubusercontent.com/rorkai/App-Store-Connect-CLI/main/install.sh | bash
       
       - name: Configure credentials
         env:
@@ -379,7 +383,7 @@ export ASC_VENDOR_NUMBER="YOUR_VENDOR_NUMBER"
 asc analytics view --request-id "REQUEST_ID"
 ```
 
-Wait for the state to change to `COMPLETED` before downloading instances.
+Retry `asc analytics view --request-id "REQUEST_ID" --paginate --output json` until `data[].instances` is non-empty, then download.
 
 ### "Failed to download report"
 

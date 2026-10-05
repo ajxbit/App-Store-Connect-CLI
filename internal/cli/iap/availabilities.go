@@ -40,16 +40,16 @@ Examples:
 
 // IAPAvailabilitiesGetCommand returns the availability get subcommand.
 func IAPAvailabilitiesGetCommand() *ffcli.Command {
-	fs := flag.NewFlagSet("pricing availabilities get", flag.ExitOnError)
+	fs := flag.NewFlagSet("pricing availabilities view", flag.ExitOnError)
 
-	availabilityID := fs.String("id", "", "Availability ID")
+	availabilityID := shared.BindResourceIDFlag(fs, "id", "inAppPurchaseAvailabilities", "Availability ID")
 	output := shared.BindOutputFlags(fs)
 
 	return &ffcli.Command{
-		Name:       "get",
+		Name:       "view",
 		ShortUsage: "asc iap pricing availabilities view --id \"AVAILABILITY_ID\"",
-		ShortHelp:  "Get an in-app purchase availability by ID.",
-		LongHelp: `Get an in-app purchase availability by ID.
+		ShortHelp:  "View an in-app purchase availability by ID.",
+		LongHelp: `View an in-app purchase availability by ID.
 
 Examples:
   asc iap pricing availabilities view --id "AVAILABILITY_ID"`,
@@ -59,12 +59,12 @@ Examples:
 			id := strings.TrimSpace(*availabilityID)
 			if id == "" {
 				fmt.Fprintln(os.Stderr, "Error: --id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--id")
 			}
 
 			client, err := shared.GetASCClient()
 			if err != nil {
-				return fmt.Errorf("iap availabilities get: %w", err)
+				return fmt.Errorf("iap availabilities view: %w", err)
 			}
 
 			requestCtx, cancel := shared.ContextWithTimeout(ctx)
@@ -72,7 +72,7 @@ Examples:
 
 			resp, err := client.GetInAppPurchaseAvailabilityByID(requestCtx, id)
 			if err != nil {
-				return fmt.Errorf("iap availabilities get: failed to fetch: %w", err)
+				return fmt.Errorf("iap availabilities view: failed to fetch: %w", err)
 			}
 
 			return shared.PrintOutput(resp, *output.Output, *output.Pretty)
@@ -84,7 +84,7 @@ Examples:
 func IAPAvailabilitiesAvailableTerritoriesCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("pricing availabilities available-territories", flag.ExitOnError)
 
-	availabilityID := fs.String("id", "", "Availability ID")
+	availabilityID := shared.BindResourceIDFlag(fs, "id", "inAppPurchaseAvailabilities", "Availability ID")
 	limit := fs.Int("limit", 0, "Maximum results per page (1-200)")
 	next := fs.String("next", "", "Fetch next page using a links.next URL")
 	paginate := fs.Bool("paginate", false, "Automatically fetch all pages (aggregate results)")
@@ -103,16 +103,16 @@ Examples:
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
 			if *limit != 0 && (*limit < 1 || *limit > 200) {
-				return fmt.Errorf("iap availabilities available-territories: --limit must be between 1 and 200")
+				return shared.UsageError("iap availabilities available-territories: --limit must be between 1 and 200")
 			}
 			if err := shared.ValidateNextURL(*next); err != nil {
-				return fmt.Errorf("iap availabilities available-territories: %w", err)
+				return shared.UsageErrorf("iap availabilities available-territories: %v", err)
 			}
 
 			id := strings.TrimSpace(*availabilityID)
 			if id == "" && strings.TrimSpace(*next) == "" {
 				fmt.Fprintln(os.Stderr, "Error: --id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--id")
 			}
 
 			client, err := shared.GetASCClient()

@@ -46,12 +46,14 @@ Examples:
   asc xcode-cloud run --source-run-id "BUILD_RUN_ID" --clean
   asc xcode-cloud run --app "APP_ID" --workflow "Deploy" --branch "main" --wait
   asc xcode-cloud status --run-id "BUILD_RUN_ID"
-  asc xcode-cloud status --run-id "BUILD_RUN_ID" --wait`,
+  asc xcode-cloud status --run-id "BUILD_RUN_ID" --wait
+  asc xcode-cloud doctor --run-id "BUILD_RUN_ID" --wait`,
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
 		Subcommands: []*ffcli.Command{
 			XcodeCloudRunCommand(),
 			XcodeCloudStatusCommand(),
+			XcodeCloudDoctorCommand(),
 			XcodeCloudProductsCommand(),
 			XcodeCloudWorkflowsCommand(),
 			XcodeCloudScmCommand(),
@@ -75,13 +77,14 @@ func XcodeCloudRunCommand() *ffcli.Command {
 
 	appID := fs.String("app", "", xcodeCloudAppFlagUsage)
 	workflowName := fs.String("workflow", "", "Workflow name to trigger")
-	workflowID := fs.String("workflow-id", "", "Workflow ID to trigger (alternative to --workflow)")
+	workflowID := shared.BindResourceIDFlag(fs, "workflow-id", "ciWorkflows", "Workflow ID to trigger (alternative to --workflow)")
 	branch := fs.String("branch", "", "Branch or tag name to build")
-	gitReferenceID := fs.String("git-reference-id", "", "Git reference ID to build (alternative to --branch)")
-	pullRequestID := fs.String("pull-request-id", "", "Pull request ID to build")
-	sourceRunID := fs.String("source-run-id", "", "Source build run ID to rerun")
+	gitReferenceID := shared.BindResourceIDFlag(fs, "git-reference-id", "scmGitReferences", "Git reference ID to build (alternative to --branch)")
+	pullRequestID := shared.BindResourceIDFlag(fs, "pull-request-id", "scmPullRequests", "Pull request ID to build")
+	sourceRunID := shared.BindResourceIDFlag(fs, "source-run-id", "ciBuildRuns", "Source build run ID to rerun")
 	clean := fs.Bool("clean", false, "Request a clean build")
 	wait := fs.Bool("wait", false, "Wait for build to complete")
+	doctor := fs.Bool("doctor", false, "After waiting, diagnose the completed run and inspect failure logs")
 	pollInterval := fs.Duration("poll-interval", 10*time.Second, "Poll interval when waiting")
 	timeout := fs.Duration("timeout", 0, "Timeout for Xcode Cloud requests (0 = use ASC_TIMEOUT or 30m default)")
 	output := shared.BindOutputFlags(fs)
@@ -99,12 +102,17 @@ Standard mode:
 Rerun mode:
 - Use --source-run-id to rerun from an existing build run (without workflow/source selectors)
 
+Diagnostic mode:
+- Add --wait and the --doctor flag to return the combined doctor report after completion
+- A failed build is report data in diagnostic mode and does not make the command exit non-zero
+
 Examples:
   asc xcode-cloud run --app "123456789" --workflow "CI" --branch "main"
   asc xcode-cloud run --workflow-id "WORKFLOW_ID" --git-reference-id "REF_ID"
   asc xcode-cloud run --workflow-id "WORKFLOW_ID" --pull-request-id "PR_ID"
   asc xcode-cloud run --source-run-id "BUILD_RUN_ID" --clean
   asc xcode-cloud run --app "123456789" --workflow "Deploy" --branch "release/1.0" --wait
+  asc xcode-cloud run --app "123456789" --workflow "Deploy" --branch "main" --wait --doctor
   asc xcode-cloud run --app "123456789" --workflow "CI" --branch "main" --wait --poll-interval 30s --timeout 1h`,
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
@@ -136,11 +144,11 @@ Examples:
 			} else {
 				if !hasWorkflowName && !hasWorkflowID {
 					fmt.Fprintln(os.Stderr, "Error: --workflow or --workflow-id is required")
-					return flag.ErrHelp
+					return shared.MissingRequiredUsageError("")
 				}
 				if !hasBranch && !hasGitRefID && !hasPullRequestID {
 					fmt.Fprintln(os.Stderr, "Error: --branch, --git-reference-id, or --pull-request-id is required")
-					return flag.ErrHelp
+					return shared.MissingRequiredUsageError("")
 				}
 			}
 			if *timeout < 0 {
@@ -149,11 +157,17 @@ Examples:
 			if *wait && *pollInterval <= 0 {
 				return shared.UsageError("--poll-interval must be greater than 0")
 			}
+			if *doctor && !*wait {
+				return shared.UsageError("--doctor requires --wait")
+			}
+			if _, err := shared.ValidateOutputFormat(*output.Output, *output.Pretty); err != nil {
+				return err
+			}
 
 			resolvedAppID := shared.ResolveAppID(*appID)
 			if hasWorkflowName && !hasSourceRunID && resolvedAppID == "" {
 				fmt.Fprintln(os.Stderr, "Error: --app is required when using --workflow (or set ASC_APP_ID)")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--app")
 			}
 
 			client, err := shared.GetASCClient()
@@ -217,7 +231,7 @@ Examples:
 					}
 				}
 			} else {
-				sourceRunResp, err := getCiBuildRunWithRetry(
+				sourceRunResp, err := getCiBuildRun(
 					requestCtx,
 					client,
 					resolvedSourceRunID,
@@ -308,6 +322,16 @@ Examples:
 			if !*wait {
 				return shared.PrintOutput(result, *output.Output, *output.Pretty)
 			}
+			if *doctor {
+				doctorResult, err := diagnoseXcodeCloudRun(requestCtx, client, resp.Data.ID, xcodeCloudDoctorOptions{
+					Wait:         true,
+					PollInterval: *pollInterval,
+				})
+				if err != nil {
+					return fmt.Errorf("xcode-cloud run: diagnose build: %w", err)
+				}
+				return printXcodeCloudDoctorResult(doctorResult, *output.Output, *output.Pretty)
+			}
 
 			// Wait for completion
 			return waitForBuildCompletion(requestCtx, client, resp.Data.ID, *pollInterval, *output.Output, *output.Pretty)
@@ -319,7 +343,7 @@ Examples:
 func XcodeCloudStatusCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("status", flag.ExitOnError)
 
-	runID := fs.String("run-id", "", "Build run ID to check")
+	runID := shared.BindResourceIDFlag(fs, "run-id", "ciBuildRuns", "Build run ID to check")
 	wait := fs.Bool("wait", false, "Wait for build to complete")
 	pollInterval := fs.Duration("poll-interval", 10*time.Second, "Poll interval when waiting")
 	timeout := fs.Duration("timeout", 0, "Timeout for Xcode Cloud requests (0 = use ASC_TIMEOUT or 30m default)")
@@ -341,7 +365,7 @@ Examples:
 		Exec: func(ctx context.Context, args []string) error {
 			if strings.TrimSpace(*runID) == "" {
 				fmt.Fprintln(os.Stderr, "Error: --run-id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--run-id")
 			}
 			if *timeout < 0 {
 				return shared.UsageError("--timeout must be greater than or equal to 0")
@@ -363,7 +387,7 @@ Examples:
 			}
 
 			// Single status check
-			resp, err := getCiBuildRunWithRetry(requestCtx, client, strings.TrimSpace(*runID))
+			resp, err := getCiBuildRun(requestCtx, client, strings.TrimSpace(*runID))
 			if err != nil {
 				return fmt.Errorf("xcode-cloud status: %w", err)
 			}

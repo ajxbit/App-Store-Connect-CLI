@@ -2,11 +2,14 @@
 from __future__ import annotations
 
 import json
+import os
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
-import check_release_docs
+import generate_winget_manifests
 import check_repo_docs
 import check_website_commands
 import check_website_docs
@@ -59,6 +62,74 @@ class RepoDocsChecksTest(unittest.TestCase):
             errors = check_repo_docs.check_files(root, [source])
             self.assertEqual(len(errors), 1)
             self.assertIn("escapes repository root", errors[0])
+
+
+class WinGetManifestGenerationTest(unittest.TestCase):
+    def test_generate_winget_manifests_uses_windows_checksum(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            release = root / "release"
+            output = root / "winget"
+            release.mkdir()
+            (release / "asc_1.5.1_checksums.txt").write_text(
+                "\n".join(
+                    [
+                        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa  asc_1.5.1_linux_amd64",
+                        "130264eabdbba35073460eb33f342f9f4b6d93bfc9b173624a29efa1072bdb00  asc_1.5.1_windows_amd64.exe",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            files = generate_winget_manifests.generate("1.5.1", release, output)
+
+            self.assertEqual(len(files), 3)
+            installer = (
+                output
+                / "manifests"
+                / "r"
+                / "Rorkai"
+                / "ASC"
+                / "1.5.1"
+                / "Rorkai.ASC.installer.yaml"
+            ).read_text(encoding="utf-8")
+            self.assertIn("InstallerType: portable", installer)
+            self.assertIn("Commands:\n  - asc", installer)
+            self.assertIn(
+                "InstallerUrl: https://github.com/rorkai/App-Store-Connect-CLI/releases/download/1.5.1/asc_1.5.1_windows_amd64.exe",
+                installer,
+            )
+            self.assertIn(
+                "InstallerSha256: 130264EABDBBA35073460EB33F342F9F4B6D93BFC9B173624A29EFA1072BDB00",
+                installer,
+            )
+
+    def test_generate_winget_manifests_accepts_binary_checksum_marker(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            release = root / "release"
+            output = root / "winget"
+            release.mkdir()
+            (release / "asc_1.5.1_checksums.txt").write_text(
+                "130264eabdbba35073460eb33f342f9f4b6d93bfc9b173624a29efa1072bdb00 *asc_1.5.1_windows_amd64.exe\n",
+                encoding="utf-8",
+            )
+
+            generate_winget_manifests.generate("1.5.1", release, output)
+
+            installer = (
+                output
+                / "manifests"
+                / "r"
+                / "Rorkai"
+                / "ASC"
+                / "1.5.1"
+                / "Rorkai.ASC.installer.yaml"
+            ).read_text(encoding="utf-8")
+            self.assertIn(
+                "InstallerSha256: 130264EABDBBA35073460EB33F342F9F4B6D93BFC9B173624A29EFA1072BDB00",
+                installer,
+            )
 
 
 class WebsiteDocsChecksTest(unittest.TestCase):
@@ -195,6 +266,38 @@ class WebsiteDocsChecksTest(unittest.TestCase):
 
 
 class WebsiteCommandChecksTest(unittest.TestCase):
+    def test_help_parser_recognizes_presence_aware_boolean_without_false_default(self) -> None:
+        create_spec = check_website_commands.parse_help_text(
+            "FLAGS\n  --internal  Create as internal group\n  --profile  Use named profile\n",
+            is_root=False,
+            path=("testflight", "groups", "create"),
+        )
+        list_spec = check_website_commands.parse_help_text(
+            "FLAGS\n  --internal  Filter internal groups (default: false)\n  --public-link-enabled  Filter by public-link state\n",
+            is_root=False,
+            path=("testflight", "groups", "list"),
+        )
+
+        self.assertEqual(
+            create_spec.flags, {"--internal": True, "--profile": False}
+        )
+        self.assertEqual(
+            list_spec.flags,
+            {"--internal": True, "--public-link-enabled": False},
+        )
+
+    def test_help_subprocesses_disable_telemetry(self) -> None:
+        run = mock.Mock(return_value=mock.Mock(stderr="", stdout=""))
+
+        check_website_commands.path_help.cache_clear()
+        with mock.patch.object(check_website_commands.subprocess, "run", run):
+            check_website_commands.command_help(Path("/tmp/asc-doc-check"), ("apps",))
+            check_website_commands.path_help(Path("/tmp/asc-doc-check"), ("builds",))
+
+        self.assertEqual(run.call_count, 2)
+        for call in run.call_args_list:
+            self.assertEqual(call.kwargs["env"]["ASC_TELEMETRY_DISABLED"], "1")
+
     def test_website_command_checks_accept_valid_examples(self) -> None:
         index = {
             (): check_website_commands.CommandSpec(
@@ -224,6 +327,251 @@ class WebsiteCommandChecksTest(unittest.TestCase):
             errors = check_website_commands.collect_errors(website, index)
             self.assertEqual(errors, [])
 
+    def test_website_command_checks_profile_placement(self) -> None:
+        index = {
+            (): check_website_commands.CommandSpec(
+                path=(),
+                usage="asc <subcommand> [flags]",
+                flags={"--profile": False, "--debug": True},
+                subcommands={"apps"},
+            ),
+            ("apps",): check_website_commands.CommandSpec(
+                path=("apps",),
+                usage="asc apps list [flags]",
+                flags={"--output": False},
+                subcommands={"list"},
+            ),
+            ("apps", "list"): check_website_commands.CommandSpec(
+                path=("apps", "list"),
+                usage="asc apps list [flags]",
+                flags={"--output": False},
+                subcommands=set(),
+            ),
+            ("search",): check_website_commands.CommandSpec(
+                path=("search",),
+                usage="asc search <query> [flags]",
+                flags={"--output": False},
+                subcommands=set(),
+            ),
+        }
+        index[()] = check_website_commands.CommandSpec(
+            path=(),
+            usage="asc <subcommand> [flags]",
+            flags={"--profile": False, "--debug": True},
+            subcommands={"apps", "search"},
+        )
+        cases = {
+            "asc apps list --profile prod": [],
+            "asc apps list --profile=prod": [],
+            "asc apps --profile prod list --output json": [],
+            "asc apps --profile=list list": [],
+            "asc search QUERY --profile=prod": ["appears after positional arguments"],
+            "asc apps list --profile": ["missing value for flag '--profile'"],
+            "asc apps list --debug": ["must appear before the top-level command"],
+            # A separated value that names a subcommand needs the inline form.
+            "asc apps --profile list": ["names a subcommand of 'apps'"],
+        }
+        for example, expected in cases.items():
+            with self.subTest(example=example):
+                with tempfile.TemporaryDirectory() as tmpdir:
+                    website = Path(tmpdir)
+                    (website / "index.mdx").write_text(f"```bash\n{example}\n```\n")
+                    errors = check_website_commands.collect_errors(website, index)
+                    self.assertEqual(len(errors), len(expected), errors)
+                    for fragment, error in zip(expected, errors):
+                        self.assertIn(fragment, error)
+
+    def test_website_command_checks_accept_command_passthrough(self) -> None:
+        index = {
+            (): check_website_commands.CommandSpec(
+                path=(),
+                usage="asc <subcommand> [flags]",
+                flags={},
+                subcommands={"signing"},
+            ),
+            ("signing",): check_website_commands.CommandSpec(
+                path=("signing",),
+                usage="asc signing <subcommand> [flags]",
+                flags={},
+                subcommands={"run"},
+            ),
+            ("signing", "run"): check_website_commands.CommandSpec(
+                path=("signing", "run"),
+                usage=(
+                    "asc signing run --identity PATH --profile PATH [flags] "
+                    "-- <command> [args...]"
+                ),
+                flags={"--identity": False, "--profile": False},
+                subcommands=set(),
+            ),
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            website = Path(tmpdir)
+            (website / "index.mdx").write_text(
+                "```bash\n"
+                "asc signing run --identity signing.p12 --profile app.mobileprovision "
+                "-- xcodebuild -exportArchive --archivePath App.xcarchive\n"
+                "```\n"
+            )
+            errors = check_website_commands.collect_errors(website, index)
+            self.assertEqual(errors, [])
+
+    def test_website_command_checks_reject_empty_command_passthrough(self) -> None:
+        index = {
+            (): check_website_commands.CommandSpec(
+                path=(),
+                usage="asc <subcommand> [flags]",
+                flags={},
+                subcommands={"signing"},
+            ),
+            ("signing",): check_website_commands.CommandSpec(
+                path=("signing",),
+                usage="asc signing <subcommand> [flags]",
+                flags={},
+                subcommands={"run"},
+            ),
+            ("signing", "run"): check_website_commands.CommandSpec(
+                path=("signing", "run"),
+                usage=(
+                    "asc signing run --identity PATH --profile PATH [flags] "
+                    "-- <command> [args...]"
+                ),
+                flags={"--identity": False, "--profile": False},
+                subcommands=set(),
+            ),
+        }
+        examples = ('""', '"   "')
+
+        for command in examples:
+            with self.subTest(command=command):
+                with tempfile.TemporaryDirectory() as tmpdir:
+                    website = Path(tmpdir)
+                    (website / "index.mdx").write_text(
+                        "```bash\n"
+                        "asc signing run --identity signing.p12 "
+                        f"--profile app.mobileprovision -- {command}\n"
+                        "```\n"
+                    )
+                    errors = check_website_commands.collect_errors(website, index)
+                    self.assertEqual(len(errors), 1)
+                    self.assertIn("non-empty command", errors[0])
+
+    def test_website_command_checks_require_flags_before_command_passthrough(self) -> None:
+        index = {
+            (): check_website_commands.CommandSpec(
+                path=(),
+                usage="asc <subcommand> [flags]",
+                flags={},
+                subcommands={"signing"},
+            ),
+            ("signing",): check_website_commands.CommandSpec(
+                path=("signing",),
+                usage="asc signing <subcommand> [flags]",
+                flags={},
+                subcommands={"run"},
+            ),
+            ("signing", "run"): check_website_commands.CommandSpec(
+                path=("signing", "run"),
+                usage=(
+                    "asc signing run --identity PATH --profile PATH [flags] "
+                    "-- <command> [args...]"
+                ),
+                flags={"--identity": False, "--profile": False},
+                subcommands=set(),
+            ),
+        }
+        examples = {
+            "--identity signing.p12": "--profile",
+            "--profile app.mobileprovision": "--identity",
+        }
+
+        for flags, missing_flag in examples.items():
+            with self.subTest(missing_flag=missing_flag):
+                with tempfile.TemporaryDirectory() as tmpdir:
+                    website = Path(tmpdir)
+                    (website / "index.mdx").write_text(
+                        f"```bash\nasc signing run {flags} -- xcodebuild -exportArchive\n```\n"
+                    )
+                    errors = check_website_commands.collect_errors(website, index)
+                    self.assertEqual(len(errors), 1)
+                    self.assertIn("missing required flag", errors[0])
+                    self.assertIn(missing_flag, errors[0])
+
+    def test_website_command_checks_reject_empty_flags_before_command_passthrough(self) -> None:
+        index = {
+            (): check_website_commands.CommandSpec(
+                path=(),
+                usage="asc <subcommand> [flags]",
+                flags={},
+                subcommands={"signing"},
+            ),
+            ("signing",): check_website_commands.CommandSpec(
+                path=("signing",),
+                usage="asc signing <subcommand> [flags]",
+                flags={},
+                subcommands={"run"},
+            ),
+            ("signing", "run"): check_website_commands.CommandSpec(
+                path=("signing", "run"),
+                usage=(
+                    "asc signing run --identity PATH --profile PATH [flags] "
+                    "-- <command> [args...]"
+                ),
+                flags={"--identity": False, "--profile": False},
+                subcommands=set(),
+            ),
+        }
+        examples = {
+            "--identity= --profile app.mobileprovision": "--identity",
+            '--identity "" --profile app.mobileprovision': "--identity",
+            "--identity signing.p12 --identity= --profile app.mobileprovision": "--identity",
+            "--identity signing.p12 --profile=": "--profile",
+            '--identity signing.p12 --profile ""': "--profile",
+            '--identity signing.p12 --profile app.mobileprovision --profile ""': "--profile",
+        }
+
+        for flags, missing_flag in examples.items():
+            with self.subTest(flags=flags):
+                with tempfile.TemporaryDirectory() as tmpdir:
+                    website = Path(tmpdir)
+                    (website / "index.mdx").write_text(
+                        f"```bash\nasc signing run {flags} -- xcodebuild -exportArchive\n```\n"
+                    )
+                    errors = check_website_commands.collect_errors(website, index)
+                    self.assertEqual(len(errors), 1)
+                    self.assertIn("missing required flag", errors[0])
+                    self.assertIn(missing_flag, errors[0])
+
+    def test_website_command_checks_reject_unsupported_command_passthrough(self) -> None:
+        index = {
+            (): check_website_commands.CommandSpec(
+                path=(),
+                usage="asc <subcommand> [flags]",
+                flags={},
+                subcommands={"apps"},
+            ),
+            ("apps",): check_website_commands.CommandSpec(
+                path=("apps",),
+                usage="asc apps list [flags]",
+                flags={},
+                subcommands={"list"},
+            ),
+            ("apps", "list"): check_website_commands.CommandSpec(
+                path=("apps", "list"),
+                usage="asc apps list [flags]",
+                flags={},
+                subcommands=set(),
+            ),
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            website = Path(tmpdir)
+            (website / "index.mdx").write_text(
+                "```bash\nasc apps list -- echo unexpected\n```\n"
+            )
+            errors = check_website_commands.collect_errors(website, index)
+            self.assertEqual(len(errors), 1)
+            self.assertIn("does not accept command passthrough", errors[0])
+
     def test_website_command_checks_reject_unknown_subcommand(self) -> None:
         index = {
             (): check_website_commands.CommandSpec(
@@ -251,7 +599,7 @@ class WebsiteCommandChecksTest(unittest.TestCase):
             (): check_website_commands.CommandSpec(
                 path=(),
                 usage="asc <subcommand> [flags]",
-                flags={"--profile": False},
+                flags={"--strict-auth": True},
                 subcommands={"apps"},
             ),
             ("apps",): check_website_commands.CommandSpec(
@@ -269,7 +617,7 @@ class WebsiteCommandChecksTest(unittest.TestCase):
         }
         with tempfile.TemporaryDirectory() as tmpdir:
             website = Path(tmpdir)
-            (website / "index.mdx").write_text("```bash\nasc apps list --profile prod\n```\n")
+            (website / "index.mdx").write_text("```bash\nasc apps list --strict-auth\n```\n")
             errors = check_website_commands.collect_errors(website, index)
             self.assertEqual(len(errors), 1)
             self.assertIn("must appear before", errors[0])
@@ -1039,34 +1387,68 @@ class DocLinksTest(unittest.TestCase):
         self.assertIsNone(normalized)
 
 
-class ReleaseDocsChecksTest(unittest.TestCase):
-    def test_release_docs_match_version_heading(self) -> None:
-        changelog = "## Changelog\n\n### v1.2.3\n"
-        self.assertTrue(check_release_docs.version_is_documented(changelog, "1.2.3"))
-        self.assertTrue(check_release_docs.version_is_documented(changelog, "v1.2.3"))
-        self.assertFalse(check_release_docs.version_is_documented(changelog, "1.2.4"))
-
-
 class HookChecksTest(unittest.TestCase):
-    def test_pre_commit_treats_root_level_mdx_and_mintlify_config_as_docs(self) -> None:
-        hook = (
-            Path(__file__).resolve().parents[1] / ".githooks" / "pre-commit"
-        ).read_text()
-        self.assertIn(
-            'docs.json|.mintignore|.mintlify/*|*.mdx|cicd/*|commands/*|concepts/*|configuration/*|guides/*|resources/*)',
-            hook,
-        )
+    def run_hook(self, paths: list[str], fail_target: str = "") -> tuple[int, list[str]]:
+        hook = Path(__file__).resolve().parents[1] / ".githooks" / "pre-commit"
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            commands = {
+                "git": '\n'.join([
+                    '#!/usr/bin/env bash',
+                    'if [ "$1" = rev-parse ]; then pwd;',
+                    'elif [ "$2" = --cached ]; then printf "%s\\n" "$HOOK_PATHS"; fi',
+                ]),
+                "go": '#!/usr/bin/env bash\nif [ "$1" = env ]; then pwd; else echo "go $*" >> "$HOOK_LOG"; fi\n',
+                "make": '#!/usr/bin/env bash\necho "make $*" >> "$HOOK_LOG"\n[ "$1" != "$HOOK_FAIL" ]\n',
+            }
+            for name, content in commands.items():
+                command = root / name
+                command.write_text(content)
+                command.chmod(0o755)
+            log = root / "calls"
+            result = subprocess.run(
+                ["bash", str(hook)], cwd=root, capture_output=True, text=True,
+                env={**os.environ, "PATH": f"{root}:{os.environ['PATH']}",
+                     "HOOK_PATHS": "\n".join(paths), "HOOK_LOG": str(log),
+                     "HOOK_FAIL": fail_target},
+            )
+            return result.returncode, log.read_text().splitlines() if log.exists() else []
 
-    def test_pre_commit_treats_docs_go_files_as_code(self) -> None:
-        hook = (
-            Path(__file__).resolve().parents[1] / ".githooks" / "pre-commit"
-        ).read_text()
-        needs_code_case = hook.split('case "$path" in')[4]
-        docs_case = needs_code_case.index(
-            'docs.json|.mintignore|.mintlify/*|*.mdx|cicd/*|commands/*|concepts/*|configuration/*|guides/*|resources/*|README.md|CONTRIBUTING.md|SUPPORT.md|docs/*|.github/PULL_REQUEST_TEMPLATE.md)'
-        )
-        go_case = needs_code_case.index("*.go|go.mod|go.sum|Makefile)")
-        self.assertLess(go_case, docs_case)
+    def test_instruction_docs_run_validators_without_go_gates(self) -> None:
+        for path in ["AGENTS.md", ".agents/skills/watch-asc-pr/SKILL.md",
+                     ".agents/skills/watch-asc-pr/references/checks.md",
+                     ".agents/skills/watch-asc-pr/agents/openai.yaml"]:
+            with self.subTest(path=path):
+                code, calls = self.run_hook([path])
+                self.assertEqual(code, 0)
+                self.assertEqual(calls, ["make check-repo-docs", "make check-agent-skills"])
+
+    def test_executable_and_mixed_changes_keep_code_gates(self) -> None:
+        for paths in [[".agents/skills/example/scripts/check.py"],
+                      ["AGENTS.md", "internal/cli/main.go"], ["docs/example.go"],
+                      [".githooks/pre-commit"]]:
+            with self.subTest(paths=paths):
+                code, calls = self.run_hook(paths)
+                self.assertEqual(code, 0)
+                self.assertIn("make format", calls)
+                self.assertIn("make lint", calls)
+                self.assertIn("make test-short", calls)
+
+    def test_instruction_validation_failure_blocks_commit(self) -> None:
+        for target in ["check-repo-docs", "check-agent-skills"]:
+            with self.subTest(target=target):
+                code, calls = self.run_hook(["AGENTS.md"], target)
+                self.assertNotEqual(code, 0)
+                self.assertNotIn("make format", calls)
+
+    def test_website_and_wall_fast_paths_remain_separate(self) -> None:
+        for path, expected in [("index.mdx", "make check-website-docs"),
+                               (".mintlify/config.json", "make check-website-docs"),
+                               ("docs/wall-of-apps.json", "make check-wall-of-apps")]:
+            with self.subTest(path=path):
+                code, calls = self.run_hook([path])
+                self.assertEqual(code, 0)
+                self.assertEqual(calls, [expected])
 
 
 if __name__ == "__main__":

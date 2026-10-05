@@ -6,55 +6,20 @@ import (
 	"testing"
 )
 
-func TestPrintTable_InAppPurchaseImages(t *testing.T) {
-	resp := &InAppPurchaseImagesResponse{
-		Data: []Resource[InAppPurchaseImageAttributes]{
-			{
-				ID: "img-1",
-				Attributes: InAppPurchaseImageAttributes{
-					FileName: "image.png",
-					FileSize: 123,
-					State:    "UPLOAD_COMPLETE",
-				},
-			},
-		},
-	}
-
-	output := captureStdout(t, func() error {
-		return PrintTable(resp)
-	})
-
-	if !strings.Contains(output, "File Name") || !strings.Contains(output, "State") {
-		t.Fatalf("expected header in output, got: %s", output)
-	}
-	if !strings.Contains(output, "image.png") {
-		t.Fatalf("expected file name in output, got: %s", output)
+func TestPrintTable_InAppPurchaseVersions(t *testing.T) {
+	resp := &InAppPurchaseVersionsResponse{Data: []Resource[InAppPurchaseVersionAttributes]{{ID: "version-1", Attributes: InAppPurchaseVersionAttributes{Version: 2, State: "READY_FOR_REVIEW"}}}}
+	output := captureStdout(t, func() error { return PrintTable(resp) })
+	if !strings.Contains(output, "Version") || !strings.Contains(output, "READY_FOR_REVIEW") {
+		t.Fatalf("unexpected output: %s", output)
 	}
 }
 
-func TestPrintMarkdown_InAppPurchaseImages(t *testing.T) {
-	resp := &InAppPurchaseImagesResponse{
-		Data: []Resource[InAppPurchaseImageAttributes]{
-			{
-				ID: "img-1",
-				Attributes: InAppPurchaseImageAttributes{
-					FileName: "image.png",
-					FileSize: 123,
-					State:    "UPLOAD_COMPLETE",
-				},
-			},
-		},
-	}
-
-	output := captureStdout(t, func() error {
-		return PrintMarkdown(resp)
-	})
-
-	if !strings.Contains(output, "ID") || !strings.Contains(output, "File Name") {
-		t.Fatalf("expected markdown header, got: %s", output)
-	}
-	if !strings.Contains(output, "UPLOAD_COMPLETE") {
-		t.Fatalf("expected state in output, got: %s", output)
+func TestPrintTable_InAppPurchaseImagesV2(t *testing.T) {
+	state := "COMPLETE"
+	resp := &InAppPurchaseImagesV2Response{Data: []Resource[InAppPurchaseImageV2Attributes]{{ID: "image-1", Attributes: InAppPurchaseImageV2Attributes{FileName: "review.png", FileSize: 123, AssetDeliveryState: &AppMediaAssetState{State: &state}}}}}
+	output := captureStdout(t, func() error { return PrintTable(resp) })
+	if !strings.Contains(output, "review.png") || !strings.Contains(output, "COMPLETE") {
+		t.Fatalf("unexpected output: %s", output)
 	}
 }
 
@@ -181,6 +146,41 @@ func TestPrintTable_InAppPurchasePrices(t *testing.T) {
 	}
 	if !strings.Contains(output, "USA") {
 		t.Fatalf("expected territory in output, got: %s", output)
+	}
+}
+
+func TestPrintTable_InAppPurchaseOfferCodeFreePrice(t *testing.T) {
+	relationships := json.RawMessage(`{"territory":{"data":{"type":"territories","id":"USA"}},"pricePoint":{"data":null}}`)
+	resp := &InAppPurchaseOfferPricesResponse{
+		Data: []Resource[InAppPurchaseOfferPriceAttributes]{
+			{
+				ID:            "offer-price-1",
+				Relationships: relationships,
+			},
+		},
+	}
+
+	output := captureStdout(t, func() error {
+		return PrintTable(resp)
+	})
+
+	if !strings.Contains(output, "USA") || !strings.Contains(output, "FREE") {
+		t.Fatalf("expected free offer price in output, got: %s", output)
+	}
+}
+
+func TestInAppPurchaseOfferPriceRelationshipIDs_MissingPricePointIsUnknown(t *testing.T) {
+	relationships := json.RawMessage(`{"territory":{"data":{"type":"territories","id":"USA"}}}`)
+
+	territoryID, pricePointID, err := inAppPurchaseOfferPriceRelationshipIDs(relationships)
+	if err != nil {
+		t.Fatalf("unexpected relationship decode error: %v", err)
+	}
+	if territoryID != "USA" {
+		t.Fatalf("expected territory USA, got %q", territoryID)
+	}
+	if pricePointID != "" {
+		t.Fatalf("expected an unknown price point when the relationship is absent, got %q", pricePointID)
 	}
 }
 

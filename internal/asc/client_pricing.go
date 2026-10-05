@@ -89,8 +89,9 @@ func (c *Client) GetAppPricePoint(ctx context.Context, pricePointID string) (*Ap
 	}
 
 	response := AppPricePointsV3Response{
-		Data:  []Resource[AppPricePointV3Attributes]{single.Data},
-		Links: single.Links,
+		Data:     []Resource[AppPricePointV3Attributes]{single.Data},
+		Links:    single.Links,
+		Included: single.Included,
 	}
 
 	return &response, nil
@@ -525,7 +526,7 @@ func (c *Client) GetTerritoryAvailabilities(ctx context.Context, availabilityID 
 		path = query.nextURL
 	} else {
 		values := url.Values{}
-		values.Set("fields[territoryAvailabilities]", "available,releaseDate,preOrderEnabled,territory")
+		values.Set("fields[territoryAvailabilities]", "available,releaseDate,preOrderEnabled,contentStatuses,territory")
 		values.Set("include", "territory")
 		addLimit(values, query.limit)
 		path += "?" + values.Encode()
@@ -575,8 +576,8 @@ func (c *Client) GetAppAvailabilityV2TerritoryAvailabilitiesRelationships(ctx co
 	return &response, nil
 }
 
-// CreateAppAvailabilityV2 calls POST /v2/appAvailabilities.
-// Apple documents this endpoint as app pre-order creation, not generic app-availability bootstrap.
+// CreateAppAvailabilityV2 creates an app availability and its inline territory availabilities.
+// It calls POST /v2/appAvailabilities.
 func (c *Client) CreateAppAvailabilityV2(ctx context.Context, appID string, attrs AppAvailabilityV2CreateAttributes) (*AppAvailabilityV2Response, error) {
 	appID = strings.TrimSpace(appID)
 	if appID == "" {
@@ -740,7 +741,9 @@ func (c *Client) UpdateTerritoryAvailability(ctx context.Context, territoryAvail
 	}
 
 	path := fmt.Sprintf("/v1/territoryAvailabilities/%s", territoryAvailabilityID)
-	data, err := c.do(ctx, "PATCH", path, body)
+	// This PATCH sets exact values rather than applying a transition, so replaying
+	// the same payload after a transient failure is safe.
+	data, err := c.doIdempotentMutation(ctx, "PATCH", path, body)
 	if err != nil {
 		return nil, err
 	}

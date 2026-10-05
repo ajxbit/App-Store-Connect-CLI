@@ -25,18 +25,18 @@ func ShotsRunCommand() *ffcli.Command {
 	return &ffcli.Command{
 		Name:       "run",
 		ShortUsage: "asc screenshots run [--plan .asc/screenshots.json] [flags]",
-		ShortHelp:  "[experimental] Run a deterministic screenshot sequence from JSON.",
-		LongHelp: `Run a deterministic screenshot automation sequence (experimental).
+		ShortHelp:  "Run a deterministic screenshot sequence from JSON.",
+		LongHelp: `Run a deterministic screenshot automation sequence.
 
 By default it loads .asc/screenshots.json from the current project root.
 Supported actions: launch, tap, type, wait, wait_for (polling), screenshot.`,
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
-			planPathVal := strings.TrimSpace(*planPath)
-			if planPathVal == "" {
+			planPathVal := *planPath
+			if strings.TrimSpace(planPathVal) == "" {
 				fmt.Fprintln(os.Stderr, "Error: --plan is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--plan")
 			}
 
 			absPlanPath, err := filepath.Abs(planPathVal)
@@ -55,7 +55,7 @@ Supported actions: launch, tap, type, wait, wait_for (polling), screenshot.`,
 			if override := strings.TrimSpace(*udid); override != "" {
 				plan.App.UDID = override
 			}
-			if override := strings.TrimSpace(*outputDir); override != "" {
+			if override := *outputDir; strings.TrimSpace(override) != "" {
 				plan.App.OutputDir = override
 			}
 

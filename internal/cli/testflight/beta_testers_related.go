@@ -40,8 +40,8 @@ Examples:
 func BetaTestersAppsListCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("apps list", flag.ExitOnError)
 
-	testerID := fs.String("tester-id", "", "Beta tester ID")
-	aliasID := fs.String("id", "", "Beta tester ID (alias of --tester-id)")
+	testerID := shared.BindResourceIDFlag(fs, "tester-id", "betaTesters", "Beta tester ID")
+	aliasID := shared.BindResourceIDFlag(fs, "id", "betaTesters", "Beta tester ID (alias of --tester-id)")
 	limit := fs.Int("limit", 0, "Maximum results per page (1-200)")
 	next := fs.String("next", "", "Fetch next page using a links.next URL")
 	paginate := fs.Bool("paginate", false, "Automatically fetch all pages (aggregate results)")
@@ -60,10 +60,14 @@ Examples:
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
 			if *limit != 0 && (*limit < 1 || *limit > 200) {
-				return fmt.Errorf("testflight beta-testers apps list: --limit must be between 1 and 200")
+				return shared.WithDiagnostic(
+					shared.UsageErrorCtx(ctx, "testflight beta-testers apps list: --limit must be between 1 and 200"),
+					shared.DiagnosticInvalidInput,
+					"--limit",
+				)
 			}
 			if err := shared.ValidateNextURL(*next); err != nil {
-				return fmt.Errorf("testflight beta-testers apps list: %w", err)
+				return shared.UsageErrorfCtx(ctx, "testflight beta-testers apps list: %v", err)
 			}
 
 			testerValue := strings.TrimSpace(*testerID)
@@ -71,11 +75,15 @@ Examples:
 			if testerValue == "" {
 				testerValue = aliasValue
 			} else if aliasValue != "" && aliasValue != testerValue {
-				return fmt.Errorf("testflight beta-testers apps list: --tester-id and --id must match")
+				return shared.WithDiagnostic(
+					shared.NewValidationError(fmt.Errorf("testflight beta-testers apps list: --tester-id and --id must match")),
+					shared.DiagnosticConflictingInput,
+					"",
+				)
 			}
 			if testerValue == "" && strings.TrimSpace(*next) == "" {
 				fmt.Fprintln(os.Stderr, "Error: --tester-id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--tester-id")
 			}
 
 			client, err := shared.GetASCClient()
@@ -94,10 +102,11 @@ Examples:
 			if *paginate {
 				if testerValue == "" {
 					fmt.Fprintln(os.Stderr, "Error: --tester-id is required")
-					return flag.ErrHelp
+					return shared.MissingRequiredUsageError("--tester-id")
 				}
 				paginateOpts := append(opts, asc.WithBetaTesterAppsLimit(200))
-				resp, err := shared.PaginateWithSpinner(requestCtx,
+				resp, err := shared.PaginateWithSpinner(
+					requestCtx,
 					func(ctx context.Context) (asc.PaginatedResponse, error) {
 						return client.GetBetaTesterApps(ctx, testerValue, paginateOpts...)
 					},
@@ -148,8 +157,8 @@ Examples:
 func BetaTestersBetaGroupsListCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("beta-groups list", flag.ExitOnError)
 
-	testerID := fs.String("tester-id", "", "Beta tester ID")
-	aliasID := fs.String("id", "", "Beta tester ID (alias of --tester-id)")
+	testerID := shared.BindResourceIDFlag(fs, "tester-id", "betaTesters", "Beta tester ID")
+	aliasID := shared.BindResourceIDFlag(fs, "id", "betaTesters", "Beta tester ID (alias of --tester-id)")
 	limit := fs.Int("limit", 0, "Maximum results per page (1-200)")
 	next := fs.String("next", "", "Fetch next page using a links.next URL")
 	paginate := fs.Bool("paginate", false, "Automatically fetch all pages (aggregate results)")
@@ -168,10 +177,14 @@ Examples:
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
 			if *limit != 0 && (*limit < 1 || *limit > 200) {
-				return fmt.Errorf("testflight beta-testers beta-groups list: --limit must be between 1 and 200")
+				return shared.WithDiagnostic(
+					shared.UsageErrorCtx(ctx, "testflight beta-testers beta-groups list: --limit must be between 1 and 200"),
+					shared.DiagnosticInvalidInput,
+					"--limit",
+				)
 			}
 			if err := shared.ValidateNextURL(*next); err != nil {
-				return fmt.Errorf("testflight beta-testers beta-groups list: %w", err)
+				return shared.UsageErrorfCtx(ctx, "testflight beta-testers beta-groups list: %v", err)
 			}
 
 			testerValue := strings.TrimSpace(*testerID)
@@ -179,11 +192,15 @@ Examples:
 			if testerValue == "" {
 				testerValue = aliasValue
 			} else if aliasValue != "" && aliasValue != testerValue {
-				return fmt.Errorf("testflight beta-testers beta-groups list: --tester-id and --id must match")
+				return shared.WithDiagnostic(
+					shared.NewValidationError(fmt.Errorf("testflight beta-testers beta-groups list: --tester-id and --id must match")),
+					shared.DiagnosticConflictingInput,
+					"",
+				)
 			}
 			if testerValue == "" && strings.TrimSpace(*next) == "" {
 				fmt.Fprintln(os.Stderr, "Error: --tester-id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--tester-id")
 			}
 
 			client, err := shared.GetASCClient()
@@ -202,10 +219,11 @@ Examples:
 			if *paginate {
 				if testerValue == "" {
 					fmt.Fprintln(os.Stderr, "Error: --tester-id is required")
-					return flag.ErrHelp
+					return shared.MissingRequiredUsageError("--tester-id")
 				}
 				paginateOpts := append(opts, asc.WithBetaTesterBetaGroupsLimit(200))
-				resp, err := shared.PaginateWithSpinner(requestCtx,
+				resp, err := shared.PaginateWithSpinner(
+					requestCtx,
 					func(ctx context.Context) (asc.PaginatedResponse, error) {
 						return client.GetBetaTesterBetaGroups(ctx, testerValue, paginateOpts...)
 					},
@@ -256,8 +274,8 @@ Examples:
 func BetaTestersBuildsListCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("builds list", flag.ExitOnError)
 
-	testerID := fs.String("tester-id", "", "Beta tester ID")
-	aliasID := fs.String("id", "", "Beta tester ID (alias of --tester-id)")
+	testerID := shared.BindResourceIDFlag(fs, "tester-id", "betaTesters", "Beta tester ID")
+	aliasID := shared.BindResourceIDFlag(fs, "id", "betaTesters", "Beta tester ID (alias of --tester-id)")
 	limit := fs.Int("limit", 0, "Maximum results per page (1-200)")
 	next := fs.String("next", "", "Fetch next page using a links.next URL")
 	paginate := fs.Bool("paginate", false, "Automatically fetch all pages (aggregate results)")
@@ -276,10 +294,14 @@ Examples:
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
 			if *limit != 0 && (*limit < 1 || *limit > 200) {
-				return fmt.Errorf("testflight beta-testers builds list: --limit must be between 1 and 200")
+				return shared.WithDiagnostic(
+					shared.UsageErrorCtx(ctx, "testflight beta-testers builds list: --limit must be between 1 and 200"),
+					shared.DiagnosticInvalidInput,
+					"--limit",
+				)
 			}
 			if err := shared.ValidateNextURL(*next); err != nil {
-				return fmt.Errorf("testflight beta-testers builds list: %w", err)
+				return shared.UsageErrorfCtx(ctx, "testflight beta-testers builds list: %v", err)
 			}
 
 			testerValue := strings.TrimSpace(*testerID)
@@ -287,11 +309,15 @@ Examples:
 			if testerValue == "" {
 				testerValue = aliasValue
 			} else if aliasValue != "" && aliasValue != testerValue {
-				return fmt.Errorf("testflight beta-testers builds list: --tester-id and --id must match")
+				return shared.WithDiagnostic(
+					shared.NewValidationError(fmt.Errorf("testflight beta-testers builds list: --tester-id and --id must match")),
+					shared.DiagnosticConflictingInput,
+					"",
+				)
 			}
 			if testerValue == "" && strings.TrimSpace(*next) == "" {
 				fmt.Fprintln(os.Stderr, "Error: --tester-id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--tester-id")
 			}
 
 			client, err := shared.GetASCClient()
@@ -310,10 +336,11 @@ Examples:
 			if *paginate {
 				if testerValue == "" {
 					fmt.Fprintln(os.Stderr, "Error: --tester-id is required")
-					return flag.ErrHelp
+					return shared.MissingRequiredUsageError("--tester-id")
 				}
 				paginateOpts := append(opts, asc.WithBetaTesterBuildsLimit(200))
-				resp, err := shared.PaginateWithSpinner(requestCtx,
+				resp, err := shared.PaginateWithSpinner(
+					requestCtx,
 					func(ctx context.Context) (asc.PaginatedResponse, error) {
 						return client.GetBetaTesterBuilds(ctx, testerValue, paginateOpts...)
 					},

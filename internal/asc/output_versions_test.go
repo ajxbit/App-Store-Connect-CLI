@@ -1,6 +1,8 @@
 package asc
 
 import (
+	"reflect"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -120,6 +122,31 @@ func TestAppStoreVersionsRows_UsesDisplayPlatform(t *testing.T) {
 	}
 }
 
+func TestPrintTable_AppStoreVersionsLatestResult(t *testing.T) {
+	result := &AppStoreVersionsLatestResult{
+		Items: []Resource[AppStoreVersionAttributes]{
+			{
+				ID: "v1",
+				Attributes: AppStoreVersionAttributes{
+					VersionString: "2.4.1",
+					Platform:      PlatformIOS,
+					AppStoreState: "READY_FOR_SALE",
+					CreatedDate:   "2026-02-20T00:30:00Z",
+				},
+			},
+		},
+		TotalCount: 1,
+		HasMore:    false,
+	}
+
+	output := captureStdout(t, func() error {
+		return PrintTable(result)
+	})
+	if !strings.Contains(output, "2.4.1") || !strings.Contains(output, "iOS") {
+		t.Fatalf("expected latest-version table row, got %q", output)
+	}
+}
+
 func TestPreReleaseVersionsRows_UsesDisplayPlatform(t *testing.T) {
 	t.Parallel()
 
@@ -182,5 +209,69 @@ func TestSubmissionAndVersionDetailRows_UseDisplayPlatform(t *testing.T) {
 	}
 	if detailRows[0][2] != "CAR_OS" {
 		t.Fatalf("expected unknown detail platform passthrough CAR_OS, got %q", detailRows[0][2])
+	}
+}
+
+func TestAppStoreVersionDetailRows_IdempotentWriteReceipt(t *testing.T) {
+	t.Parallel()
+
+	headers, rows := appStoreVersionDetailRows(&AppStoreVersionDetailResult{
+		ID:            "v2",
+		VersionString: "2.0",
+		IdempotentWriteReceipt: IdempotentWriteReceipt{
+			AlreadyExists: true,
+			Action:        IdempotentWriteActionSkipped,
+		},
+	})
+
+	if len(rows) != 1 {
+		t.Fatalf("rows = %v, want one row", rows)
+	}
+	if got, want := headers[len(headers)-2:], []string{"Already Exists", "Action"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("receipt headers = %v, want %v", got, want)
+	}
+	if got, want := rows[0][len(rows[0])-2:], []string{"true", IdempotentWriteActionSkipped}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("receipt cells = %v, want %v", got, want)
+	}
+
+	legacyHeaders, legacyRows := appStoreVersionDetailRows(&AppStoreVersionDetailResult{ID: "v3"})
+	if slices.Contains(legacyHeaders, "Action") || slices.Contains(legacyHeaders, "Already Exists") {
+		t.Fatalf("legacy fail-mode headers = %v, want no receipt columns", legacyHeaders)
+	}
+	if len(legacyRows) != 1 || len(legacyRows[0]) != len(legacyHeaders) {
+		t.Fatalf("legacy rows = %v headers = %v, want aligned unchanged output", legacyRows, legacyHeaders)
+	}
+}
+
+func TestPrintTable_AppStoreVersionRatingResetCreateResult(t *testing.T) {
+	result := &AppStoreVersionRatingResetCreateResult{
+		RatingResetRequestID: "reset-123",
+		VersionID:            "version-123",
+		Scheduled:            true,
+	}
+
+	output := captureStdout(t, func() error {
+		return PrintTable(result)
+	})
+	for _, want := range []string{"Rating Reset Request ID", "Version ID", "Scheduled", "reset-123", "version-123", "true"} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("output = %q, want %q", output, want)
+		}
+	}
+}
+
+func TestPrintMarkdown_AppStoreVersionRatingResetDeleteResult(t *testing.T) {
+	result := &AppStoreVersionRatingResetDeleteResult{
+		RatingResetRequestID: "reset-123",
+		Cancelled:            true,
+	}
+
+	output := captureStdout(t, func() error {
+		return PrintMarkdown(result)
+	})
+	for _, want := range []string{"Rating Reset Request ID", "Cancelled", "reset-123", "true"} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("output = %q, want %q", output, want)
+		}
 	}
 }

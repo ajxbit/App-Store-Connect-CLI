@@ -13,6 +13,10 @@ import (
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/cli/shared"
 )
 
+// betaGroupIDNotFoundHint tells an operator which ID --group-id expects when
+// App Store Connect does not know the beta group the flag named.
+const betaGroupIDNotFoundHint = `--group-id expects a beta group ID (list them with: asc testflight groups list --app "APP_ID")`
+
 var betaGroupRelationshipKinds = map[string]relationshipKind{
 	"betaTesters": relationshipList,
 	"builds":      relationshipList,
@@ -29,8 +33,8 @@ func BetaGroupsRelationshipsCommand() *ffcli.Command {
 		LongHelp: `View beta group relationship linkages.
 
 Examples:
-  asc testflight beta-groups relationships get --group-id "GROUP_ID" --type "betaTesters"
-  asc testflight beta-groups relationships get --group-id "GROUP_ID" --type "builds" --paginate`,
+  asc testflight beta-groups relationships view --group-id "GROUP_ID" --type "betaTesters"
+  asc testflight beta-groups relationships view --group-id "GROUP_ID" --type "builds" --paginate`,
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
 		Subcommands: []*ffcli.Command{
@@ -44,45 +48,48 @@ Examples:
 
 // BetaGroupsRelationshipsGetCommand returns the beta-groups relationships get subcommand.
 func BetaGroupsRelationshipsGetCommand() *ffcli.Command {
-	fs := flag.NewFlagSet("relationships get", flag.ExitOnError)
+	fs := flag.NewFlagSet("relationships view", flag.ExitOnError)
 
-	groupID := fs.String("group-id", "", "Beta group ID")
-	aliasID := fs.String("id", "", "Beta group ID (alias of --group-id)")
-	relType := fs.String("type", "", "Relationship type: "+strings.Join(relationshipTypeList(betaGroupRelationshipKinds), ", "))
+	groupID := shared.BindResourceIDFlag(fs, "group-id", "betaGroups", "Beta group ID")
+	aliasID := shared.BindResourceIDFlag(fs, "id", "betaGroups", "Beta group ID (alias of --group-id)")
+	relType := fs.String("type", "", shared.RelationshipTypeFlagUsage(relationshipTypeList(betaGroupRelationshipKinds)))
 	limit := fs.Int("limit", 0, "Maximum results per page (1-200)")
 	next := fs.String("next", "", "Fetch next page using a links.next URL")
 	paginate := fs.Bool("paginate", false, "Automatically fetch all pages (aggregate results)")
 	output := shared.BindOutputFlags(fs)
 
 	return &ffcli.Command{
-		Name:       "get",
-		ShortUsage: "asc testflight beta-groups relationships get --group-id \"GROUP_ID\" --type \"RELATIONSHIP\" [flags]",
-		ShortHelp:  "Get beta group relationship linkages.",
-		LongHelp: `Get beta group relationship linkages.
+		Name:       "view",
+		ShortUsage: "asc testflight beta-groups relationships view --group-id \"GROUP_ID\" --type \"RELATIONSHIP\" [flags]",
+		ShortHelp:  "View beta group relationship linkages.",
+		LongHelp: `View beta group relationship linkages.
 
 Examples:
-  asc testflight beta-groups relationships get --group-id "GROUP_ID" --type "betaTesters"
-  asc testflight beta-groups relationships get --group-id "GROUP_ID" --type "builds" --paginate`,
+  asc testflight beta-groups relationships view --group-id "GROUP_ID" --type "betaTesters"
+  asc testflight beta-groups relationships view --group-id "GROUP_ID" --type "builds" --paginate`,
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
 			if *limit != 0 && (*limit < 1 || *limit > 200) {
-				return fmt.Errorf("testflight beta-groups relationships get: --limit must be between 1 and 200")
+				return shared.WithDiagnostic(
+					shared.UsageErrorCtx(ctx, "testflight beta-groups relationships view: --limit must be between 1 and 200"),
+					shared.DiagnosticInvalidInput,
+					"--limit",
+				)
 			}
 			if err := shared.ValidateNextURL(*next); err != nil {
-				return fmt.Errorf("testflight beta-groups relationships get: %w", err)
+				return shared.UsageErrorfCtx(ctx, "testflight beta-groups relationships view: %v", err)
 			}
 
 			relationshipType := strings.TrimSpace(*relType)
 			if relationshipType == "" {
-				fmt.Fprintln(os.Stderr, "Error: --type is required")
-				return flag.ErrHelp
+				return shared.MissingRelationshipTypeUsageError(relationshipTypeList(betaGroupRelationshipKinds))
 			}
 
 			kind, ok := betaGroupRelationshipKinds[relationshipType]
 			if !ok {
-				fmt.Fprintf(os.Stderr, "Error: --type must be one of: %s\n", strings.Join(relationshipTypeList(betaGroupRelationshipKinds), ", "))
-				return flag.ErrHelp
+				shared.PrintInvalidRelationshipTypeError(relationshipType, relationshipTypeList(betaGroupRelationshipKinds))
+				return shared.WithDiagnostic(flag.ErrHelp, shared.DiagnosticInvalidInput, "--type")
 			}
 
 			groupValue := strings.TrimSpace(*groupID)
@@ -90,23 +97,27 @@ Examples:
 			if groupValue == "" {
 				groupValue = aliasValue
 			} else if aliasValue != "" && aliasValue != groupValue {
-				return fmt.Errorf("testflight beta-groups relationships get: --group-id and --id must match")
+				return shared.WithDiagnostic(
+					shared.NewValidationError(fmt.Errorf("testflight beta-groups relationships view: --group-id and --id must match")),
+					shared.DiagnosticConflictingInput,
+					"",
+				)
 			}
 
 			nextValue := strings.TrimSpace(*next)
 			if groupValue == "" && nextValue == "" {
 				fmt.Fprintln(os.Stderr, "Error: --group-id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--group-id")
 			}
 
 			if kind == relationshipSingle && (nextValue != "" || *paginate || *limit != 0) {
 				fmt.Fprintln(os.Stderr, "Error: --limit, --next, and --paginate are only valid for to-many relationships")
-				return flag.ErrHelp
+				return shared.WithDiagnostic(flag.ErrHelp, shared.DiagnosticConflictingInput, "")
 			}
 
 			client, err := shared.GetASCClient()
 			if err != nil {
-				return fmt.Errorf("testflight beta-groups relationships get: %w", err)
+				return fmt.Errorf("testflight beta-groups relationships view: %w", err)
 			}
 
 			requestCtx, cancel := shared.ContextWithTimeout(ctx)
@@ -117,18 +128,43 @@ Examples:
 				asc.WithLinkagesNextURL(*next),
 			}
 
+			// A next-page URL replaces the group path in the request, so a
+			// 404 belongs to that URL rather than to --group-id.
+			parent := shared.RelationshipParent{
+				ResourceType: "betaGroups",
+				Label:        "beta group",
+				ID:           groupValue,
+				Hint:         betaGroupIDNotFoundHint,
+			}
+			if nextValue != "" {
+				parent.ID = ""
+			}
+			// Every page after the first is addressed by the previous
+			// response's next URL, so a 404 there belongs to that URL.
+			pageParent := parent
+			pageParent.ID = ""
+
 			if *paginate {
 				paginateOpts := append(opts, asc.WithLinkagesLimit(200))
-				resp, err := shared.PaginateWithSpinner(requestCtx,
+				resp, err := shared.PaginateWithSpinner(
+					requestCtx,
 					func(ctx context.Context) (asc.PaginatedResponse, error) {
-						return getBetaGroupRelationshipList(ctx, client, relationshipType, groupValue, paginateOpts...)
+						page, err := getBetaGroupRelationshipList(ctx, client, relationshipType, groupValue, paginateOpts...)
+						if err != nil {
+							return nil, shared.DescribeRelationshipLookupFailure(err, relationshipType, parent)
+						}
+						return page, nil
 					},
 					func(ctx context.Context, nextURL string) (asc.PaginatedResponse, error) {
-						return getBetaGroupRelationshipList(ctx, client, relationshipType, groupValue, asc.WithLinkagesNextURL(nextURL))
+						page, err := getBetaGroupRelationshipList(ctx, client, relationshipType, groupValue, asc.WithLinkagesNextURL(nextURL))
+						if err != nil {
+							return nil, shared.DescribeRelationshipLookupFailure(err, relationshipType, pageParent)
+						}
+						return page, nil
 					},
 				)
 				if err != nil {
-					return fmt.Errorf("testflight beta-groups relationships get: %w", err)
+					return fmt.Errorf("testflight beta-groups relationships view: %w", err)
 				}
 
 				return shared.PrintOutput(resp, *output.Output, *output.Pretty)
@@ -136,7 +172,7 @@ Examples:
 
 			resp, err := getBetaGroupRelationshipList(requestCtx, client, relationshipType, groupValue, opts...)
 			if err != nil {
-				return fmt.Errorf("testflight beta-groups relationships get: %w", err)
+				return fmt.Errorf("testflight beta-groups relationships view: %w", shared.DescribeRelationshipLookupFailure(err, relationshipType, parent))
 			}
 			return shared.PrintOutput(resp, *output.Output, *output.Pretty)
 		},
@@ -150,6 +186,10 @@ func getBetaGroupRelationshipList(ctx context.Context, client *asc.Client, relat
 	case "builds":
 		return client.GetBetaGroupBuildsRelationships(ctx, groupID, opts...)
 	default:
-		return nil, fmt.Errorf("unsupported relationship type %q", relationshipType)
+		return nil, shared.WithDiagnostic(
+			shared.NewValidationError(fmt.Errorf("unsupported relationship type %q", relationshipType)),
+			shared.DiagnosticInvalidInput,
+			"--type",
+		)
 	}
 }

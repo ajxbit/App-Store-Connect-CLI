@@ -2,7 +2,7 @@
 
 > Request and download analytics and sales reports from App Store Connect
 
-The `analytics` command group provides access to App Store analytics data and sales reports. You can request analytics reports, check their status, and download the generated data.
+The `analytics` command group provides access to App Store analytics data and sales reports. You can request analytics reports, list requests and available reports, and download the generated data.
 
 ## Overview
 
@@ -30,23 +30,29 @@ asc analytics sales \
 **Required Flags:**
 
 * `--vendor` - Vendor number (or `ASC_VENDOR_NUMBER` env)
-* `--type` - Report type: `SALES`, `PRE_ORDER`, `NEWSSTAND`, `SUBSCRIPTION`, `SUBSCRIPTION_EVENT`
-* `--subtype` - Report subtype: `SUMMARY`, `DETAILED`
+* `--type` - Report type: `SALES`, `PRE_ORDER`, `NEWSSTAND`, `SUBSCRIPTION`, `SUBSCRIPTION_EVENT`, `SUBSCRIBER`, `SUBSCRIPTION_OFFER_CODE_REDEMPTION`, `INSTALLS`, `FIRST_ANNUAL`, `WIN_BACK_ELIGIBILITY`
+* `--subtype` - Report subtype: `SUMMARY`, `DETAILED`, `SUMMARY_INSTALL_TYPE`, `SUMMARY_TERRITORY`, `SUMMARY_CHANNEL`
 * `--frequency` - Frequency: `DAILY`, `WEEKLY`, `MONTHLY`, `YEARLY`
-* `--date` - Report date (format depends on frequency)
 
 **Date Formats:**
 
 * **Daily**: `YYYY-MM-DD`
 * **Weekly**: `YYYY-MM-DD` (Monday start or Sunday end)
-* **Monthly**: `YYYY-MM`
-* **Yearly**: `YYYY`
+* **Monthly**: `YYYY-MM` or `YYYY-MM-DD`
+* **Yearly**: `YYYY` or `YYYY-MM-DD`
+
+For `DAILY` reports, omit `--date` to download the latest available report. `--date` is required for `WEEKLY`, `MONTHLY`, and `YEARLY` reports.
+For monthly and yearly reports, the CLI reduces a full date to its containing month or year. It always sends Apple's live `YYYY-MM` monthly or `YYYY` yearly period identifier on the wire.
+
+The CLI validates the complete type, subtype, frequency, and version combination before authentication. This prevents Apple from receiving combinations that its [Sales Reports endpoint](https://developer.apple.com/documentation/appstoreconnectapi/get-v1-salesreports) explicitly rejects. `SUBSCRIPTION` defaults to the live-verified `1_4`; the CLI also accepts Apple's documented `1_3` for that tuple.
 
 **Optional Flags:**
 
-* `--version` - Report format version: `1_0` (default), `1_1`, `1_3`
-* `--output` - Custom output path (default: `sales_report_{date}_{type}.tsv.gz`)
+* `--date` - Report date in the frequency-specific format above; optional for `DAILY`
+* `--version` - Report format version allowed for the selected type, subtype, and frequency
+* `--output` - Custom output path (default: `sales_report_{date|latest}_{type}.tsv.gz`)
 * `--decompress` - Decompress to `.tsv` format
+* `--allow-missing` - Return successful metadata with `available: false` instead of creating a file when no report exists for the requested date. Without this flag, the API error remains unchanged.
 
 **Examples:**
 
@@ -59,13 +65,22 @@ asc analytics sales \
   --frequency DAILY \
   --date "2024-01-20"
 
-# Weekly subscription report with decompression
+# Poll a date without treating an unavailable report as a failed job
 asc analytics sales \
   --vendor "12345678" \
-  --type SUBSCRIPTION \
+  --type SALES \
+  --subtype SUMMARY \
+  --frequency DAILY \
+  --date "2024-01-20" \
+  --allow-missing \
+  --output-format json
+
+# Latest subscriber report with decompression
+asc analytics sales \
+  --vendor "12345678" \
+  --type SUBSCRIBER \
   --subtype DETAILED \
-  --frequency WEEKLY \
-  --date "2024-01-15" \
+  --frequency DAILY \
   --decompress
 
 # Monthly report with custom output path
@@ -111,7 +126,7 @@ asc analytics requests --app "123456789"
 **Optional Flags:**
 
 * `--request-id` - Filter by specific request ID
-* `--state` - Filter by state: `PROCESSING`, `COMPLETED`, `FAILED`
+* `--access-type` - Filter by access type: `ONGOING`, `ONE_TIME_SNAPSHOT`
 * `--limit` - Results per page (1-200)
 * `--paginate` - Fetch all pages automatically
 * `--next` - Pagination URL from previous response
@@ -122,8 +137,8 @@ asc analytics requests --app "123456789"
 # List all requests
 asc analytics requests --app "123456789"
 
-# Filter by completed requests
-asc analytics requests --app "123456789" --state COMPLETED
+# Filter by ongoing requests
+asc analytics requests --app "123456789" --access-type ONGOING
 
 # Get specific request
 asc analytics requests --request-id "abc-123-def"
@@ -136,7 +151,9 @@ asc analytics requests --app "123456789" --paginate
 
 Retrieve available analytics reports and instances for a request.
 
-`asc analytics get` still works as a deprecated compatibility alias, but `asc analytics view` is the canonical command.
+When viewing all reports without `--instance-id`, report-instance requests use
+bounded parallelism while preserving report order. If one request fails, the
+remaining sibling requests are canceled and the original failure is returned.
 
 ```bash  theme={null}
 asc analytics view --request-id "REQUEST_ID"
@@ -149,11 +166,12 @@ asc analytics view --request-id "REQUEST_ID"
 **Optional Flags:**
 
 * `--instance-id` - Filter by specific report instance
-* `--date` - Filter instances by date (`YYYY-MM-DD`)
+* `--processing-date` - Filter instances by Apple's processing date (`YYYY-MM-DD`)
+* `--granularity` - Filter instances by `DAILY`, `WEEKLY`, or `MONTHLY` (comma-separated)
 * `--include-segments` - Include download URLs for report segments
 * `--limit` - Results per page (1-200)
-* `--paginate` - Fetch all reports (recommended with `--date`)
-* `--next` - Pagination URL
+* `--paginate` - Fetch all reports (recommended with `--processing-date` or `--next`)
+* `--next` - Report-page `links.next` URL; combine with `--paginate` to resume and fetch every remaining page
 
 **Examples:**
 
@@ -166,16 +184,21 @@ asc analytics view \
   --request-id "REQUEST_ID" \
   --include-segments
 
-# Filter by date and paginate
+# Filter by processing date and paginate
 asc analytics view \
   --request-id "REQUEST_ID" \
-  --date "2024-01-20" \
+  --processing-date "2024-01-20" \
   --paginate
 
 # Get specific instance
 asc analytics view \
   --request-id "REQUEST_ID" \
   --instance-id "INSTANCE_ID"
+
+# Resume from a saved report-page link and fetch the remaining pages
+asc analytics view \
+  --next "<links.next>" \
+  --paginate
 ```
 
 ### Download Report Data
@@ -333,10 +356,10 @@ asc analytics request \
   --app "$ASC_APP_ID" \
   --access-type ONGOING
 
-# 2. Check for new reports
+# 2. List the ongoing request and its available reports
 asc analytics requests \
   --app "$ASC_APP_ID" \
-  --state COMPLETED
+  --access-type ONGOING
 
 # 3. Download latest data
 asc analytics download \

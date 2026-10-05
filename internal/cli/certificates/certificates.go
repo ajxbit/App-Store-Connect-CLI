@@ -16,6 +16,8 @@ import (
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/cli/shared"
 )
 
+var getCertificatesASCClient = shared.GetASCClient
+
 // CertificatesCommand returns the certificates command with subcommands.
 func CertificatesCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("certificates", flag.ExitOnError)
@@ -29,8 +31,10 @@ func CertificatesCommand() *ffcli.Command {
 Examples:
   asc certificates list
   asc certificates list --certificate-type IOS_DISTRIBUTION
-  asc certificates get --id "CERT_ID" --include passTypeId
+  asc certificates view --id "CERT_ID" --include passTypeId
+  asc certificates export --certificate "./push/push.cer" --private-key "./push/push.key" --password-file "./secrets/push.p12.password" --p12-out "./push/push.p12"
   asc certificates create --certificate-type IOS_DISTRIBUTION --csr "./cert.csr"
+  asc certificates create --certificate-type PASS_TYPE_ID --pass-type-id "PASS_TYPE_ID" --csr "./pass.csr"
   asc certificates update --id "CERT_ID" --activated true
   asc certificates update --id "CERT_ID" --activated false
   asc certificates revoke --id "CERT_ID" --confirm
@@ -41,6 +45,7 @@ Examples:
 			CertificatesListCommand(),
 			CertificatesGetCommand(),
 			CertificatesCSRCommand(),
+			CertificatesExportCommand(),
 			CertificatesCreateCommand(),
 			CertificatesUpdateCommand(),
 			CertificatesRevokeCommand(),
@@ -57,6 +62,13 @@ func CertificatesListCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("list", flag.ExitOnError)
 
 	certificateType := fs.String("certificate-type", "", "Filter by certificate type(s), comma-separated")
+	displayName := fs.String("display-name", "", "Filter by display name(s), comma-separated")
+	serialNumber := fs.String("serial-number", "", "Filter by serial number(s), comma-separated")
+	ids := fs.String("id", "", "Filter by certificate ID(s), comma-separated")
+	sort := fs.String("sort", "", "Sort by key(s), comma-separated: "+strings.Join(certificateSortList(), ", "))
+	fields := fs.String("fields", "", "Fields to include: "+strings.Join(certificateFieldsList(), ", "))
+	passTypeIDFields := fs.String("pass-type-id-fields", "", "Fields to include for pass type IDs: "+strings.Join(certificatePassTypeIDFieldsList(), ", "))
+	include := fs.String("include", "", "Include relationships: "+strings.Join(certificateIncludeList(), ", "))
 	limit := fs.Int("limit", 0, "Maximum results per page (1-200)")
 	next := fs.String("next", "", "Fetch next page using a links.next URL")
 	paginate := fs.Bool("paginate", false, "Automatically fetch all pages (aggregate results)")
@@ -71,19 +83,83 @@ func CertificatesListCommand() *ffcli.Command {
 Examples:
   asc certificates list
   asc certificates list --certificate-type IOS_DISTRIBUTION
+  asc certificates list --display-name "Example Certificate"
+  asc certificates list --sort "-displayName" --fields "displayName,serialNumber"
   asc certificates list --paginate`,
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
-			if *limit != 0 && (*limit < 1 || *limit > 200) {
-				return fmt.Errorf("certificates list: --limit must be between 1 and 200")
-			}
 			if err := shared.ValidateNextURL(*next); err != nil {
 				return fmt.Errorf("certificates list: %w", err)
 			}
+			if err := shared.RejectNextFlagConflicts(
+				fs,
+				*next,
+				"certificates list",
+				"display-name",
+				"certificate-type",
+				"serial-number",
+				"id",
+				"sort",
+				"fields",
+				"pass-type-id-fields",
+				"include",
+				"limit",
+			); err != nil {
+				return err
+			}
+			provided := map[string]bool{}
+			fs.Visit(func(f *flag.Flag) {
+				provided[f.Name] = true
+			})
+			for _, selector := range []struct {
+				name  string
+				value string
+			}{
+				{name: "certificate-type", value: *certificateType},
+				{name: "display-name", value: *displayName},
+				{name: "serial-number", value: *serialNumber},
+				{name: "id", value: *ids},
+				{name: "sort", value: *sort},
+				{name: "fields", value: *fields},
+				{name: "pass-type-id-fields", value: *passTypeIDFields},
+				{name: "include", value: *include},
+			} {
+				if provided[selector.name] && len(shared.SplitCSV(selector.value)) == 0 {
+					return shared.UsageErrorf("certificates list: --%s must not be empty", selector.name)
+				}
+			}
+			if *limit != 0 && (*limit < 1 || *limit > 200) {
+				return fmt.Errorf("certificates list: --limit must be between 1 and 200")
+			}
+			sortValue, err := normalizeCertificateSort(*sort)
+			if err != nil {
+				return shared.UsageErrorf("certificates list: %v", err)
+			}
+			fieldsValue, err := normalizeCertificateFields(*fields, "--fields")
+			if err != nil {
+				return shared.UsageErrorf("certificates list: %v", err)
+			}
+			passTypeIDFieldsValue, err := normalizeCertificatePassTypeIDFields(*passTypeIDFields, "--pass-type-id-fields")
+			if err != nil {
+				return shared.UsageErrorf("certificates list: %v", err)
+			}
+			includeValues, err := normalizeCertificatesInclude(*include)
+			if err != nil {
+				return shared.UsageErrorf("certificates list: %v", err)
+			}
+			if len(passTypeIDFieldsValue) > 0 && !shared.HasInclude(includeValues, "passTypeId") {
+				const message = "--pass-type-id-fields requires --include passTypeId"
+				fmt.Fprintln(os.Stderr, "Error: "+message)
+				return shared.WithDiagnostic(
+					shared.NewReportedUsageError(shared.UsageErrorInvalidValue, message),
+					shared.DiagnosticInvalidInput,
+					"--pass-type-id-fields",
+				)
+			}
 
 			certificateTypes := shared.SplitCSVUpper(*certificateType)
-
+			displayNames := shared.SplitCSV(*displayName)
 			client, err := shared.GetASCClient()
 			if err != nil {
 				return fmt.Errorf("certificates list: %w", err)
@@ -96,13 +172,37 @@ Examples:
 				asc.WithCertificatesLimit(*limit),
 				asc.WithCertificatesNextURL(*next),
 			}
+			if len(displayNames) > 0 {
+				opts = append(opts, asc.WithCertificatesFilterDisplayNames(displayNames))
+			}
 			if len(certificateTypes) > 0 {
 				opts = append(opts, asc.WithCertificatesTypes(certificateTypes))
+			}
+			serialNumbers := shared.SplitCSV(*serialNumber)
+			if len(serialNumbers) > 0 {
+				opts = append(opts, asc.WithCertificatesFilterSerialNumbers(serialNumbers))
+			}
+			idsValue := shared.SplitCSV(*ids)
+			if len(idsValue) > 0 {
+				opts = append(opts, asc.WithCertificatesFilterIDs(idsValue))
+			}
+			if sortValue != "" {
+				opts = append(opts, asc.WithCertificatesSort(sortValue))
+			}
+			if len(fieldsValue) > 0 {
+				opts = append(opts, asc.WithCertificatesFields(fieldsValue))
+			}
+			if len(passTypeIDFieldsValue) > 0 {
+				opts = append(opts, asc.WithCertificatesPassTypeIDFields(passTypeIDFieldsValue))
+			}
+			if len(includeValues) > 0 {
+				opts = append(opts, asc.WithCertificatesInclude(includeValues))
 			}
 
 			if *paginate {
 				paginateOpts := append(opts, asc.WithCertificatesLimit(200))
-				paginated, err := shared.PaginateWithSpinner(requestCtx,
+				paginated, err := shared.PaginateWithSpinner(
+					requestCtx,
 					func(ctx context.Context) (asc.PaginatedResponse, error) {
 						return client.GetCertificates(ctx, paginateOpts...)
 					},
@@ -127,40 +227,40 @@ Examples:
 	}
 }
 
-// CertificatesGetCommand returns the certificates get subcommand.
+// CertificatesGetCommand returns the certificates view subcommand.
 func CertificatesGetCommand() *ffcli.Command {
-	fs := flag.NewFlagSet("get", flag.ExitOnError)
+	fs := flag.NewFlagSet("view", flag.ExitOnError)
 
-	id := fs.String("id", "", "Certificate ID")
+	id := shared.BindResourceIDFlag(fs, "id", "certificates", "Certificate ID")
 	include := fs.String("include", "", "Include related resources: passTypeId")
 	output := shared.BindOutputFlags(fs)
 
 	return &ffcli.Command{
-		Name:       "get",
-		ShortUsage: "asc certificates get --id \"CERT_ID\" [flags]",
-		ShortHelp:  "Get a signing certificate by ID.",
-		LongHelp: `Get a signing certificate by ID.
+		Name:       "view",
+		ShortUsage: "asc certificates view --id \"CERT_ID\" [flags]",
+		ShortHelp:  "View a signing certificate by ID.",
+		LongHelp: `View a signing certificate by ID.
 
 Examples:
-  asc certificates get --id "CERT_ID"
-  asc certificates get --id "CERT_ID" --include passTypeId`,
+  asc certificates view --id "CERT_ID"
+  asc certificates view --id "CERT_ID" --include passTypeId`,
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
 			idValue := strings.TrimSpace(*id)
 			if idValue == "" {
 				fmt.Fprintln(os.Stderr, "Error: --id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--id")
 			}
 
 			includeValues, err := normalizeCertificatesInclude(*include)
 			if err != nil {
-				return fmt.Errorf("certificates get: %w", err)
+				return fmt.Errorf("certificates view: %w", err)
 			}
 
 			client, err := shared.GetASCClient()
 			if err != nil {
-				return fmt.Errorf("certificates get: %w", err)
+				return fmt.Errorf("certificates view: %w", err)
 			}
 
 			requestCtx, cancel := shared.ContextWithTimeout(ctx)
@@ -173,7 +273,7 @@ Examples:
 
 			resp, err := client.GetCertificate(requestCtx, idValue, opts...)
 			if err != nil {
-				return fmt.Errorf("certificates get: failed to fetch: %w", err)
+				return fmt.Errorf("certificates view: failed to fetch: %w", err)
 			}
 
 			return shared.PrintOutput(resp, *output.Output, *output.Pretty)
@@ -181,64 +281,222 @@ Examples:
 	}
 }
 
+// certificateCreateSpec describes an entry point for POST /v1/certificates.
+// asc certificates create exposes the full surface, while the merchant ID
+// variant scopes every request to one merchant.
+type certificateCreateSpec struct {
+	commandPath      string
+	shortUsage       string
+	shortHelp        string
+	longHelp         string
+	certificateTypes []string
+	supportsPassType bool
+	requireMerchant  bool
+	merchantIDUsage  string
+}
+
 // CertificatesCreateCommand returns the certificates create subcommand.
 func CertificatesCreateCommand() *ffcli.Command {
+	return newCertificateCreateCommand(certificateCreateSpec{
+		commandPath:      "certificates create",
+		shortUsage:       "asc certificates create --certificate-type TYPE [--pass-type-id ID] [--merchant-id ID] (--csr ./cert.csr | --generate-csr --key-out ./cert.key --csr-out ./cert.csr)",
+		shortHelp:        "Create a signing certificate.",
+		certificateTypes: shared.CertificateCreateTypeList(),
+		supportsPassType: true,
+		merchantIDUsage:  "Merchant ID resource ID (required for the APPLE_PAY certificate types)",
+		longHelp: `Create a signing certificate.
+
+Examples:
+  asc certificates create --certificate-type IOS_DISTRIBUTION --csr "./cert.csr"
+  asc certificates create --certificate-type PASS_TYPE_ID --pass-type-id "PASS_TYPE_ID" --csr "./pass.csr"
+  asc certificates create --certificate-type APPLE_PAY_MERCHANT_IDENTITY --merchant-id "MERCHANT_ID" --csr "./merchant.csr"
+  asc certificates create --certificate-type IOS_DISTRIBUTION --generate-csr --key-out "./signing/dist.key" --csr-out "./signing/dist.csr"`,
+	})
+}
+
+// MerchantIDCertificatesCreateCommand returns the merchant ID scoped certificate
+// create subcommand. It lives here so the CSR generation and relationship
+// validation have a single implementation.
+func MerchantIDCertificatesCreateCommand() *ffcli.Command {
+	return newCertificateCreateCommand(certificateCreateSpec{
+		commandPath: "merchant-ids certificates create",
+		shortUsage:  "asc merchant-ids certificates create --merchant-id \"MERCHANT_ID\" --certificate-type TYPE (--csr ./merchant.csr | --generate-csr --key-out ./merchant.key --csr-out ./merchant.csr)",
+		shortHelp:   "Create a certificate for a merchant ID.",
+		// Every certificate created against a merchant ID is an Apple Pay type.
+		certificateTypes: shared.ApplePayCertificateTypeList(),
+		requireMerchant:  true,
+		merchantIDUsage:  "Merchant ID",
+		longHelp: `Create a certificate for a merchant ID.
+
+Examples:
+  asc merchant-ids certificates create --merchant-id "MERCHANT_ID" --certificate-type APPLE_PAY_MERCHANT_IDENTITY --csr "./merchant.csr"
+  asc merchant-ids certificates create --merchant-id "MERCHANT_ID" --certificate-type APPLE_PAY_RSA --generate-csr --key-out "./signing/merchant.key" --csr-out "./signing/merchant.csr"`,
+	})
+}
+
+func newCertificateCreateCommand(spec certificateCreateSpec) *ffcli.Command {
 	fs := flag.NewFlagSet("create", flag.ExitOnError)
 
-	certificateType := fs.String("certificate-type", "", "Certificate type (e.g., IOS_DISTRIBUTION)")
+	certificateType := fs.String("certificate-type", "", "Certificate type: "+strings.Join(spec.certificateTypes, ", "))
+	var passTypeID *string
+	if spec.supportsPassType {
+		passTypeID = shared.BindResourceIDFlag(fs, "pass-type-id", "passTypeIds", "Pass Type ID resource ID (required for PASS_TYPE_ID and PASS_TYPE_ID_WITH_NFC)")
+	}
+	merchantID := shared.BindResourceIDFlag(fs, "merchant-id", "merchantIds", spec.merchantIDUsage)
 	csrPath := fs.String("csr", "", "CSR file path")
+	generateCSR := fs.Bool("generate-csr", false, "Generate a private key and CSR before creating the certificate")
+	keyOut := fs.String("key-out", "", "Private key output path for --generate-csr (PEM)")
+	csrOut := fs.String("csr-out", "", "CSR output path for --generate-csr (PEM)")
+	commonName := fs.String("common-name", "asc", "CSR subject Common Name (CN) for --generate-csr")
+	email := fs.String("email", "", "CSR subject email address for --generate-csr")
+	organization := fs.String("organization", "", "CSR subject organization (O) for --generate-csr")
+	orgUnit := fs.String("organizational-unit", "", "CSR subject organizational unit (OU) for --generate-csr")
+	country := fs.String("country", "", "CSR subject country (C) for --generate-csr")
+	keyType := fs.String("key-type", "rsa", "CSR key type for --generate-csr: rsa")
+	keySize := fs.Int("key-size", 2048, "CSR RSA key size in bits for --generate-csr")
+	force := fs.Bool("force", false, "Overwrite generated CSR/key output files")
 	output := shared.BindOutputFlags(fs)
 
 	return &ffcli.Command{
 		Name:       "create",
-		ShortUsage: "asc certificates create --certificate-type TYPE --csr ./cert.csr",
-		ShortHelp:  "Create a signing certificate.",
-		LongHelp: `Create a signing certificate.
-
-Examples:
-  asc certificates create --certificate-type IOS_DISTRIBUTION --csr "./cert.csr"`,
-		FlagSet:   fs,
-		UsageFunc: shared.DefaultUsageFunc,
+		ShortUsage: spec.shortUsage,
+		ShortHelp:  spec.shortHelp,
+		LongHelp:   spec.longHelp,
+		FlagSet:    fs,
+		UsageFunc:  shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
+			merchantIDValue := strings.TrimSpace(*merchantID)
+			if spec.requireMerchant && merchantIDValue == "" {
+				fmt.Fprintln(os.Stderr, "Error: --merchant-id is required")
+				return shared.MissingRequiredUsageError("--merchant-id")
+			}
 			certificateValue := strings.ToUpper(strings.TrimSpace(*certificateType))
 			if certificateValue == "" {
 				fmt.Fprintln(os.Stderr, "Error: --certificate-type is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--certificate-type")
+			}
+			// Every relationship check runs before --generate-csr writes a
+			// private key and CSR for a request App Store Connect would refuse.
+			canonicalCertificateType, err := shared.ValidateCertificateCreateType("--certificate-type", certificateValue)
+			if err != nil {
+				return err
+			}
+			certificateValue = canonicalCertificateType
+			passTypeIDValue := ""
+			if passTypeID != nil {
+				passTypeIDValue = strings.TrimSpace(*passTypeID)
+			}
+			if passTypeIDValue != "" && merchantIDValue != "" {
+				return shared.UsageError("--merchant-id cannot be used with --pass-type-id")
+			}
+			if err := shared.ValidateCertificateCreateMerchantID(certificateValue, merchantIDValue); err != nil {
+				return err
+			}
+			isPassTypeCertificate := certificateValue == "PASS_TYPE_ID" || certificateValue == "PASS_TYPE_ID_WITH_NFC"
+			if spec.supportsPassType {
+				if isPassTypeCertificate && passTypeIDValue == "" {
+					fmt.Fprintf(os.Stderr, "Error: --pass-type-id is required with --certificate-type %s\n", certificateValue)
+					return shared.MissingRequiredUsageError("--pass-type-id")
+				}
+				if !isPassTypeCertificate && passTypeIDValue != "" {
+					return shared.UsageError("--pass-type-id can only be used with --certificate-type PASS_TYPE_ID or PASS_TYPE_ID_WITH_NFC")
+				}
 			}
 			csrValue := strings.TrimSpace(*csrPath)
-			if csrValue == "" {
-				fmt.Fprintln(os.Stderr, "Error: --csr is required")
-				return flag.ErrHelp
+
+			var csrContent string
+			if *generateCSR {
+				if csrValue != "" {
+					return shared.UsageError("--csr cannot be used with --generate-csr")
+				}
+				keyOutValue := strings.TrimSpace(*keyOut)
+				if keyOutValue == "" {
+					fmt.Fprintln(os.Stderr, "Error: --key-out is required with --generate-csr")
+					return shared.MissingRequiredUsageError("--key-out")
+				}
+				csrOutValue := strings.TrimSpace(*csrOut)
+				if csrOutValue == "" {
+					fmt.Fprintln(os.Stderr, "Error: --csr-out is required with --generate-csr")
+					return shared.MissingRequiredUsageError("--csr-out")
+				}
+
+				_, csrPEM, err := generateCSRFiles(csrGenerateOptions{
+					KeyOut:             keyOutValue,
+					CSROut:             csrOutValue,
+					CommonName:         *commonName,
+					Email:              *email,
+					Organization:       *organization,
+					OrganizationalUnit: *orgUnit,
+					Country:            *country,
+					KeyType:            *keyType,
+					KeySize:            *keySize,
+					Force:              *force,
+				})
+				if err != nil {
+					return fmt.Errorf("%s: generate csr: %w", spec.commandPath, err)
+				}
+				csrContent, err = encodeCSRContent(csrPEM)
+				if err != nil {
+					return fmt.Errorf("%s: generate csr: %w", spec.commandPath, err)
+				}
+			} else {
+				if csrCreateOnlyFlagsSet(fs) {
+					return shared.UsageError("--key-out, --csr-out, CSR subject flags, --key-type, --key-size, and --force require --generate-csr")
+				}
+				if csrValue == "" {
+					fmt.Fprintln(os.Stderr, "Error: --csr is required (or use --generate-csr with --key-out and --csr-out)")
+					return shared.MissingRequiredUsageError("--csr")
+				}
+
+				var err error
+				csrContent, err = readCSRContent(csrValue)
+				if err != nil {
+					return fmt.Errorf("%s: %w", spec.commandPath, err)
+				}
 			}
 
-			csrContent, err := readCSRContent(csrValue)
+			client, err := getCertificatesASCClient()
 			if err != nil {
-				return fmt.Errorf("certificates create: %w", err)
-			}
-
-			client, err := shared.GetASCClient()
-			if err != nil {
-				return fmt.Errorf("certificates create: %w", err)
+				return fmt.Errorf("%s: %w", spec.commandPath, err)
 			}
 
 			requestCtx, cancel := shared.ContextWithTimeout(ctx)
 			defer cancel()
 
-			resp, err := client.CreateCertificate(requestCtx, csrContent, certificateValue)
+			createOpts := []asc.CertificateCreateOption{}
+			if passTypeIDValue != "" {
+				createOpts = append(createOpts, asc.WithCertificatePassTypeID(passTypeIDValue))
+			}
+			if merchantIDValue != "" {
+				createOpts = append(createOpts, asc.WithCertificateMerchantID(merchantIDValue))
+			}
+
+			resp, err := client.CreateCertificate(requestCtx, csrContent, certificateValue, createOpts...)
 			if err != nil {
-				return fmt.Errorf("certificates create: failed to create: %w", err)
+				return fmt.Errorf("%s: failed to create: %w", spec.commandPath, err)
 			}
 
 			return shared.PrintOutput(resp, *output.Output, *output.Pretty)
 		},
 	}
+}
+
+func csrCreateOnlyFlagsSet(fs *flag.FlagSet) bool {
+	seen := false
+	fs.Visit(func(f *flag.Flag) {
+		switch f.Name {
+		case "key-out", "csr-out", "common-name", "email", "organization", "organizational-unit", "country", "key-type", "key-size", "force":
+			seen = true
+		}
+	})
+	return seen
 }
 
 // CertificatesUpdateCommand returns the certificates update subcommand.
 func CertificatesUpdateCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("update", flag.ExitOnError)
 
-	id := fs.String("id", "", "Certificate ID")
+	id := shared.BindResourceIDFlag(fs, "id", "certificates", "Certificate ID")
 	activated := fs.String("activated", "", "Set activated (true/false)")
 	output := shared.BindOutputFlags(fs)
 
@@ -257,7 +515,7 @@ Examples:
 			idValue := strings.TrimSpace(*id)
 			if idValue == "" {
 				fmt.Fprintln(os.Stderr, "Error: --id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--id")
 			}
 
 			activatedValue, err := shared.ParseOptionalBoolFlag("--activated", *activated)
@@ -266,7 +524,7 @@ Examples:
 			}
 			if activatedValue == nil {
 				fmt.Fprintln(os.Stderr, "Error: --activated is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--activated")
 			}
 
 			client, err := shared.GetASCClient()
@@ -293,7 +551,7 @@ Examples:
 func CertificatesRevokeCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("revoke", flag.ExitOnError)
 
-	id := fs.String("id", "", "Certificate ID")
+	id := shared.BindResourceIDFlag(fs, "id", "certificates", "Certificate ID")
 	confirm := fs.Bool("confirm", false, "Confirm revocation")
 	output := shared.BindOutputFlags(fs)
 
@@ -311,11 +569,11 @@ Examples:
 			idValue := strings.TrimSpace(*id)
 			if idValue == "" {
 				fmt.Fprintln(os.Stderr, "Error: --id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--id")
 			}
 			if !*confirm {
 				fmt.Fprintln(os.Stderr, "Error: --confirm is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--confirm")
 			}
 
 			client, err := shared.GetASCClient()
@@ -345,6 +603,10 @@ func readCSRContent(path string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	return encodeCSRContent(data)
+}
+
+func encodeCSRContent(data []byte) (string, error) {
 	if len(bytes.TrimSpace(data)) == 0 {
 		return "", fmt.Errorf("CSR file is empty")
 	}
@@ -356,6 +618,27 @@ func readCSRContent(path string) (string, error) {
 		return "", fmt.Errorf("CSR file is empty")
 	}
 	return normalized, nil
+}
+
+func normalizeCertificateSort(value string) (string, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "", nil
+	}
+
+	allowed := certificateSortList()
+	parts := strings.Split(value, ",")
+	for index, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			return "", fmt.Errorf("--sort must be one of: %s", strings.Join(allowed, ", "))
+		}
+		if err := shared.ValidateSort(part, allowed...); err != nil {
+			return "", err
+		}
+		parts[index] = part
+	}
+	return strings.Join(parts, ","), nil
 }
 
 func normalizeCertificatesInclude(value string) ([]string, error) {
@@ -375,6 +658,71 @@ func normalizeCertificatesInclude(value string) ([]string, error) {
 	return include, nil
 }
 
+func normalizeCertificateFields(value, flagName string) ([]string, error) {
+	fields := shared.SplitCSV(value)
+	if len(fields) == 0 {
+		return nil, nil
+	}
+	allowed := map[string]struct{}{}
+	for _, field := range certificateFieldsList() {
+		allowed[field] = struct{}{}
+	}
+	for _, field := range fields {
+		if _, ok := allowed[field]; !ok {
+			return nil, fmt.Errorf("%s must be one of: %s", flagName, strings.Join(certificateFieldsList(), ", "))
+		}
+	}
+	return fields, nil
+}
+
+func normalizeCertificatePassTypeIDFields(value, flagName string) ([]string, error) {
+	fields := shared.SplitCSV(value)
+	if len(fields) == 0 {
+		return nil, nil
+	}
+	allowed := map[string]struct{}{}
+	for _, field := range certificatePassTypeIDFieldsList() {
+		allowed[field] = struct{}{}
+	}
+	for _, field := range fields {
+		if _, ok := allowed[field]; !ok {
+			return nil, fmt.Errorf("%s must be one of: %s", flagName, strings.Join(certificatePassTypeIDFieldsList(), ", "))
+		}
+	}
+	return fields, nil
+}
+
 func certificateIncludeList() []string {
 	return []string{"passTypeId"}
+}
+
+func certificateFieldsList() []string {
+	return []string{
+		"name",
+		"certificateType",
+		"displayName",
+		"serialNumber",
+		"platform",
+		"expirationDate",
+		"certificateContent",
+		"activated",
+		"passTypeId",
+	}
+}
+
+func certificatePassTypeIDFieldsList() []string {
+	return []string{"name", "identifier", "certificates"}
+}
+
+func certificateSortList() []string {
+	return []string{
+		"displayName",
+		"-displayName",
+		"certificateType",
+		"-certificateType",
+		"serialNumber",
+		"-serialNumber",
+		"id",
+		"-id",
+	}
 }

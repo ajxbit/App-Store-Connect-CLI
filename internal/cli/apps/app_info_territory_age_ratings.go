@@ -42,9 +42,8 @@ Examples:
 func AppsInfoTerritoryAgeRatingsListCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("apps info territory-age-ratings list", flag.ExitOnError)
 
-	appID := fs.String("app", "", "App Store Connect app ID (or ASC_APP_ID env)")
-	infoID := fs.String("info-id", "", "App Info ID (optional override)")
-	legacyID := fs.String("id", "", "Deprecated alias for --info-id")
+	appID := shared.BindResourceIDFlag(fs, "app", "apps", "App Store Connect app ID (or ASC_APP_ID env)")
+	infoID := shared.BindResourceIDFlag(fs, "info-id", "appInfos", "App Info ID (optional override)")
 	fields := fs.String("fields", "", "Fields to include: "+strings.Join(territoryAgeRatingFieldsList(), ", "))
 	territoryFields := fs.String("territory-fields", "", "Territory fields to include: "+strings.Join(territoryFieldsList(), ", "))
 	include := fs.String("include", "", "Include relationships: "+strings.Join(territoryAgeRatingIncludeList(), ", "))
@@ -66,21 +65,18 @@ Examples:
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
-			infoIDValue, err := resolveInfoIDFlags(*infoID, *legacyID, "--id")
-			if err != nil {
-				return shared.UsageError(err.Error())
-			}
+			infoIDValue := strings.TrimSpace(*infoID)
 			if *limit != 0 && (*limit < 1 || *limit > 200) {
-				return fmt.Errorf("apps info territory-age-ratings list: --limit must be between 1 and 200")
+				return shared.UsageError("apps info territory-age-ratings list: --limit must be between 1 and 200")
 			}
 			if err := shared.ValidateNextURL(*next); err != nil {
-				return fmt.Errorf("apps info territory-age-ratings list: %w", err)
+				return shared.UsageErrorf("apps info territory-age-ratings list: %v", err)
 			}
 
 			resolvedAppID := shared.ResolveAppID(*appID)
 			if resolvedAppID == "" && infoIDValue == "" && strings.TrimSpace(*next) == "" {
 				fmt.Fprintln(os.Stderr, "Error: --app or --info-id is required (or set ASC_APP_ID)")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("")
 			}
 
 			fieldsValue, err := normalizeTerritoryAgeRatingFields(*fields)
@@ -110,7 +106,7 @@ Examples:
 
 			resolvedInfoID := infoIDValue
 			if resolvedInfoID == "" && strings.TrimSpace(*next) == "" {
-				resolvedInfoID, err = shared.ResolveAppInfoID(requestCtx, client, resolvedAppID, infoIDValue)
+				resolvedInfoID, err = shared.ResolveAppInfoIDWithFlag(requestCtx, client, resolvedAppID, infoIDValue, "--info-id")
 				if err != nil {
 					return fmt.Errorf("apps info territory-age-ratings list: %w", err)
 				}

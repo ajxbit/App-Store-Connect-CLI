@@ -1,17 +1,21 @@
 package versions
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/peterbourgon/ff/v3/ffcli"
 
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/asc"
+	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/cli/builds"
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/cli/shared"
+	webcli "github.com/rudrankriyam/App-Store-Connect-CLI/internal/cli/web"
 )
 
 func VersionsCommand() *ffcli.Command {
@@ -21,8 +25,21 @@ func VersionsCommand() *ffcli.Command {
 		Name:       "versions",
 		ShortUsage: "asc versions <subcommand> [flags]",
 		ShortHelp:  "Manage App Store versions.",
-		LongHelp:   `Manage App Store versions.`,
-		UsageFunc:  shared.VisibleUsageFunc,
+		LongHelp: `Manage App Store versions.
+
+Examples:
+  asc versions list --app "123456789"
+  asc versions list --app "123456789" --platform IOS --state READY_FOR_REVIEW
+  asc versions view --version-id "VERSION_ID" --include-build --include-submission
+  asc versions create --app "123456789" --version "2.0.0" --platform IOS
+  asc versions create --app "123456789" --version "2.4.0" --copy-metadata-from "2.3.2"
+  asc versions update --version-id "VERSION_ID" --release-type MANUAL
+  asc versions attach-build --version-id "VERSION_ID" --build-id "BUILD_ID"
+  asc versions attach-build --app "123456789" --version "2.0.0" --build-number "45"
+  asc versions release --version-id "VERSION_ID" --confirm
+  asc versions phased-release view --version-id "VERSION_ID"
+  asc versions rating-reset view --version-id "VERSION_ID"`,
+		UsageFunc: shared.VisibleUsageFunc,
 		Subcommands: []*ffcli.Command{
 			VersionsListCommand(),
 			viewCmd,
@@ -36,6 +53,7 @@ func VersionsCommand() *ffcli.Command {
 			VersionsAttachBuildCommand(),
 			VersionsReleaseCommand(),
 			PhasedReleaseCommand(),
+			webcli.VersionRatingResetCommand(),
 			VersionsPromotionsCommand(),
 		},
 		Exec: func(ctx context.Context, args []string) error {
@@ -47,13 +65,16 @@ func VersionsCommand() *ffcli.Command {
 func VersionsListCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("versions list", flag.ExitOnError)
 
-	appID := fs.String("app", "", "App Store Connect app ID (or ASC_APP_ID)")
+	appID := shared.BindResourceIDFlag(fs, "app", "apps", "App Store Connect app ID (or ASC_APP_ID)")
 	version := fs.String("version", "", "Filter by version string (comma-separated)")
 	platform := fs.String("platform", "", "Filter by platform: IOS, MAC_OS, TV_OS, VISION_OS (comma-separated)")
 	state := fs.String("state", "", "Filter by state (comma-separated)")
+	include := shared.BindOnceCSVFlag(fs, "include", "Include related resources: "+strings.Join(appStoreVersionsIncludeList(), ", "))
+	includeSensitive := shared.BindIncludeSensitiveFlag(fs)
 	limit := fs.Int("limit", 0, "Maximum results per page (1-200)")
 	next := fs.String("next", "", "Next page URL from a previous response")
 	paginate := fs.Bool("paginate", false, "Automatically fetch all pages (aggregate results)")
+	latest := fs.Bool("latest", false, "Keep only the newest version per platform by createdDate (fetches all pages)")
 	output := shared.BindOutputFlags(fs)
 
 	return &ffcli.Command{
@@ -62,19 +83,45 @@ func VersionsListCommand() *ffcli.Command {
 		ShortHelp:  "List app store versions for an app.",
 		LongHelp: `List app store versions for an app.
 
+App Store Connect reports a live version under two state attributes:
+appVersionState READY_FOR_DISTRIBUTION and the deprecated appStoreState
+READY_FOR_SALE. Apple fills them inconsistently: some live versions report
+only READY_FOR_DISTRIBUTION, and versions that were later replaced can still
+report READY_FOR_SALE. --state filters on one attribute per command and
+cannot mix the two spellings, so no single --state value finds every live
+version.
+
+--latest fetches every page and keeps only the newest version per platform by
+createdDate. With --state READY_FOR_DISTRIBUTION it returns the live version
+on each platform where Apple reports appVersionState. To also find a live
+version that reports only READY_FOR_SALE, list --state READY_FOR_SALE with
+--paginate rather than --latest, skip results whose appVersionState is
+present and is not READY_FOR_DISTRIBUTION, and keep the newest version left
+on each platform across both lists.
+
+Use --include to return related resources in the same response instead of
+issuing a follow-up request per version. Included review-detail passwords are
+redacted by default; use --include-sensitive to print them explicitly.
+
 Examples:
   asc versions list --app "123456789"
   asc versions list --app "123456789" --version "1.0.0"
   asc versions list --app "123456789" --platform IOS --state READY_FOR_REVIEW
+  asc versions list --app "123456789" --state READY_FOR_DISTRIBUTION --latest
+  asc versions list --app "123456789" --state READY_FOR_SALE --paginate
+  asc versions list --app "123456789" --include "build,appStoreVersionSubmission"
   asc versions list --app "123456789" --paginate`,
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
 			if *limit != 0 && (*limit < 1 || *limit > 200) {
-				return fmt.Errorf("versions list: --limit must be between 1 and 200")
+				return shared.UsageError("versions list: --limit must be between 1 and 200")
 			}
 			if err := shared.ValidateNextURL(*next); err != nil {
-				return fmt.Errorf("versions list: %w", err)
+				return shared.UsageErrorf("versions list: %v", err)
+			}
+			if *latest && strings.TrimSpace(*next) != "" {
+				return shared.UsageError("versions list: --latest fetches all pages itself and cannot be combined with --next")
 			}
 
 			platforms, err := shared.NormalizeAppStoreVersionPlatforms(shared.SplitCSVUpper(*platform))
@@ -85,11 +132,22 @@ Examples:
 			if err != nil {
 				return fmt.Errorf("versions list: %w", err)
 			}
+			if err := shared.ValidateAppStoreVersionStateFilterCombination(states); err != nil {
+				return fmt.Errorf("versions list: %w", err)
+			}
+
+			includeValues, err := normalizeAppStoreVersionsInclude(include.String())
+			if err != nil {
+				return shared.UsageErrorf("versions list: %v", err)
+			}
+			if len(includeValues) > 0 && strings.TrimSpace(*next) != "" {
+				return shared.UsageError("versions list: --next cannot be combined with --include")
+			}
 
 			resolvedAppID := shared.ResolveAppID(*appID)
 			if resolvedAppID == "" && strings.TrimSpace(*next) == "" {
 				fmt.Fprintln(os.Stderr, "Error: --app is required (or set ASC_APP_ID)")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--app")
 			}
 
 			client, err := shared.GetASCClient()
@@ -105,12 +163,17 @@ Examples:
 				asc.WithAppStoreVersionsPlatforms(platforms),
 				asc.WithAppStoreVersionsVersionStrings(shared.SplitCSV(*version)),
 				asc.WithAppStoreVersionsStates(states),
+				asc.WithAppStoreVersionsInclude(includeValues),
 				asc.WithAppStoreVersionsNextURL(*next),
 			}
 
-			if *paginate {
-				// Fetch first page with limit set for consistent pagination
-				paginateOpts := append(opts, asc.WithAppStoreVersionsLimit(200))
+			if *paginate || *latest {
+				// Use the caller's page size when provided; otherwise request the
+				// largest page to keep automatic pagination efficient.
+				paginateOpts := opts
+				if *limit == 0 {
+					paginateOpts = append(paginateOpts, asc.WithAppStoreVersionsLimit(200))
+				}
 				firstPage, err := client.GetAppStoreVersions(requestCtx, resolvedAppID, paginateOpts...)
 				if err != nil {
 					return fmt.Errorf("versions list: failed to fetch: %w", err)
@@ -123,8 +186,37 @@ Examples:
 				if err != nil {
 					return fmt.Errorf("versions list: %w", err)
 				}
-
-				return shared.PrintOutput(versions, *output.Output, *output.Pretty)
+				versionsResponse, ok := versions.(*asc.AppStoreVersionsResponse)
+				if !ok {
+					return fmt.Errorf("versions list: unexpected paginated response type %T", versions)
+				}
+				if *latest {
+					selected, err := latestVersionsPerPlatform(versionsResponse.Data)
+					if err != nil {
+						return fmt.Errorf("versions list: %w", err)
+					}
+					included, err := latestVersionsIncluded(selected, versionsResponse.Included)
+					if err != nil {
+						return fmt.Errorf("versions list: %w", err)
+					}
+					selectedResponse := &asc.AppStoreVersionsResponse{Data: selected, Included: included}
+					if *includeSensitive {
+						shared.WarnIncludeSensitive(os.Stderr, true)
+					} else {
+						selectedResponse, err = asc.RedactAppStoreReviewDetailIncludesInListResponse(selectedResponse)
+						if err != nil {
+							return fmt.Errorf("versions list: %w", err)
+						}
+					}
+					result := &asc.AppStoreVersionsLatestResult{
+						Items:      selected,
+						Included:   selectedResponse.Included,
+						TotalCount: len(selected),
+						HasMore:    false,
+					}
+					return shared.PrintOutput(result, *output.Output, *output.Pretty)
+				}
+				return printAppStoreVersionsList(versionsResponse, *includeSensitive, *output.Output, *output.Pretty)
 			}
 
 			versions, err := client.GetAppStoreVersions(requestCtx, resolvedAppID, opts...)
@@ -132,37 +224,194 @@ Examples:
 				return fmt.Errorf("versions list: %w", err)
 			}
 
-			return shared.PrintOutput(versions, *output.Output, *output.Pretty)
+			return printAppStoreVersionsList(versions, *includeSensitive, *output.Output, *output.Pretty)
 		},
 	}
+}
+
+// latestVersionsPerPlatform keeps the newest version per platform by
+// createdDate; the API reports historical versions with live-looking states,
+// so recency has to be derived rather than filtered.
+func latestVersionsPerPlatform(data []asc.Resource[asc.AppStoreVersionAttributes]) ([]asc.Resource[asc.AppStoreVersionAttributes], error) {
+	type selectedVersion struct {
+		index       int
+		createdDate time.Time
+	}
+
+	newest := map[string]selectedVersion{}
+	order := []string{}
+	for index, version := range data {
+		createdDate, err := time.Parse(time.RFC3339, strings.TrimSpace(version.Attributes.CreatedDate))
+		if err != nil {
+			return nil, fmt.Errorf("version %q has invalid createdDate %q: %w", version.ID, version.Attributes.CreatedDate, err)
+		}
+		platform := string(version.Attributes.Platform)
+		current, seen := newest[platform]
+		if !seen {
+			newest[platform] = selectedVersion{index: index, createdDate: createdDate}
+			order = append(order, platform)
+			continue
+		}
+		if createdDate.After(current.createdDate) {
+			newest[platform] = selectedVersion{index: index, createdDate: createdDate}
+		}
+	}
+	result := make([]asc.Resource[asc.AppStoreVersionAttributes], 0, len(order))
+	for _, platform := range order {
+		result = append(result, data[newest[platform].index])
+	}
+	return result, nil
+}
+
+func latestVersionsIncluded(selected []asc.Resource[asc.AppStoreVersionAttributes], included json.RawMessage) (json.RawMessage, error) {
+	if len(included) == 0 {
+		return nil, nil
+	}
+
+	type linkage struct {
+		Type asc.ResourceType `json:"type"`
+		ID   string           `json:"id"`
+	}
+	linked := map[linkage]struct{}{}
+	for _, version := range selected {
+		if len(version.Relationships) == 0 {
+			continue
+		}
+		var relationships map[string]struct {
+			Data json.RawMessage `json:"data"`
+		}
+		if err := json.Unmarshal(version.Relationships, &relationships); err != nil {
+			return nil, fmt.Errorf("decode selected version %q relationships: %w", version.ID, err)
+		}
+		for _, relationship := range relationships {
+			raw := bytes.TrimSpace(relationship.Data)
+			if len(raw) == 0 || bytes.Equal(raw, []byte("null")) {
+				continue
+			}
+			if raw[0] == '[' {
+				var items []linkage
+				if err := json.Unmarshal(raw, &items); err != nil {
+					return nil, fmt.Errorf("decode selected version %q relationship linkage: %w", version.ID, err)
+				}
+				for _, item := range items {
+					linked[item] = struct{}{}
+				}
+				continue
+			}
+			var item linkage
+			if err := json.Unmarshal(raw, &item); err != nil {
+				return nil, fmt.Errorf("decode selected version %q relationship linkage: %w", version.ID, err)
+			}
+			linked[item] = struct{}{}
+		}
+	}
+
+	var resources []json.RawMessage
+	if err := json.Unmarshal(included, &resources); err != nil {
+		return nil, fmt.Errorf("decode included resources: %w", err)
+	}
+	filtered := make([]json.RawMessage, 0, len(resources))
+	for _, resource := range resources {
+		var item linkage
+		if err := json.Unmarshal(resource, &item); err != nil {
+			return nil, fmt.Errorf("decode included resource: %w", err)
+		}
+		if _, ok := linked[item]; ok {
+			filtered = append(filtered, resource)
+		}
+	}
+	encoded, err := json.Marshal(filtered)
+	if err != nil {
+		return nil, fmt.Errorf("encode selected included resources: %w", err)
+	}
+	return encoded, nil
+}
+
+func printAppStoreVersionsList(versions *asc.AppStoreVersionsResponse, includeSensitive bool, output string, pretty bool) error {
+	if includeSensitive {
+		shared.WarnIncludeSensitive(os.Stderr, true)
+		return shared.PrintOutput(versions, output, pretty)
+	}
+	safe, err := asc.RedactAppStoreReviewDetailIncludesInListResponse(versions)
+	if err != nil {
+		return fmt.Errorf("versions list: %w", err)
+	}
+	return shared.PrintOutput(safe, output, pretty)
 }
 
 func VersionsViewCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("versions view", flag.ExitOnError)
 
-	versionID := fs.String("version-id", "", "App Store version ID (required)")
+	versionID := shared.BindResourceIDFlag(fs, "version-id", "appStoreVersions", "App Store version ID")
+	appID := shared.BindResourceIDFlag(fs, "app", "apps", "App Store Connect app ID (or ASC_APP_ID)")
+	versionString := fs.String("version", "", "Version string used with --app")
+	platform := fs.String("platform", "IOS", "Platform used with --app and --version: IOS, MAC_OS, TV_OS, VISION_OS")
 	includeBuild := fs.Bool("include-build", false, "Include attached build information")
 	includeSubmission := fs.Bool("include-submission", false, "Include submission information")
 	include := fs.String("include", "", "Include related resources: "+strings.Join(appStoreVersionIncludeList(), ", "))
+	includeSensitive := shared.BindIncludeSensitiveFlag(fs)
 	output := shared.BindOutputFlags(fs)
 
 	return &ffcli.Command{
 		Name:       "view",
-		ShortUsage: "asc versions view [flags]",
+		ShortUsage: "asc versions view (--version-id \"VERSION_ID\" | --app \"APP_ID\" --version \"1.2.3\") [flags]",
 		ShortHelp:  "View details for an app store version.",
 		LongHelp: `View details for an app store version.
 
 Examples:
   asc versions view --version-id "VERSION_ID"
+  asc versions view --app "123456789" --version "1.2.3"
+  asc versions view --app "123456789" --version "1.2.3" --platform MAC_OS
   asc versions view --version-id "VERSION_ID" --include-build --include-submission
   asc versions view --version-id "VERSION_ID" --include "ageRatingDeclaration,appStoreReviewDetail"`,
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
 			trimmedID := strings.TrimSpace(*versionID)
-			if trimmedID == "" {
+			directIDRequested := false
+			lookupRequested := false
+			fs.Visit(func(parsed *flag.Flag) {
+				switch parsed.Name {
+				case "version-id":
+					directIDRequested = true
+				case "app", "version", "platform":
+					lookupRequested = true
+				}
+			})
+			if directIDRequested && lookupRequested {
+				return shared.UsageError("--version-id cannot be combined with --app, --version, or --platform")
+			}
+			if trimmedID == "" && !lookupRequested {
 				fmt.Fprintln(os.Stderr, "Error: --version-id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--version-id")
+			}
+
+			resolvedAppID := ""
+			resolvedPlatform := ""
+			trimmedVersion := strings.TrimSpace(*versionString)
+			if trimmedID == "" {
+				if trimmedVersion == "" {
+					fmt.Fprintln(os.Stderr, "Error: --version is required when resolving by app")
+					return shared.MissingRequiredUsageError("--version")
+				}
+				resolvedAppID = strings.TrimSpace(shared.ResolveAppID(*appID))
+				if resolvedAppID == "" {
+					fmt.Fprintln(os.Stderr, "Error: --app is required (or set ASC_APP_ID)")
+					return shared.MissingRequiredUsageError("--app")
+				}
+				var err error
+				resolvedPlatform, err = shared.NormalizeAppStoreVersionPlatform(*platform)
+				if err != nil {
+					return shared.UsageErrorf("versions view: %v", err)
+				}
+			}
+
+			includeValues, err := normalizeAppStoreVersionInclude(*include)
+			if err != nil {
+				return shared.UsageErrorf("versions view: %v", err)
+			}
+			if len(includeValues) > 0 && (*includeBuild || *includeSubmission) {
+				return shared.UsageError("--include cannot be used with --include-build or --include-submission")
 			}
 
 			client, err := shared.GetASCClient()
@@ -172,17 +421,14 @@ Examples:
 
 			requestCtx, cancel := shared.ContextWithTimeout(ctx)
 			defer cancel()
-
-			includeValues, err := normalizeAppStoreVersionInclude(*include)
-			if err != nil {
-				return fmt.Errorf("versions view: %w", err)
-			}
-			if len(includeValues) > 0 {
-				if *includeBuild || *includeSubmission {
-					fmt.Fprintln(os.Stderr, "Error: --include cannot be used with --include-build or --include-submission")
-					return flag.ErrHelp
+			if trimmedID == "" {
+				trimmedID, err = shared.ResolveAppStoreVersionID(requestCtx, client, resolvedAppID, trimmedVersion, resolvedPlatform)
+				if err != nil {
+					return fmt.Errorf("versions view: resolve version: %w", err)
 				}
+			}
 
+			if len(includeValues) > 0 {
 				apiIncludes, includeAgeRating := splitCompatAppStoreVersionIncludes(includeValues)
 				var versionResp *asc.AppStoreVersionResponse
 				if len(apiIncludes) > 0 {
@@ -204,7 +450,15 @@ Examples:
 					}
 				}
 
-				return shared.PrintOutput(versionResp, *output.Output, *output.Pretty)
+				if *includeSensitive {
+					shared.WarnIncludeSensitive(os.Stderr, true)
+					return shared.PrintOutput(versionResp, *output.Output, *output.Pretty)
+				}
+				safe, err := asc.RedactAppStoreReviewDetailIncludesInSingleResponse(versionResp)
+				if err != nil {
+					return fmt.Errorf("versions view: %w", err)
+				}
+				return shared.PrintOutput(safe, *output.Output, *output.Pretty)
 			}
 
 			versionResp, err := client.GetAppStoreVersion(requestCtx, trimmedID)
@@ -217,6 +471,7 @@ Examples:
 				VersionString: versionResp.Data.Attributes.VersionString,
 				Platform:      string(versionResp.Data.Attributes.Platform),
 				State:         shared.ResolveAppStoreVersionState(versionResp.Data.Attributes),
+				Downloadable:  versionResp.Data.Attributes.Downloadable,
 			}
 
 			if *includeBuild {
@@ -248,14 +503,15 @@ Examples:
 func VersionsCreateCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("versions create", flag.ExitOnError)
 
-	appID := fs.String("app", "", "App Store Connect app ID (or ASC_APP_ID)")
+	appID := shared.BindResourceIDFlag(fs, "app", "apps", "App Store Connect app ID (or ASC_APP_ID)")
 	versionString := fs.String("version", "", "Version string (e.g., 1.0.0) (required)")
 	platform := fs.String("platform", "IOS", "Platform: IOS, MAC_OS, TV_OS, VISION_OS")
 	copyright := fs.String("copyright", "", "Copyright text (e.g., '2026 My Company')")
 	releaseType := fs.String("release-type", "", "Release type: MANUAL, AFTER_APPROVAL, SCHEDULED")
 	copyMetadataFrom := fs.String("copy-metadata-from", "", "Copy localization metadata from this source version string")
-	copyFields := fs.String("copy-fields", "", "Comma-separated metadata fields to copy: description, keywords, marketingUrl, promotionalText, supportUrl, whatsNew")
-	excludeFields := fs.String("exclude-fields", "", "Comma-separated metadata fields to exclude from copy")
+	copyFields := shared.BindOnceCSVFlag(fs, "copy-fields", "Comma-separated metadata fields to copy: description, keywords, marketingUrl, promotionalText, supportUrl, whatsNew")
+	excludeFields := shared.BindOnceCSVFlag(fs, "exclude-fields", "Comma-separated metadata fields to exclude from copy")
+	ifExists := shared.BindIfExistsFlag(fs, shared.IfExistsSkip, shared.IfExistsUpdate)
 	output := shared.BindOutputFlags(fs)
 
 	return &ffcli.Command{
@@ -269,13 +525,23 @@ Examples:
   asc versions create --app "123456789" --version "2.0.0" --platform IOS
   asc versions create --app "123456789" --version "2.0.0" --copyright "2026 My Company" --release-type MANUAL
   asc versions create --app "123456789" --version "2.4.0" --platform IOS --copy-metadata-from "2.3.2"
-  asc versions create --app "123456789" --version "2.4.0" --copy-metadata-from "2.3.2" --copy-fields "description,keywords,supportUrl" --exclude-fields "whatsNew"`,
+  asc versions create --app "123456789" --version "2.4.0" --copy-metadata-from "2.3.2" --copy-fields "description,keywords,supportUrl" --exclude-fields "whatsNew"
+  asc versions create --app "123456789" --version "2.0.0" --if-exists skip
+  asc versions create --app "123456789" --version "2.0.0" --copyright "2026 My Company" --if-exists update
+
+--if-exists controls what happens when App Store Connect answers 409 because
+the version already exists for that platform. fail (default) returns the
+error. skip reads the existing version back, exits 0, and reports
+"action":"skipped" without changing it. update applies --copyright and
+--release-type to the existing version with asc versions update and reports
+"action":"updated"; --copy-metadata-from still runs against the existing
+version. Any other 409 keeps failing.`,
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
 			if strings.TrimSpace(*versionString) == "" {
 				fmt.Fprintln(os.Stderr, "Error: --version is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--version")
 			}
 
 			normalizedPlatform, err := shared.NormalizeAppStoreVersionPlatform(*platform)
@@ -286,23 +552,23 @@ Examples:
 			resolvedAppID := shared.ResolveAppID(*appID)
 			if resolvedAppID == "" {
 				fmt.Fprintln(os.Stderr, "Error: --app is required (or set ASC_APP_ID)")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--app")
 			}
 
 			copyMetadataFromValue := strings.TrimSpace(*copyMetadataFrom)
-			copyFieldsValue, err := normalizeVersionMetadataCopyFields(*copyFields, "--copy-fields")
+			copyFieldsValue, err := normalizeVersionMetadataCopyFields(copyFields.String(), "--copy-fields")
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 				return flag.ErrHelp
 			}
-			excludeFieldsValue, err := normalizeVersionMetadataCopyFields(*excludeFields, "--exclude-fields")
+			excludeFieldsValue, err := normalizeVersionMetadataCopyFields(excludeFields.String(), "--exclude-fields")
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 				return flag.ErrHelp
 			}
 			if copyMetadataFromValue == "" && (len(copyFieldsValue) > 0 || len(excludeFieldsValue) > 0) {
 				fmt.Fprintln(os.Stderr, "Error: --copy-metadata-from is required when using --copy-fields or --exclude-fields")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--copy-metadata-from")
 			}
 
 			selectedCopyFields := []string(nil)
@@ -312,6 +578,16 @@ Examples:
 					fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 					return flag.ErrHelp
 				}
+			}
+
+			normalizedReleaseType, err := normalizeAppStoreVersionReleaseType(*releaseType)
+			if err != nil {
+				return shared.UsageErrorf("versions create: %v", err)
+			}
+
+			ifExistsMode, err := shared.ParseIfExistsMode(*ifExists, shared.IfExistsSkip, shared.IfExistsUpdate)
+			if err != nil {
+				return err
 			}
 
 			client, err := shared.GetASCClient()
@@ -329,23 +605,63 @@ Examples:
 			if *copyright != "" {
 				attrs.Copyright = *copyright
 			}
-			if *releaseType != "" {
-				attrs.ReleaseType = strings.ToUpper(*releaseType)
+			if normalizedReleaseType != "" {
+				attrs.ReleaseType = normalizedReleaseType
 			}
 
 			resp, err := client.CreateAppStoreVersion(requestCtx, resolvedAppID, attrs)
+			action := asc.IdempotentWriteActionCreated
+			copyMetadata := copyMetadataFromValue != ""
+			conflictHandled := false
 			if err != nil {
-				return fmt.Errorf("versions create: %w", err)
+				readBackFailed := false
+				existing, handled, resolveErr := shared.ResolveIfExistsConflict(ifExistsMode, err, versionsCreateExistsCodes, func() (*asc.AppStoreVersionResponse, bool, error) {
+					found, ok, lookupErr := findExistingAppStoreVersion(requestCtx, client, resolvedAppID, attrs.VersionString, normalizedPlatform)
+					readBackFailed = lookupErr != nil && !asc.IsNotFound(lookupErr)
+					return found, ok, lookupErr
+				})
+				if resolveErr != nil {
+					// An unhandled conflict comes back as Apple's original
+					// error. Explain it from the platform's current versions
+					// unless the read-back already failed, in which case
+					// another read is unlikely to help.
+					if !readBackFailed {
+						resolveErr = shared.WithAppStoreVersionCreateConflictDiagnostics(requestCtx, client, resolvedAppID, attrs.VersionString, normalizedPlatform, resolveErr)
+					}
+					return fmt.Errorf("versions create: %w", resolveErr)
+				}
+				if !handled {
+					return fmt.Errorf("versions create: %w", err)
+				}
+				resp = existing
+				action = asc.IdempotentWriteActionSkipped
+				// skip leaves the existing version untouched, including its
+				// localization metadata. update still carries the metadata
+				// forward onto the existing version.
+				copyMetadata = copyMetadata && ifExistsMode == shared.IfExistsUpdate
+				if ifExistsMode == shared.IfExistsUpdate {
+					updateAttrs := asc.AppStoreVersionUpdateAttributes{}
+					if *copyright != "" {
+						updateAttrs.Copyright = copyright
+					}
+					if normalizedReleaseType != "" {
+						updateAttrs.ReleaseType = &normalizedReleaseType
+					}
+					if updateAttrs.Copyright != nil || updateAttrs.ReleaseType != nil {
+						updated, updateErr := client.UpdateAppStoreVersion(requestCtx, existing.Data.ID, updateAttrs)
+						if updateErr != nil {
+							return fmt.Errorf("versions create: update existing version %s: %w", existing.Data.ID, updateErr)
+						}
+						resp = updated
+						action = asc.IdempotentWriteActionUpdated
+					}
+				}
+				conflictHandled = true
 			}
 
-			result := &asc.AppStoreVersionDetailResult{
-				ID:            resp.Data.ID,
-				VersionString: resp.Data.Attributes.VersionString,
-				Platform:      string(resp.Data.Attributes.Platform),
-				State:         shared.ResolveAppStoreVersionState(resp.Data.Attributes),
-			}
-			if copyMetadataFromValue != "" {
-				copySummary, err := copyVersionMetadataFromSource(
+			var copySummary *asc.AppStoreVersionMetadataCopySummary
+			if copyMetadata {
+				copySummary, err = copyVersionMetadataFromSource(
 					requestCtx,
 					client,
 					resolvedAppID,
@@ -360,7 +676,36 @@ Examples:
 				if len(copySummary.SkippedLocales) > 0 {
 					fmt.Fprintf(os.Stderr, "Warning: skipped source locales not enabled on destination: %s\n", strings.Join(copySummary.SkippedLocales, ", "))
 				}
-				result.MetadataCopy = copySummary
+				// The copy PATCHes the existing version's localizations, so a
+				// copy that changed something makes the resolved conflict an
+				// update even when the version resource itself had nothing to
+				// PATCH. A copy that changed nothing leaves the version
+				// untouched and keeps the skipped receipt honest.
+				if conflictHandled && copySummary.CopiedFieldUpdates > 0 {
+					action = asc.IdempotentWriteActionUpdated
+				}
+			}
+
+			if conflictHandled {
+				fmt.Fprintf(os.Stderr, "versions create: version %s (%s, %s) already exists as %s; %s (--if-exists %s)\n",
+					attrs.VersionString, normalizedPlatform, resolvedAppID, resp.Data.ID, ifExistsOutcomeText(action), ifExistsMode)
+			}
+
+			receipt := asc.IdempotentWriteReceipt{}
+			if ifExistsMode != shared.IfExistsFail {
+				receipt = asc.IdempotentWriteReceipt{
+					AlreadyExists: action != asc.IdempotentWriteActionCreated,
+					Action:        action,
+				}
+			}
+
+			result := &asc.AppStoreVersionDetailResult{
+				ID:                     resp.Data.ID,
+				VersionString:          resp.Data.Attributes.VersionString,
+				Platform:               string(resp.Data.Attributes.Platform),
+				State:                  shared.ResolveAppStoreVersionState(resp.Data.Attributes),
+				IdempotentWriteReceipt: receipt,
+				MetadataCopy:           copySummary,
 			}
 
 			return shared.PrintOutput(result, *output.Output, *output.Pretty)
@@ -368,14 +713,60 @@ Examples:
 	}
 }
 
+// versionsCreateExistsCodes lists the Apple 409 codes that mean the version
+// string is already taken on POST /v1/appStoreVersions. Apple answers the
+// duplicate with ENTITY_ERROR.ATTRIBUTE.INVALID.DUPLICATE on the
+// /data/attributes/versionString pointer ("The version number has been
+// previously used."). Live against app 6759231657 on 2026-09-15 that code
+// arrives as the *second* entry of the errors[] array, behind
+// ENTITY_ERROR.RELATIONSHIP.INVALID ("You cannot create a new version of the
+// App in the current state."), so shared.IsIfExistsConflict matches every code
+// in the response. A 409 that carries only the relationship rejection, or
+// STATE_ERROR.*, is not an existence conflict and keeps failing; so does a
+// duplicate whose read-back finds no such version string.
+var versionsCreateExistsCodes = []string{"ENTITY_ERROR.ATTRIBUTE.INVALID.DUPLICATE"}
+
+// findExistingAppStoreVersion reads back the version a 409 conflict referred
+// to, keyed by version string and platform. It reports found=false when the
+// app has no such version so the caller can surface the original conflict.
+func findExistingAppStoreVersion(ctx context.Context, client *asc.Client, appID, versionString, platform string) (*asc.AppStoreVersionResponse, bool, error) {
+	versions, err := client.GetAppStoreVersions(
+		ctx, appID,
+		asc.WithAppStoreVersionsVersionStrings([]string{versionString}),
+		asc.WithAppStoreVersionsPlatforms([]string{platform}),
+		asc.WithAppStoreVersionsLimit(10),
+	)
+	if err != nil {
+		return nil, false, err
+	}
+	for _, candidate := range versions.Data {
+		if candidate.Attributes.VersionString == versionString && strings.EqualFold(string(candidate.Attributes.Platform), platform) {
+			return &asc.AppStoreVersionResponse{Data: candidate}, true, nil
+		}
+	}
+	return nil, false, nil
+}
+
+func ifExistsOutcomeText(action string) string {
+	if action == asc.IdempotentWriteActionUpdated {
+		return "updated it in place"
+	}
+	return "left unchanged"
+}
+
 func VersionsUpdateCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("versions update", flag.ExitOnError)
 
-	versionID := fs.String("version-id", "", "App Store version ID (required)")
+	versionID := shared.BindResourceIDFlag(fs, "version-id", "appStoreVersions", "App Store version ID (required)")
 	copyright := fs.String("copyright", "", "Copyright text (e.g., '2026 My Company')")
 	releaseType := fs.String("release-type", "", "Release type: MANUAL, AFTER_APPROVAL, SCHEDULED")
 	earliestReleaseDate := fs.String("earliest-release-date", "", "Earliest release date (ISO 8601, e.g., 2026-02-01T08:00:00+00:00)")
 	versionString := fs.String("version", "", "Version string (e.g., 1.0.1)")
+	var downloadable shared.OptionalBool
+	fs.Var(&downloadable, "downloadable", "Download availability for this version on older operating systems and devices: true or false")
+	var confirm shared.OptionalBool
+	confirm.EnableBoolFlag()
+	fs.Var(&confirm, "confirm", "Confirm making this version unavailable for download (required with --downloadable false)")
 	output := shared.BindOutputFlags(fs)
 
 	return &ffcli.Command{
@@ -384,23 +775,58 @@ func VersionsUpdateCommand() *ffcli.Command {
 		ShortHelp:  "Update an app store version.",
 		LongHelp: `Update an app store version.
 
+--downloadable is the public App Store Connect API surface behind App Store
+Connect's Last-Compatible Version Settings screen. It is tri-state: leaving it
+unset sends nothing, so an unrelated update never changes download
+availability. Setting it to false makes a previously released version
+unavailable for download on older operating systems and devices, which is not
+reversible from every state, so that direction requires --confirm.
+
+Read the current value with asc versions list --app APP_ID --paginate --output
+json or asc versions view --version-id VERSION_ID --output json; Apple omits
+the attribute for versions that never carried the setting. --paginate matters
+here because the oldest versions, the ones this setting usually targets, fall
+past the first page.
+
 Examples:
   asc versions update --version-id "VERSION_ID" --copyright "2026 My Company"
   asc versions update --version-id "VERSION_ID" --release-type MANUAL
   asc versions update --version-id "VERSION_ID" --release-type SCHEDULED --earliest-release-date "2026-02-01T08:00:00+00:00"
-  asc versions update --version-id "VERSION_ID" --version "1.0.1"`,
+  asc versions update --version-id "VERSION_ID" --version "1.0.1"
+  asc versions update --version-id "VERSION_ID" --downloadable true
+  asc versions update --version-id "VERSION_ID" --downloadable false --confirm`,
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
+			if err := shared.RejectPositionalArgs(args); err != nil {
+				return err
+			}
 			if strings.TrimSpace(*versionID) == "" {
 				fmt.Fprintln(os.Stderr, "Error: --version-id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--version-id")
+			}
+
+			normalizedReleaseType, err := normalizeAppStoreVersionReleaseType(*releaseType)
+			if err != nil {
+				return shared.UsageErrorf("versions update: %v", err)
 			}
 
 			// Check that at least one update field is provided
-			if *copyright == "" && *releaseType == "" && *earliestReleaseDate == "" && *versionString == "" {
-				fmt.Fprintln(os.Stderr, "Error: at least one of --copyright, --release-type, --earliest-release-date, or --version is required")
-				return flag.ErrHelp
+			if *copyright == "" && normalizedReleaseType == "" && *earliestReleaseDate == "" && *versionString == "" && !downloadable.IsSet() {
+				fmt.Fprintln(os.Stderr, "Error: at least one of --copyright, --release-type, --earliest-release-date, --version, or --downloadable is required")
+				return shared.MissingRequiredUsageError("")
+			}
+
+			// --confirm is tracked rather than read as a plain bool so an
+			// explicit --confirm=false is rejected instead of silently
+			// ignored, the same as a --confirm that was never needed.
+			downloadableFalse := downloadable.IsSet() && !downloadable.Value()
+			if downloadableFalse && (!confirm.IsSet() || !confirm.Value()) {
+				fmt.Fprintln(os.Stderr, "Error: --confirm is required with --downloadable false because making a released version unavailable for download is not reversible from every state. No request was sent.")
+				return shared.MissingRequiredUsageError("--confirm")
+			}
+			if confirm.IsSet() && !downloadableFalse {
+				return shared.UsageError("--confirm applies only to --downloadable false; remove it or pass --downloadable false")
 			}
 
 			client, err := shared.GetASCClient()
@@ -415,15 +841,18 @@ Examples:
 			if *copyright != "" {
 				attrs.Copyright = copyright
 			}
-			if *releaseType != "" {
-				rt := strings.ToUpper(*releaseType)
-				attrs.ReleaseType = &rt
+			if normalizedReleaseType != "" {
+				attrs.ReleaseType = &normalizedReleaseType
 			}
 			if *earliestReleaseDate != "" {
 				attrs.EarliestReleaseDate = earliestReleaseDate
 			}
 			if *versionString != "" {
 				attrs.VersionString = versionString
+			}
+			if downloadable.IsSet() {
+				value := downloadable.Value()
+				attrs.Downloadable = &value
 			}
 
 			resp, err := client.UpdateAppStoreVersion(requestCtx, strings.TrimSpace(*versionID), attrs)
@@ -436,6 +865,7 @@ Examples:
 				VersionString: resp.Data.Attributes.VersionString,
 				Platform:      string(resp.Data.Attributes.Platform),
 				State:         shared.ResolveAppStoreVersionState(resp.Data.Attributes),
+				Downloadable:  resp.Data.Attributes.Downloadable,
 			}
 
 			return shared.PrintOutput(result, *output.Output, *output.Pretty)
@@ -446,7 +876,7 @@ Examples:
 func VersionsDeleteCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("versions delete", flag.ExitOnError)
 
-	versionID := fs.String("version-id", "", "App Store version ID (required)")
+	versionID := shared.BindResourceIDFlag(fs, "version-id", "appStoreVersions", "App Store version ID (required)")
 	confirm := fs.Bool("confirm", false, "Confirm deletion (required)")
 	output := shared.BindOutputFlags(fs)
 
@@ -465,11 +895,11 @@ Examples:
 		Exec: func(ctx context.Context, args []string) error {
 			if strings.TrimSpace(*versionID) == "" {
 				fmt.Fprintln(os.Stderr, "Error: --version-id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--version-id")
 			}
 			if !*confirm {
 				fmt.Fprintln(os.Stderr, "Error: --confirm is required to delete a version")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--confirm")
 			}
 
 			client, err := shared.GetASCClient()
@@ -497,8 +927,11 @@ Examples:
 func VersionsAttachBuildCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("versions attach-build", flag.ExitOnError)
 
-	versionID := fs.String("version-id", "", "App Store version ID (required)")
-	buildID := fs.String("build", "", "Build ID to attach (required)")
+	appID := shared.BindResourceIDFlag(fs, "app", "apps", "App Store Connect app ID, bundle ID, or exact app name (or ASC_APP_ID)")
+	version := fs.String("version", "", "App Store version string")
+	versionID := shared.BindResourceIDFlag(fs, "version-id", "appStoreVersions", "App Store version ID")
+	platform := fs.String("platform", "IOS", "Platform: IOS, MAC_OS, TV_OS, VISION_OS")
+	build := builds.BindVersionBuildSelector(fs)
 	output := shared.BindOutputFlags(fs)
 
 	return &ffcli.Command{
@@ -507,18 +940,56 @@ func VersionsAttachBuildCommand() *ffcli.Command {
 		ShortHelp:  "Attach a build to an app store version.",
 		LongHelp: `Attach a build to an app store version.
 
+Select the version with --version-id, or with --app and --version (and
+--platform). Select the build with --build-id, or with --build-number or
+--latest, which only match builds of the version's app, version string, and
+platform. A selected build must be VALID; --wait waits for processing first.
+Right after an upload, prefer --build-number: --latest picks the newest build
+App Store Connect lists, which can still be the previous upload.
+
+To find the version and build IDs, list each resource for the app and use its
+returned id field:
+  asc versions list --app "APP_ID" --paginate --output json
+  asc builds list --app "APP_ID" --paginate --output json
+
 Examples:
-  asc versions attach-build --version-id "VERSION_ID" --build "BUILD_ID"`,
+  asc versions attach-build --version-id "VERSION_ID" --build-id "BUILD_ID"
+  asc versions attach-build --app "123456789" --version "1.2.0" --build-number "45"
+  asc versions attach-build --app "123456789" --version "1.2.0" --platform MAC_OS --latest
+  asc versions attach-build --app "123456789" --version "1.2.0" --build-number "46" --wait --timeout 30m`,
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
-			if strings.TrimSpace(*versionID) == "" {
-				fmt.Fprintln(os.Stderr, "Error: --version-id is required")
-				return flag.ErrHelp
+			versionValue := strings.TrimSpace(*version)
+			versionIDValue := strings.TrimSpace(*versionID)
+			if versionValue == "" && versionIDValue == "" {
+				fmt.Fprintln(os.Stderr, "Error: --version-id or --version is required")
+				return shared.MissingRequiredUsageError("--version-id")
 			}
-			if strings.TrimSpace(*buildID) == "" {
-				fmt.Fprintln(os.Stderr, "Error: --build is required")
-				return flag.ErrHelp
+			if versionValue != "" && versionIDValue != "" {
+				return shared.WithDiagnostic(shared.UsageError("--version and --version-id are mutually exclusive"), shared.DiagnosticConflictingInput, "")
+			}
+			if err := build.Validate(); err != nil {
+				return err
+			}
+
+			visited := map[string]bool{}
+			fs.Visit(func(f *flag.Flag) {
+				visited[f.Name] = true
+			})
+			needsScope := versionValue != "" || build.NeedsScope() || visited["app"] || visited["platform"]
+			appValue := shared.ResolveAppID(*appID)
+			if needsScope && appValue == "" {
+				fmt.Fprintln(os.Stderr, "Error: --app is required with --version, --platform, --build-number, or --latest (or set ASC_APP_ID)")
+				return shared.MissingRequiredUsageError("--app")
+			}
+			requestedPlatform := ""
+			if versionValue != "" || visited["platform"] {
+				normalized, err := shared.NormalizeAppStoreVersionPlatform(*platform)
+				if err != nil {
+					return shared.WithDiagnostic(shared.UsageError(err.Error()), shared.DiagnosticInvalidInput, "--platform")
+				}
+				requestedPlatform = normalized
 			}
 
 			client, err := shared.GetASCClient()
@@ -526,22 +997,65 @@ Examples:
 				return fmt.Errorf("versions attach-build: %w", err)
 			}
 
+			resolvedVersionID := versionIDValue
+			var scope builds.VersionBuildScope
+			if needsScope {
+				resolvedVersionID, scope, err = resolveAttachBuildVersion(ctx, client, appValue, versionIDValue, versionValue, requestedPlatform)
+				if err != nil {
+					return fmt.Errorf("versions attach-build: %w", err)
+				}
+			}
+
+			buildID, err := build.Resolve(ctx, client, scope)
+			if err != nil {
+				return fmt.Errorf("versions attach-build: %w", err)
+			}
+
 			requestCtx, cancel := shared.ContextWithTimeout(ctx)
 			defer cancel()
 
-			if err := client.AttachBuildToVersion(requestCtx, strings.TrimSpace(*versionID), strings.TrimSpace(*buildID)); err != nil {
+			if err := client.AttachBuildToVersion(requestCtx, resolvedVersionID, buildID); err != nil {
 				return fmt.Errorf("versions attach-build: %w", err)
 			}
 
 			result := &asc.AppStoreVersionAttachBuildResult{
-				VersionID: strings.TrimSpace(*versionID),
-				BuildID:   strings.TrimSpace(*buildID),
+				VersionID: resolvedVersionID,
+				BuildID:   buildID,
 				Attached:  true,
 			}
 
 			return shared.PrintOutput(result, *output.Output, *output.Pretty)
 		},
 	}
+}
+
+// resolveAttachBuildVersion returns the version ID and the train its builds
+// come from, checking that a --version-id belongs to the app.
+func resolveAttachBuildVersion(ctx context.Context, client *asc.Client, appInput, versionID, version, platform string) (string, builds.VersionBuildScope, error) {
+	requestCtx, cancel := shared.ContextWithTimeout(ctx)
+	defer cancel()
+
+	appID, err := shared.ResolveAppIDWithLookup(requestCtx, client, appInput)
+	if err != nil {
+		return "", builds.VersionBuildScope{}, err
+	}
+	if versionID == "" {
+		versionID, err = shared.ResolveAppStoreVersionID(requestCtx, client, appID, version, platform)
+		if err != nil {
+			return "", builds.VersionBuildScope{}, err
+		}
+		return versionID, builds.VersionBuildScope{AppID: appID, Version: version, Platform: platform}, nil
+	}
+
+	versionData, err := shared.ResolveOwnedAppStoreVersionByID(requestCtx, client, appID, versionID, platform)
+	if err != nil {
+		return "", builds.VersionBuildScope{}, err
+	}
+	return versionID, builds.VersionBuildScope{
+		AppID:    appID,
+		Version:  strings.TrimSpace(versionData.Attributes.VersionString),
+		Platform: strings.TrimSpace(string(versionData.Attributes.Platform)),
+	}, nil
 }
 
 func fetchOptionalBuild(ctx context.Context, versionID string, fetch func(context.Context, string) (*asc.BuildResponse, error)) (*asc.BuildResponse, error) {
@@ -553,6 +1067,21 @@ func fetchOptionalBuild(ctx context.Context, versionID string, fetch func(contex
 		return nil, err
 	}
 	return resp, nil
+}
+
+func normalizeAppStoreVersionReleaseType(value string) (string, error) {
+	trimmed := strings.TrimSpace(value)
+	if value != "" && trimmed == "" {
+		return "", fmt.Errorf("--release-type must be one of: MANUAL, AFTER_APPROVAL, SCHEDULED")
+	}
+
+	normalized := strings.ToUpper(trimmed)
+	switch normalized {
+	case "", "MANUAL", "AFTER_APPROVAL", "SCHEDULED":
+		return normalized, nil
+	default:
+		return "", fmt.Errorf("--release-type must be one of: MANUAL, AFTER_APPROVAL, SCHEDULED")
+	}
 }
 
 func fetchOptionalSubmission(ctx context.Context, versionID string, fetch func(context.Context, string) (*asc.AppStoreVersionSubmissionResourceResponse, error)) (*asc.AppStoreVersionSubmissionResourceResponse, error) {

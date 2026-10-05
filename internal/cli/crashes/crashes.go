@@ -23,6 +23,7 @@ type listCommandFlags struct {
 	buildID         *string
 	buildPreRelease *string
 	tester          *string
+	include         *string
 	sort            *string
 	limit           *int
 	next            *string
@@ -31,15 +32,16 @@ type listCommandFlags struct {
 
 func bindListCommandFlags(fs *flag.FlagSet) listCommandFlags {
 	return listCommandFlags{
-		appID:           fs.String("app", "", "App Store Connect app ID, bundle ID, or exact app name (or ASC_APP_ID env)"),
+		appID:           shared.BindResourceIDFlag(fs, "app", "apps", "App Store Connect app ID, bundle ID, or exact app name (or ASC_APP_ID env)"),
 		output:          shared.BindOutputFlags(fs),
 		deviceModel:     fs.String("device-model", "", "Filter by device model(s), comma-separated"),
 		osVersion:       fs.String("os-version", "", "Filter by OS version(s), comma-separated"),
 		appPlatform:     fs.String("app-platform", "", "Filter by app platform(s), comma-separated (IOS, MAC_OS, TV_OS, VISION_OS)"),
 		devicePlatform:  fs.String("device-platform", "", "Filter by device platform(s), comma-separated (IOS, MAC_OS, TV_OS, VISION_OS)"),
-		buildID:         fs.String("build", "", "Filter by build ID(s), comma-separated"),
+		buildID:         fs.String("build-id", "", "Filter by build ID(s), comma-separated"),
 		buildPreRelease: fs.String("build-pre-release-version", "", "Filter by pre-release version ID(s), comma-separated"),
 		tester:          fs.String("tester", "", "Filter by tester ID(s), comma-separated"),
+		include:         fs.String("include", "", "Include related resources, comma-separated (build, tester)"),
 		sort:            fs.String("sort", "", "Sort by createdDate or -createdDate"),
 		limit:           fs.Int("limit", 0, "Maximum results per page (1-200)"),
 		next:            fs.String("next", "", "Fetch next page using a links.next URL"),
@@ -79,24 +81,25 @@ func runListCommand(ctx context.Context, config shared.ListCommandConfig, flags 
 	if prefix == "" {
 		prefix = "crashes"
 	}
-	if strings.TrimSpace(config.DeprecatedWarning) != "" {
-		fmt.Fprintln(os.Stderr, config.DeprecatedWarning)
-	}
 
 	if *flags.limit != 0 && (*flags.limit < 1 || *flags.limit > 200) {
-		return fmt.Errorf("%s: --limit must be between 1 and 200", prefix)
+		return shared.UsageErrorf("%s: --limit must be between 1 and 200", prefix)
 	}
 	if err := shared.ValidateNextURL(*flags.next); err != nil {
-		return fmt.Errorf("%s: %w", prefix, err)
+		return shared.UsageErrorf("%s: %v", prefix, err)
 	}
 	if err := shared.ValidateSort(*flags.sort, "createdDate", "-createdDate"); err != nil {
-		return fmt.Errorf("%s: %w", prefix, err)
+		return shared.UsageErrorf("%s: %v", prefix, err)
+	}
+	if err := shared.ValidateInclude(*flags.include, "build", "tester"); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %s\n\n", err)
+		return flag.ErrHelp
 	}
 
 	resolvedAppID := shared.ResolveAppID(*flags.appID)
 	if resolvedAppID == "" && strings.TrimSpace(*flags.next) == "" {
 		fmt.Fprintf(os.Stderr, "Error: --app is required (or set ASC_APP_ID)\n\n")
-		return flag.ErrHelp
+		return shared.MissingRequiredUsageError("--app")
 	}
 
 	client, err := shared.GetASCClient()
@@ -122,6 +125,7 @@ func runListCommand(ctx context.Context, config shared.ListCommandConfig, flags 
 		asc.WithCrashBuildIDs(shared.SplitCSV(*flags.buildID)),
 		asc.WithCrashBuildPreReleaseVersionIDs(shared.SplitCSV(*flags.buildPreRelease)),
 		asc.WithCrashTesterIDs(shared.SplitCSV(*flags.tester)),
+		asc.WithCrashInclude(shared.SplitCSV(*flags.include)),
 		asc.WithCrashLimit(*flags.limit),
 		asc.WithCrashNextURL(*flags.next),
 	}
@@ -152,25 +156,4 @@ func runListCommand(ctx context.Context, config shared.ListCommandConfig, flags 
 	}
 
 	return shared.PrintOutput(crashes, *flags.output.Output, *flags.output.Pretty)
-}
-
-// Crashes command factory
-func CrashesCommand() *ffcli.Command {
-	return NewListCommand(shared.ListCommandConfig{
-		Name:       "crashes",
-		ShortUsage: "asc testflight crashes list [flags]",
-		ShortHelp:  "DEPRECATED: use `asc testflight crashes list`.",
-		LongHelp: `DEPRECATED: use ` + "`asc testflight crashes list`" + `.
-
-This compatibility shim preserves the legacy root crash list behavior while
-the canonical TestFlight surface moves under ` + "`asc testflight crashes ...`" + `.
-
-Examples:
-  asc testflight crashes list --app "123456789"
-  asc testflight crashes list --app "123456789" --device-model "iPhone15,3" --os-version "17.2"
-  asc testflight crashes list --next "<links.next>"`,
-		ErrorPrefix:       "crashes",
-		DeprecatedWarning: "Warning: `asc crashes` is deprecated. Use `asc testflight crashes list`.",
-		UsageFunc:         shared.DeprecatedUsageFunc,
-	})
 }

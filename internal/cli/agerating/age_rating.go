@@ -43,6 +43,8 @@ var ageRatingOverrideV2Values = []string{
 
 var koreaAgeRatingOverrideValues = []string{
 	"NONE",
+	"ALL",
+	"TWELVE_PLUS",
 	"FIFTEEN_PLUS",
 	"NINETEEN_PLUS",
 }
@@ -51,6 +53,12 @@ var kidsAgeBandValues = []string{
 	"FIVE_AND_UNDER",
 	"SIX_TO_EIGHT",
 	"NINE_TO_ELEVEN",
+}
+
+var ageRatingSparseFields441 = []string{
+	"gracRatingClassificationNumber",
+	"socialMedia",
+	"socialMediaAgeRestricted",
 }
 
 // AgeRatingCommand returns the age rating command with subcommands.
@@ -72,6 +80,7 @@ Examples:
 		Subcommands: []*ffcli.Command{
 			AgeRatingViewCommand(),
 			AgeRatingEditCommand(),
+			AgeRatingAuditCommand(),
 		},
 		Exec: func(ctx context.Context, args []string) error {
 			return flag.ErrHelp
@@ -84,8 +93,9 @@ func AgeRatingViewCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("age-rating view", flag.ExitOnError)
 
 	appID := fs.String("app", os.Getenv("ASC_APP_ID"), "App ID (required unless --app-info-id or --version-id is provided)")
-	appInfoID := fs.String("app-info-id", "", "App info ID (optional)")
-	versionID := fs.String("version-id", "", "App Store version ID (optional)")
+	appInfoID := shared.BindResourceIDFlag(fs, "app-info-id", "appInfos", "App info ID (optional)")
+	versionID := shared.BindResourceIDFlag(fs, "version-id", "appStoreVersions", "App Store version ID (optional)")
+	fields := fs.String("fields", "", "Sparse fields: gracRatingClassificationNumber, socialMedia, socialMediaAgeRestricted")
 	output := shared.BindOutputFlags(fs)
 
 	return &ffcli.Command{
@@ -97,6 +107,7 @@ func AgeRatingViewCommand() *ffcli.Command {
 Examples:
   asc age-rating view --app APP_ID
   asc age-rating view --app-info-id APP_INFO_ID
+  asc age-rating view --app-info-id APP_INFO_ID --fields socialMedia,socialMediaAgeRestricted
   asc age-rating view --version-id VERSION_ID`,
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
@@ -110,7 +121,16 @@ Examples:
 			}
 			if appInfoValue == "" && versionValue == "" && appValue == "" {
 				fmt.Fprintln(os.Stderr, "Error: --app is required (or set ASC_APP_ID)")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--app")
+			}
+			fieldValues, err := shared.NormalizeSelection(*fields, ageRatingSparseFields441, "--fields")
+			if err != nil {
+				return shared.UsageError(err.Error())
+			}
+			fieldsProvided := false
+			fs.Visit(func(f *flag.Flag) { fieldsProvided = fieldsProvided || f.Name == "fields" })
+			if fieldsProvided && len(fieldValues) == 0 {
+				return shared.UsageError("--fields must not be empty")
 			}
 
 			client, err := shared.GetASCClient()
@@ -121,7 +141,7 @@ Examples:
 			requestCtx, cancel := shared.ContextWithTimeout(ctx)
 			defer cancel()
 
-			resp, err := fetchAgeRatingDeclaration(requestCtx, client, appValue, appInfoValue, versionValue)
+			resp, err := fetchAgeRatingDeclaration(requestCtx, client, appValue, appInfoValue, versionValue, fieldValues)
 			if err != nil {
 				return fmt.Errorf("age-rating view: %w", err)
 			}
@@ -135,10 +155,10 @@ Examples:
 func AgeRatingEditCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("age-rating edit", flag.ExitOnError)
 
-	id := fs.String("id", "", "Age rating declaration ID (optional)")
+	id := shared.BindResourceIDFlag(fs, "id", "ageRatingDeclarations", "Age rating declaration ID (optional)")
 	appID := fs.String("app", os.Getenv("ASC_APP_ID"), "App ID (required unless --id, --app-info-id, or --version-id is provided)")
-	appInfoID := fs.String("app-info-id", "", "App info ID (optional)")
-	versionID := fs.String("version-id", "", "App Store version ID (optional)")
+	appInfoID := shared.BindResourceIDFlag(fs, "app-info-id", "appInfos", "App info ID (optional)")
+	versionID := shared.BindResourceIDFlag(fs, "version-id", "appStoreVersions", "App Store version ID (optional)")
 	allNone := fs.Bool("all-none", false, "Set all ratings to NONE/false (safe default for apps with no objectionable content)")
 
 	// Boolean content descriptors
@@ -149,6 +169,8 @@ func AgeRatingEditCommand() *ffcli.Command {
 	messagingAndChat := fs.String("messaging-and-chat", "", "Messaging and chat (true/false)")
 	parentalControls := fs.String("parental-controls", "", "Parental controls (true/false)")
 	ageAssurance := fs.String("age-assurance", "", "Age assurance (true/false)")
+	socialMedia := fs.String("social-media", "", "Social media features (true/false)")
+	socialMediaAgeRestricted := fs.String("social-media-age-restricted", "", "Social media is age-restricted (true/false)")
 	unrestrictedWebAccess := fs.String("unrestricted-web-access", "", "Unrestricted web access (true/false)")
 	userGeneratedContent := fs.String("user-generated-content", "", "User-generated content (true/false)")
 
@@ -171,7 +193,9 @@ func AgeRatingEditCommand() *ffcli.Command {
 	kidsAgeBand := fs.String("kids-age-band", "", "Kids age band: FIVE_AND_UNDER, SIX_TO_EIGHT, NINE_TO_ELEVEN")
 	ageRatingOverride := fs.String("age-rating-override", "", "Deprecated age rating override: NONE, NINE_PLUS, THIRTEEN_PLUS, SIXTEEN_PLUS, SEVENTEEN_PLUS, UNRATED")
 	ageRatingOverrideV2 := fs.String("age-rating-override-v2", "", "Age rating override v2: NONE, NINE_PLUS, THIRTEEN_PLUS, SIXTEEN_PLUS, EIGHTEEN_PLUS, UNRATED")
-	koreaAgeRatingOverride := fs.String("korea-age-rating-override", "", "Korea age rating override: NONE, FIFTEEN_PLUS, NINETEEN_PLUS")
+	koreaAgeRatingOverride := fs.String("korea-age-rating-override", "", "Korea age rating override: NONE, ALL, TWELVE_PLUS, FIFTEEN_PLUS, NINETEEN_PLUS")
+	gracNumber := fs.String("grac-rating-classification-number", "", "Korea GRAC rating classification number")
+	clearGracNumber := fs.Bool("clear-grac-rating-classification-number", false, "Clear the Korea GRAC rating classification number")
 	developerAgeRatingInfoURL := fs.String("developer-age-rating-info-url", "", "Developer age rating information URL")
 
 	output := shared.BindOutputFlags(fs)
@@ -185,11 +209,17 @@ func AgeRatingEditCommand() *ffcli.Command {
 Use --all-none to set all ratings to their safe defaults (NONE/false) in one
 command, then override individual fields as needed.
 
+App Store Connect accepts --social-media true only when user-generated content
+is true. It accepts --social-media-age-restricted true only when age assurance
+and social media are both true. Include the matching prerequisite flags when
+enabling these fields unless the declaration already stores them as true.
+
 Examples:
   asc age-rating edit --app APP_ID --all-none
   asc age-rating edit --app APP_ID --all-none --unrestricted-web-access true
   asc age-rating edit --id DECLARATION_ID --gambling false --kids-age-band FIVE_AND_UNDER
-  asc age-rating edit --app APP_ID --violence-realistic FREQUENT_OR_INTENSE --unrestricted-web-access true`,
+  asc age-rating edit --app APP_ID --social-media true --user-generated-content true
+  asc age-rating edit --app APP_ID --social-media-age-restricted true --age-assurance true --social-media true --user-generated-content true`,
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
@@ -208,21 +238,23 @@ Examples:
 				}
 				if appInfoValue == "" && versionValue == "" && appValue == "" {
 					fmt.Fprintln(os.Stderr, "Error: --id or --app is required (or set ASC_APP_ID)")
-					return flag.ErrHelp
+					return shared.MissingRequiredUsageError("")
 				}
 			}
 
 			values := map[string]string{
 				// Boolean content descriptors
-				"advertising":               *advertising,
-				"gambling":                  *gambling,
-				"health-or-wellness-topics": *healthOrWellnessTopics,
-				"loot-box":                  *lootBox,
-				"messaging-and-chat":        *messagingAndChat,
-				"parental-controls":         *parentalControls,
-				"age-assurance":             *ageAssurance,
-				"unrestricted-web-access":   *unrestrictedWebAccess,
-				"user-generated-content":    *userGeneratedContent,
+				"advertising":                 *advertising,
+				"gambling":                    *gambling,
+				"health-or-wellness-topics":   *healthOrWellnessTopics,
+				"loot-box":                    *lootBox,
+				"messaging-and-chat":          *messagingAndChat,
+				"parental-controls":           *parentalControls,
+				"age-assurance":               *ageAssurance,
+				"social-media":                *socialMedia,
+				"social-media-age-restricted": *socialMediaAgeRestricted,
+				"unrestricted-web-access":     *unrestrictedWebAccess,
+				"user-generated-content":      *userGeneratedContent,
 				// Enum content descriptors
 				"alcohol-tobacco-drug-use":      *alcoholTobaccoDrug,
 				"contests":                      *contests,
@@ -249,13 +281,47 @@ Examples:
 				applyAllNoneDefaults(values)
 			}
 
+			// Keep the existing validation/error contract for established fields,
+			// while treating invalid values for the new 4.4.1 boolean flags as
+			// command-line usage errors.
+			for _, flag := range []string{"social-media", "social-media-age-restricted"} {
+				if strings.TrimSpace(values[flag]) == "" {
+					continue
+				}
+				if _, err := shared.ParseOptionalBoolFlag("--"+flag, values[flag]); err != nil {
+					return shared.UsageError(err.Error())
+				}
+			}
+
+			if _, err := parseOptionalEnumFlag("--korea-age-rating-override", *koreaAgeRatingOverride, koreaAgeRatingOverrideValues); err != nil {
+				return shared.UsageError(err.Error())
+			}
+			gracProvided := false
+			fs.Visit(func(f *flag.Flag) { gracProvided = gracProvided || f.Name == "grac-rating-classification-number" })
+			if gracProvided && *clearGracNumber {
+				return shared.UsageError("--grac-rating-classification-number cannot be combined with --clear-grac-rating-classification-number")
+			}
+			gracValue := strings.TrimSpace(*gracNumber)
+			if gracProvided && gracValue == "" {
+				return shared.UsageError("--grac-rating-classification-number must not be empty")
+			}
 			attributes, err := buildAgeRatingAttributes(values)
 			if err != nil {
 				return err
 			}
+			if err := validateAgeRatingDependencies(attributes); err != nil {
+				return err
+			}
+
+			if gracProvided {
+				attributes.GracRatingClassificationNumber = &asc.NullableString{Value: &gracValue}
+			}
+			if *clearGracNumber {
+				attributes.GracRatingClassificationNumber = &asc.NullableString{}
+			}
 
 			if !hasAgeRatingUpdates(attributes) {
-				return fmt.Errorf("age-rating edit: at least one update flag is required")
+				return shared.UsageError("age-rating edit: at least one update flag is required")
 			}
 
 			client, err := shared.GetASCClient()
@@ -283,30 +349,82 @@ Examples:
 	}
 }
 
-func fetchAgeRatingDeclaration(ctx context.Context, client *asc.Client, appID, appInfoID, versionID string) (*asc.AgeRatingDeclarationResponse, error) {
+func validateAgeRatingDependencies(attrs asc.AgeRatingDeclarationAttributes) error {
+	if boolIsTrue(nullableBoolValue(attrs.SocialMedia)) && boolIsFalse(attrs.UserGeneratedContent) {
+		return shared.UsageError("--social-media true cannot be combined with --user-generated-content false")
+	}
+	if boolIsTrue(nullableBoolValue(attrs.SocialMediaAgeRestricted)) && boolIsFalse(attrs.AgeAssurance) {
+		return shared.UsageError("--social-media-age-restricted true cannot be combined with --age-assurance false")
+	}
+	if boolIsTrue(nullableBoolValue(attrs.SocialMediaAgeRestricted)) && boolIsFalse(nullableBoolValue(attrs.SocialMedia)) {
+		return shared.UsageError("--social-media-age-restricted true cannot be combined with --social-media false")
+	}
+	if boolIsTrue(nullableBoolValue(attrs.SocialMediaAgeRestricted)) && boolIsFalse(attrs.UserGeneratedContent) {
+		return shared.UsageError("--social-media-age-restricted true cannot be combined with --user-generated-content false")
+	}
+	return nil
+}
+
+func boolIsTrue(value *bool) bool {
+	return value != nil && *value
+}
+
+func boolIsFalse(value *bool) bool {
+	return value != nil && !*value
+}
+
+func nullableBoolValue(value *asc.NullableBool) *bool {
+	if value == nil {
+		return nil
+	}
+	return value.Value
+}
+
+func fetchAgeRatingDeclaration(ctx context.Context, client *asc.Client, appID, appInfoID, versionID string, fields []string) (*asc.AgeRatingDeclarationResponse, error) {
+	opts := []asc.AgeRatingDeclarationOption{asc.WithAgeRatingDeclarationFields(fields)}
 	switch {
 	case appInfoID != "":
-		return client.GetAgeRatingDeclarationForAppInfo(ctx, appInfoID)
+		return client.GetAgeRatingDeclarationForAppInfo(ctx, appInfoID, opts...)
 	case versionID != "":
-		return client.GetAgeRatingDeclarationForAppStoreVersion(ctx, versionID)
+		return client.GetAgeRatingDeclarationForAppStoreVersion(ctx, versionID, opts...)
 	default:
-		appInfos, err := client.GetAppInfos(ctx, appID)
+		appInfoID, err := resolveAppInfoIDForApp(ctx, client, appID)
 		if err != nil {
-			return nil, fmt.Errorf("failed to get app info: %w", err)
+			return nil, fmt.Errorf("failed to resolve current app info: %w", err)
 		}
-		if len(appInfos.Data) == 0 {
-			return nil, fmt.Errorf("no app info found for app %s", appID)
-		}
-		appInfoID := appInfos.Data[0].ID
-		if strings.TrimSpace(appInfoID) == "" {
-			return nil, fmt.Errorf("app info id is empty for app %s", appID)
-		}
-		return client.GetAgeRatingDeclarationForAppInfo(ctx, appInfoID)
+		return client.GetAgeRatingDeclarationForAppInfo(ctx, appInfoID, opts...)
 	}
 }
 
+// While a new version is being prepared, an app has a live and an editable app
+// info; like shared.ResolveAppInfoIDWithFlag, select the editable one. Unlike it,
+// read every page and skip historical app infos.
+func resolveAppInfoIDForApp(ctx context.Context, client *asc.Client, appID string) (string, error) {
+	candidates, err := client.ListAppInfoCandidatesForApp(ctx, appID)
+	if err != nil {
+		return "", err
+	}
+	current := asc.CurrentAppInfoCandidates(candidates)
+	if len(current) == 0 {
+		return "", fmt.Errorf(
+			"no current app info found for app %q (%s); run `asc apps info list --app %q` to inspect candidates",
+			appID,
+			asc.FormatAppInfoCandidates(candidates),
+			appID,
+		)
+	}
+	if len(current) == 1 && current[0].ID != "" {
+		return current[0].ID, nil
+	}
+	if editableID, ok := asc.AutoResolveAppInfoIDByVersionState(current, "PREPARE_FOR_SUBMISSION"); ok {
+		fmt.Fprintf(os.Stderr, "Multiple app infos found for app %s, auto-selected %s (PREPARE_FOR_SUBMISSION).\n", appID, editableID)
+		return editableID, nil
+	}
+	return "", shared.AmbiguousAppInfoError(appID, "--app-info-id", current)
+}
+
 func resolveAgeRatingDeclarationID(ctx context.Context, client *asc.Client, appID, appInfoID, versionID string) (string, error) {
-	resp, err := fetchAgeRatingDeclaration(ctx, client, appID, appInfoID, versionID)
+	resp, err := fetchAgeRatingDeclaration(ctx, client, appID, appInfoID, versionID, nil)
 	if err != nil {
 		return "", err
 	}
@@ -341,6 +459,22 @@ func buildAgeRatingAttributes(values map[string]string) (asc.AgeRatingDeclaratio
 			return attrs, err
 		}
 		*f.dest = val
+	}
+	nullableBoolFields := []struct {
+		flag string
+		dest **asc.NullableBool
+	}{
+		{"social-media", &attrs.SocialMedia},
+		{"social-media-age-restricted", &attrs.SocialMediaAgeRestricted},
+	}
+	for _, f := range nullableBoolFields {
+		val, err := shared.ParseOptionalBoolFlag("--"+f.flag, values[f.flag])
+		if err != nil {
+			return attrs, err
+		}
+		if val != nil {
+			*f.dest = &asc.NullableBool{Value: val}
+		}
 	}
 
 	// Enum content descriptors (NONE, INFREQUENT_OR_MILD, FREQUENT_OR_INTENSE)
@@ -393,6 +527,8 @@ func hasAgeRatingUpdates(attrs asc.AgeRatingDeclarationAttributes) bool {
 		attrs.MessagingAndChat != nil ||
 		attrs.ParentalControls != nil ||
 		attrs.AgeAssurance != nil ||
+		attrs.SocialMedia != nil ||
+		attrs.SocialMediaAgeRestricted != nil ||
 		attrs.UnrestrictedWebAccess != nil ||
 		attrs.UserGeneratedContent != nil ||
 		attrs.AlcoholTobaccoOrDrugUseOrReferences != nil ||
@@ -412,6 +548,7 @@ func hasAgeRatingUpdates(attrs asc.AgeRatingDeclarationAttributes) bool {
 		attrs.AgeRatingOverride != nil ||
 		attrs.AgeRatingOverrideV2 != nil ||
 		attrs.KoreaAgeRatingOverride != nil ||
+		attrs.GracRatingClassificationNumber != nil ||
 		attrs.DeveloperAgeRatingInfoURL != nil
 }
 
@@ -425,6 +562,8 @@ var allNoneBoolFlags = []string{
 	"messaging-and-chat",
 	"parental-controls",
 	"age-assurance",
+	"social-media",
+	"social-media-age-restricted",
 	"unrestricted-web-access",
 	"user-generated-content",
 }

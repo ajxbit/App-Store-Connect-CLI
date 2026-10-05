@@ -25,7 +25,7 @@ func PromotedPurchasesCommand() *ffcli.Command {
 
 Examples:
   asc promoted-purchases list --app "APP_ID"
-  asc promoted-purchases get --promoted-purchase-id "PROMO_ID"
+  asc promoted-purchases view --promoted-purchase-id "PROMO_ID"
   asc promoted-purchases create --app "APP_ID" --product-id "PRODUCT_ID" --product-type SUBSCRIPTION --visible-for-all-users
   asc promoted-purchases update --promoted-purchase-id "PROMO_ID" --enabled false
   asc promoted-purchases delete --promoted-purchase-id "PROMO_ID" --confirm
@@ -74,13 +74,13 @@ Examples:
 				return flag.ErrHelp
 			}
 			if err := shared.ValidateNextURL(*next); err != nil {
-				return fmt.Errorf("promoted-purchases list: %w", err)
+				return shared.UsageErrorf("promoted-purchases list: %v", err)
 			}
 
 			resolvedAppID := shared.ResolveAppID(*appID)
 			if resolvedAppID == "" && strings.TrimSpace(*next) == "" {
 				fmt.Fprintln(os.Stderr, "Error: --app is required (or set ASC_APP_ID)")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--app")
 			}
 
 			client, err := shared.GetASCClient()
@@ -125,31 +125,31 @@ Examples:
 
 // PromotedPurchasesGetCommand returns the promoted purchases get subcommand.
 func PromotedPurchasesGetCommand() *ffcli.Command {
-	fs := flag.NewFlagSet("get", flag.ExitOnError)
+	fs := flag.NewFlagSet("view", flag.ExitOnError)
 
-	id := fs.String("promoted-purchase-id", "", "Promoted purchase ID")
+	id := shared.BindResourceIDFlag(fs, "promoted-purchase-id", "promotedPurchases", "Promoted purchase ID")
 	output := shared.BindOutputFlags(fs)
 
 	return &ffcli.Command{
-		Name:       "get",
-		ShortUsage: "asc promoted-purchases get --promoted-purchase-id PROMO_ID",
-		ShortHelp:  "Get a promoted purchase by ID.",
-		LongHelp: `Get a promoted purchase by ID.
+		Name:       "view",
+		ShortUsage: "asc promoted-purchases view --promoted-purchase-id PROMO_ID",
+		ShortHelp:  "View a promoted purchase by ID.",
+		LongHelp: `View a promoted purchase by ID.
 
 Examples:
-  asc promoted-purchases get --promoted-purchase-id "PROMO_ID"`,
+  asc promoted-purchases view --promoted-purchase-id "PROMO_ID"`,
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
 			idValue := strings.TrimSpace(*id)
 			if idValue == "" {
 				fmt.Fprintln(os.Stderr, "Error: --promoted-purchase-id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--promoted-purchase-id")
 			}
 
 			client, err := shared.GetASCClient()
 			if err != nil {
-				return fmt.Errorf("promoted-purchases get: %w", err)
+				return fmt.Errorf("promoted-purchases view: %w", err)
 			}
 
 			requestCtx, cancel := shared.ContextWithTimeout(ctx)
@@ -157,7 +157,7 @@ Examples:
 
 			resp, err := client.GetPromotedPurchase(requestCtx, idValue)
 			if err != nil {
-				return fmt.Errorf("promoted-purchases get: failed to fetch: %w", err)
+				return fmt.Errorf("promoted-purchases view: failed to fetch: %w", err)
 			}
 
 			return shared.PrintOutput(resp, *output.Output, *output.Pretty)
@@ -193,18 +193,18 @@ Examples:
 			resolvedAppID := shared.ResolveAppID(*appID)
 			if resolvedAppID == "" {
 				fmt.Fprintln(os.Stderr, "Error: --app is required (or set ASC_APP_ID)")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--app")
 			}
 
 			productIDValue := strings.TrimSpace(*productID)
 			if productIDValue == "" {
 				fmt.Fprintln(os.Stderr, "Error: --product-id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--product-id")
 			}
 
 			if strings.TrimSpace(*productType) == "" {
 				fmt.Fprintln(os.Stderr, "Error: --product-type is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--product-type")
 			}
 
 			productTypeValue, err := normalizePromotedPurchaseProductType(*productType)
@@ -215,7 +215,7 @@ Examples:
 
 			if !visibleForAllUsers.IsSet() {
 				fmt.Fprintln(os.Stderr, "Error: --visible-for-all-users is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--visible-for-all-users")
 			}
 
 			client, err := shared.GetASCClient()
@@ -275,7 +275,7 @@ Examples:
 func PromotedPurchasesUpdateCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("update", flag.ExitOnError)
 
-	id := fs.String("promoted-purchase-id", "", "Promoted purchase ID")
+	id := shared.BindResourceIDFlag(fs, "promoted-purchase-id", "promotedPurchases", "Promoted purchase ID")
 	var visibleForAllUsers shared.OptionalBool
 	fs.Var(&visibleForAllUsers, "visible-for-all-users", "Visible for all users: true or false")
 	var enabled shared.OptionalBool
@@ -297,11 +297,11 @@ Examples:
 			idValue := strings.TrimSpace(*id)
 			if idValue == "" {
 				fmt.Fprintln(os.Stderr, "Error: --promoted-purchase-id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--promoted-purchase-id")
 			}
 			if !visibleForAllUsers.IsSet() && !enabled.IsSet() {
 				fmt.Fprintln(os.Stderr, "Error: at least one update flag is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("")
 			}
 
 			client, err := shared.GetASCClient()
@@ -336,7 +336,7 @@ Examples:
 func PromotedPurchasesDeleteCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("delete", flag.ExitOnError)
 
-	id := fs.String("promoted-purchase-id", "", "Promoted purchase ID")
+	id := shared.BindResourceIDFlag(fs, "promoted-purchase-id", "promotedPurchases", "Promoted purchase ID")
 	confirm := fs.Bool("confirm", false, "Confirm deletion")
 	output := shared.BindOutputFlags(fs)
 
@@ -353,13 +353,13 @@ Examples:
 		Exec: func(ctx context.Context, args []string) error {
 			if !*confirm {
 				fmt.Fprintln(os.Stderr, "Error: --confirm is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--confirm")
 			}
 
 			idValue := strings.TrimSpace(*id)
 			if idValue == "" {
 				fmt.Fprintln(os.Stderr, "Error: --promoted-purchase-id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--promoted-purchase-id")
 			}
 
 			client, err := shared.GetASCClient()
@@ -389,7 +389,7 @@ func PromotedPurchasesLinkCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("link", flag.ExitOnError)
 
 	appID := fs.String("app", "", "App Store Connect app ID (or ASC_APP_ID)")
-	promotedIDs := fs.String("promoted-purchase-id", "", "Comma-separated promoted purchase IDs")
+	promotedIDs := shared.BindOnceCSVFlag(fs, "promoted-purchase-id", "Comma-separated promoted purchase IDs")
 	clear := fs.Bool("clear", false, "Remove all promoted purchases from the app")
 	confirm := fs.Bool("confirm", false, "Confirm removal when using --clear")
 	output := shared.BindOutputFlags(fs)
@@ -410,25 +410,25 @@ Examples:
 			resolvedAppID := shared.ResolveAppID(*appID)
 			if resolvedAppID == "" {
 				fmt.Fprintln(os.Stderr, "Error: --app is required (or set ASC_APP_ID)")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--app")
 			}
 
 			var promotedPurchaseIDs []string
 			if *clear {
-				if strings.TrimSpace(*promotedIDs) != "" {
+				if strings.TrimSpace(promotedIDs.String()) != "" {
 					fmt.Fprintln(os.Stderr, "Error: --clear cannot be used with --promoted-purchase-id")
 					return flag.ErrHelp
 				}
 				if !*confirm {
 					fmt.Fprintln(os.Stderr, "Error: --confirm is required with --clear")
-					return flag.ErrHelp
+					return shared.MissingRequiredUsageError("--confirm")
 				}
 				promotedPurchaseIDs = nil
 			} else {
-				promotedPurchaseIDs = shared.SplitCSV(*promotedIDs)
+				promotedPurchaseIDs = shared.SplitCSV(promotedIDs.String())
 				if len(promotedPurchaseIDs) == 0 {
 					fmt.Fprintln(os.Stderr, "Error: --promoted-purchase-id is required")
-					return flag.ErrHelp
+					return shared.MissingRequiredUsageError("--promoted-purchase-id")
 				}
 			}
 

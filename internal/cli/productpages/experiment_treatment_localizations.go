@@ -47,7 +47,7 @@ Examples:
 func ExperimentTreatmentLocalizationsListCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("treatment-localizations list", flag.ExitOnError)
 
-	treatmentID := fs.String("treatment-id", "", "Treatment ID")
+	treatmentID := shared.BindResourceIDFlag(fs, "treatment-id", "appStoreVersionExperimentTreatments", "Treatment ID")
 	limit := fs.Int("limit", 0, "Maximum results per page (1-200)")
 	next := fs.String("next", "", "Fetch next page using a links.next URL")
 	paginate := fs.Bool("paginate", false, "Automatically fetch all pages (aggregate results)")
@@ -66,16 +66,16 @@ Examples:
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
 			if *limit != 0 && (*limit < 1 || *limit > productPagesMaxLimit) {
-				return fmt.Errorf("experiments treatments localizations list: --limit must be between 1 and %d", productPagesMaxLimit)
+				return shared.UsageErrorf("experiments treatments localizations list: --limit must be between 1 and %d", productPagesMaxLimit)
 			}
 			if err := shared.ValidateNextURL(*next); err != nil {
-				return fmt.Errorf("experiments treatments localizations list: %w", err)
+				return shared.UsageErrorf("experiments treatments localizations list: %v", err)
 			}
 
 			trimmedID := strings.TrimSpace(*treatmentID)
 			if trimmedID == "" {
 				fmt.Fprintln(os.Stderr, "Error: --treatment-id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--treatment-id")
 			}
 
 			client, err := shared.GetASCClient()
@@ -120,31 +120,31 @@ Examples:
 
 // ExperimentTreatmentLocalizationsGetCommand returns the treatment localizations get subcommand.
 func ExperimentTreatmentLocalizationsGetCommand() *ffcli.Command {
-	fs := flag.NewFlagSet("treatment-localizations get", flag.ExitOnError)
+	fs := flag.NewFlagSet("treatment-localizations view", flag.ExitOnError)
 
-	localizationID := fs.String("localization-id", "", "Treatment localization ID")
+	localizationID := shared.BindResourceIDFlag(fs, "localization-id", "appStoreVersionExperimentTreatmentLocalizations", "Treatment localization ID")
 	output := shared.BindOutputFlags(fs)
 
 	return &ffcli.Command{
-		Name:       "get",
-		ShortUsage: "asc product-pages experiments treatments localizations get --localization-id \"LOCALIZATION_ID\"",
-		ShortHelp:  "Get a treatment localization by ID.",
-		LongHelp: `Get a treatment localization by ID.
+		Name:       "view",
+		ShortUsage: "asc product-pages experiments treatments localizations view --localization-id \"LOCALIZATION_ID\"",
+		ShortHelp:  "View a treatment localization by ID.",
+		LongHelp: `View a treatment localization by ID.
 
 Examples:
-  asc product-pages experiments treatments localizations get --localization-id "LOCALIZATION_ID"`,
+  asc product-pages experiments treatments localizations view --localization-id "LOCALIZATION_ID"`,
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
 			trimmedID := strings.TrimSpace(*localizationID)
 			if trimmedID == "" {
 				fmt.Fprintln(os.Stderr, "Error: --localization-id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--localization-id")
 			}
 
 			client, err := shared.GetASCClient()
 			if err != nil {
-				return fmt.Errorf("experiments treatments localizations get: %w", err)
+				return fmt.Errorf("experiments treatments localizations view: %w", err)
 			}
 
 			requestCtx, cancel := shared.ContextWithTimeout(ctx)
@@ -152,7 +152,7 @@ Examples:
 
 			resp, err := client.GetAppStoreVersionExperimentTreatmentLocalization(requestCtx, trimmedID)
 			if err != nil {
-				return fmt.Errorf("experiments treatments localizations get: failed to fetch: %w", err)
+				return fmt.Errorf("experiments treatments localizations view: failed to fetch: %w", err)
 			}
 
 			return shared.PrintOutput(resp, *output.Output, *output.Pretty)
@@ -164,7 +164,7 @@ Examples:
 func ExperimentTreatmentLocalizationsCreateCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("treatment-localizations create", flag.ExitOnError)
 
-	treatmentID := fs.String("treatment-id", "", "Treatment ID")
+	treatmentID := shared.BindResourceIDFlag(fs, "treatment-id", "appStoreVersionExperimentTreatments", "Treatment ID")
 	locale := fs.String("locale", "", "Localization locale (e.g., en-US)")
 	output := shared.BindOutputFlags(fs)
 
@@ -182,13 +182,13 @@ Examples:
 			trimmedID := strings.TrimSpace(*treatmentID)
 			if trimmedID == "" {
 				fmt.Fprintln(os.Stderr, "Error: --treatment-id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--treatment-id")
 			}
 
 			localeValue := strings.TrimSpace(*locale)
 			if localeValue == "" {
 				fmt.Fprintln(os.Stderr, "Error: --locale is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--locale")
 			}
 
 			client, err := shared.GetASCClient()
@@ -213,7 +213,7 @@ Examples:
 func ExperimentTreatmentLocalizationsDeleteCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("treatment-localizations delete", flag.ExitOnError)
 
-	localizationID := fs.String("localization-id", "", "Treatment localization ID")
+	localizationID := shared.BindResourceIDFlag(fs, "localization-id", "appStoreVersionExperimentTreatmentLocalizations", "Treatment localization ID")
 	confirm := fs.Bool("confirm", false, "Confirm deletion")
 	output := shared.BindOutputFlags(fs)
 
@@ -231,11 +231,11 @@ Examples:
 			trimmedID := strings.TrimSpace(*localizationID)
 			if trimmedID == "" {
 				fmt.Fprintln(os.Stderr, "Error: --localization-id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--localization-id")
 			}
 			if !*confirm {
 				fmt.Fprintln(os.Stderr, "Error: --confirm is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--confirm")
 			}
 
 			client, err := shared.GetASCClient()

@@ -77,8 +77,27 @@ View details for an app store version.
 In 1.0, the deprecated `asc versions get` alias was removed. Use
 `asc versions view` as the canonical command.
 
-<ParamField path="--version-id" type="string" required>
-  App Store version ID
+Provide either `--version-id`, or the `--app` and `--version`
+selectors. `--platform` defaults to `IOS` for selector-based lookup.
+Selector lookup first resolves the version ID, then fetches its details. Use
+`--version-id` to retain the single-request path for automation. Conflicting or
+incomplete selectors, and unsupported platform values, exit with a usage error
+before authentication or API requests.
+
+<ParamField path="--version-id" type="string">
+  App Store version ID. Cannot be combined with the alternate selectors.
+</ParamField>
+
+<ParamField path="--app" type="string">
+  App Store Connect app ID (or `ASC_APP_ID`)
+</ParamField>
+
+<ParamField path="--version" type="string">
+  Version string used with `--app`
+</ParamField>
+
+<ParamField path="--platform" type="string" default="IOS">
+  Platform used with `--app` and `--version`: `IOS`, `MAC_OS`, `TV_OS`, or `VISION_OS`
 </ParamField>
 
 <ParamField path="--include-build" type="boolean" default="false">
@@ -90,13 +109,15 @@ In 1.0, the deprecated `asc versions get` alias was removed. Use
 </ParamField>
 
 <ParamField path="--include" type="string">
-  Include related resources (comma-separated): `ageRatingDeclaration`, `appStoreReviewDetail`, `appClipDefaultExperience`, `appStoreVersionExperiments`, `appStoreVersionExperimentsV2`, `appStoreVersionSubmission`, `customerReviews`, `routingAppCoverage`, `alternativeDistributionPackage`, `gameCenterAppVersion`
+  Include related resources (comma-separated): `ageRatingDeclaration`, `app`, `appStoreVersionLocalizations`, `build`, `appStoreVersionPhasedRelease`, `gameCenterAppVersion`, `routingAppCoverage`, `appStoreReviewDetail`, `appStoreVersionSubmission`, `appClipDefaultExperience`, `appStoreVersionExperiments`, `appStoreVersionExperimentsV2`, `alternativeDistributionPackage`
 </ParamField>
 
 **Examples:**
 
 ```bash  theme={null}
 asc versions view --version-id "VERSION_ID"
+asc versions view --app "123456789" --version "1.2.3"
+asc versions view --app "123456789" --version "1.2.3" --platform MAC_OS
 asc versions view --version-id "VERSION_ID" --include-build --include-submission
 asc versions view --version-id "VERSION_ID" --include "ageRatingDeclaration,appStoreReviewDetail"
 ```
@@ -186,6 +207,14 @@ Update an app store version.
   Version string (e.g., 1.0.1)
 </ParamField>
 
+<ParamField path="--downloadable" type="boolean">
+  Download availability for this version on older operating systems and devices (`true` or `false`). This is the public API surface behind App Store Connect's Last-Compatible Version Settings screen. The flag is tri-state: leaving it unset sends no `downloadable` attribute, so an unrelated update never changes download availability.
+</ParamField>
+
+<ParamField path="--confirm" type="boolean">
+  Required with `--downloadable false`, because making a previously released version unavailable for download is not reversible from every state. It is rejected as a usage error in any other combination rather than silently ignored, including an explicit `--confirm=false`.
+</ParamField>
+
 **Examples:**
 
 ```bash  theme={null}
@@ -193,7 +222,11 @@ asc versions update --version-id "VERSION_ID" --copyright "2026 My Company"
 asc versions update --version-id "VERSION_ID" --release-type MANUAL
 asc versions update --version-id "VERSION_ID" --release-type SCHEDULED --earliest-release-date "2026-02-01T08:00:00+00:00"
 asc versions update --version-id "VERSION_ID" --version "1.0.1"
+asc versions update --version-id "VERSION_ID" --downloadable true
+asc versions update --version-id "VERSION_ID" --downloadable false --confirm
 ```
+
+Read the current value with `asc versions list --app "APP_ID" --paginate --output json` or `asc versions view --version-id "VERSION_ID" --output json`. `--paginate` matters here because the oldest versions, the ones this setting usually targets, fall past the first page. Apple omits `downloadable` for versions that never carried the setting, so an absent key means Apple did not report the attribute.
 
 **Response:**
 
@@ -241,18 +274,50 @@ asc versions delete --version-id "VERSION_ID" --confirm
 
 Attach a build to an app store version.
 
-<ParamField path="--version-id" type="string" required>
+Select the version with `--version-id`, or with `--app` and `--version`. Select
+the build with `--build-id`, `--build-number`, or `--latest`. `--build-number`
+and `--latest` only match builds of the version's app, version string, and
+platform, and the selected build must be `VALID` unless `--wait` waits for
+processing first.
+
+<ParamField path="--version-id" type="string">
   App Store version ID
 </ParamField>
 
-<ParamField path="--build" type="string" required>
+<ParamField path="--app" type="string">
+  App Store Connect app ID, bundle ID, or exact app name. Required with `--version`, `--platform`, `--build-number`, or `--latest`
+</ParamField>
+
+<ParamField path="--version" type="string">
+  App Store version string, resolved with `--app` and `--platform`
+</ParamField>
+
+<ParamField path="--platform" type="string" default="IOS">
+  Platform: `IOS`, `MAC_OS`, `TV_OS`, `VISION_OS`
+</ParamField>
+
+<ParamField path="--build-id" type="string">
   Build ID to attach
+</ParamField>
+
+<ParamField path="--build-number" type="string">
+  Build number (CFBundleVersion) to attach from the version's train
+</ParamField>
+
+<ParamField path="--latest" type="boolean">
+  Attach the most recently uploaded build of the version's train. Right after an upload, prefer `--build-number`
+</ParamField>
+
+<ParamField path="--wait" type="boolean">
+  Wait for the selected build to finish processing before attaching. Use `--timeout` and `--poll-interval` to tune it
 </ParamField>
 
 **Examples:**
 
 ```bash  theme={null}
-asc versions attach-build --version-id "VERSION_ID" --build "BUILD_ID"
+asc versions attach-build --version-id "VERSION_ID" --build-id "BUILD_ID"
+asc versions attach-build --app "123456789" --version "1.2.0" --build-number "45"
+asc versions attach-build --app "123456789" --version "1.2.0" --build-number "46" --wait --timeout 30m
 ```
 
 **Response:**
@@ -296,19 +361,82 @@ asc versions release --version-id "VERSION_ID" --confirm
 
 ***
 
+### `asc versions rating-reset`
+
+Schedule, inspect, or cancel the overview-rating reset for
+an App Store version. Apple doesn't include this web-session endpoint in its
+published OpenAPI specification, so the resource may change without notice.
+
+The reset affects every country or region for the selected platform when the
+version is released. Written reviews remain visible. After release, the
+previous overview rating can't be restored.
+
+These commands use an authenticated Apple Account web session. Run `asc web
+auth login` first when no valid cached session is available. Use `--apple-id`
+to select a specific cached account and `--provider-id` or
+`--public-provider-id` to select its App Store Connect provider.
+
+View the current request:
+
+```bash  theme={null}
+asc versions rating-reset view --version-id "VERSION_ID"
+```
+
+Schedule a reset:
+
+```bash  theme={null}
+asc versions rating-reset create --version-id "VERSION_ID" --confirm
+```
+
+Cancel it before release:
+
+```bash  theme={null}
+asc versions rating-reset delete --id "RESET_REQUEST_ID" --confirm
+```
+
+The create command returns:
+
+```json  theme={null}
+{
+  "ratingResetRequestId": "RESET_REQUEST_ID",
+  "versionId": "VERSION_ID",
+  "scheduled": true
+}
+```
+
+The delete command returns:
+
+```json  theme={null}
+{
+  "ratingResetRequestId": "RESET_REQUEST_ID",
+  "cancelled": true
+}
+```
+
+***
+
 ## Common Usage Patterns
 
 ### Create a new version and attach a build
 
 ```bash  theme={null}
 asc versions create --app "123456789" --version "2.0.0" --platform IOS
-asc versions attach-build --version-id "VERSION_ID" --build "BUILD_ID"
+asc versions attach-build --app "123456789" --version "2.0.0" --build-number "45"
 ```
 
 ### List versions in a specific state
 
 ```bash  theme={null}
 asc versions list --app "123456789" --state WAITING_FOR_REVIEW,IN_REVIEW
+```
+
+### Find the live version
+
+App Store Connect reports a live version as `appVersionState` `READY_FOR_DISTRIBUTION`, the deprecated `appStoreState` `READY_FOR_SALE`, or both, and one `--state` filter cannot match both. Replaced versions can still report `READY_FOR_SALE`, so list that state with `--paginate` rather than `--latest`, skip results whose `appVersionState` is present and is not `READY_FOR_DISTRIBUTION`, and keep the newest version left on each platform across both lists.
+
+```bash  theme={null}
+asc versions list --app "123456789" --state READY_FOR_DISTRIBUTION --latest
+asc versions list --app "123456789" --state READY_FOR_SALE --paginate
 ```
 
 ### Update version release type
@@ -333,7 +461,8 @@ asc versions release --version-id "VERSION_ID" --confirm
 * `PENDING_DEVELOPER_RELEASE` - Approved and waiting for developer to release
 * `PROCESSING_FOR_APP_STORE` - Processing for release
 * `PENDING_APPLE_RELEASE` - Pending Apple release
-* `READY_FOR_SALE` - Live on the App Store
+* `READY_FOR_DISTRIBUTION` - Live on the App Store (`appVersionState`)
+* `READY_FOR_SALE` - Live on the App Store (deprecated `appStoreState`; replaced versions can still report it)
 * `REMOVED_FROM_SALE` - Removed from sale
 * `DEVELOPER_REJECTED` - Rejected by developer
 * `REJECTED` - Rejected by Apple

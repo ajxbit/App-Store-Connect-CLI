@@ -18,15 +18,15 @@ func ScreenshotsCommand() *ffcli.Command {
 	return &ffcli.Command{
 		Name:       "screenshots",
 		ShortUsage: "asc screenshots <subcommand> [flags]",
-		ShortHelp:  "Upload and manage App Store screenshots; local capture/frame workflow is [experimental].",
+		ShortHelp:  "Upload and manage App Store screenshots, including local capture, framing, and matrices.",
 		LongHelp: `Manage the full screenshot workflow from local capture to App Store upload.
 
-Local screenshot automation commands are experimental.
 If you face issues, please file feedback at:
-https://github.com/rudrankriyam/App-Store-Connect-CLI/issues/new/choose
+https://github.com/rorkai/App-Store-Connect-CLI/issues/new/choose
 
-Local workflow (experimental):
+Local workflow:
   asc screenshots run --plan .asc/screenshots.json
+  asc screenshots matrix --plan .asc/screenshots-matrix.json
   asc screenshots capture --bundle-id "com.example.app" --name home
   asc screenshots frame --input ./screenshots/raw/home.png --device iphone-air
   asc screenshots review-generate --framed-dir ./screenshots/framed
@@ -37,14 +37,16 @@ Local workflow (experimental):
   asc screenshots list-frame-devices --output json
 
 App Store workflow:
-  asc screenshots list --version-localization "LOC_ID"
+  asc screenshots list --version-localization "VERSION_LOCALIZATION_ID"
+  asc screenshots list --version-id "VERSION_ID" --locale "en-US"
+  asc screenshots list --app "123456789" --version "1.2.3"
   asc screenshots sizes
   asc screenshots sizes --all
   asc screenshots validate --path "./screenshots/iphone" --device-type "IPHONE_65"
-  asc screenshots upload --version-localization "LOC_ID" --path "./screenshots/iphone" --device-type "IPHONE_65"
+  asc screenshots upload --version-localization "VERSION_LOCALIZATION_ID" --path "./screenshots/iphone" --device-type "IPHONE_65"
   asc screenshots upload --app "123456789" --version "1.2.3" --path "./screenshots" --device-type "IPHONE_65"
-  asc screenshots upload --version-localization "LOC_ID" --path "./screenshots/ipad" --device-type "IPAD_PRO_3GEN_129"
-  asc screenshots download --version-localization "LOC_ID" --output-dir "./screenshots/downloaded"
+  asc screenshots upload --version-localization "VERSION_LOCALIZATION_ID" --path "./screenshots/ipad" --device-type "IPAD_PRO_3GEN_129"
+  asc screenshots download --version-localization "VERSION_LOCALIZATION_ID" --output-dir "./screenshots/downloaded"
   asc screenshots delete --id "SCREENSHOT_ID" --confirm
 
 For most iOS submissions, one iPhone set (IPHONE_65) and one iPad set
@@ -54,6 +56,7 @@ default; use --all only when you need the full matrix.`,
 		UsageFunc: shared.DefaultUsageFunc,
 		Subcommands: []*ffcli.Command{
 			shots.ShotsRunCommand(),
+			shots.ShotsMatrixCommand(),
 			shots.ShotsCaptureCommand(),
 			shots.ShotsFrameCommand(),
 			shots.ShotsFramesListDevicesCommand(),

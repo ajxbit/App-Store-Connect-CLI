@@ -28,8 +28,8 @@ func ShotsReviewApproveCommand() *ffcli.Command {
 	return &ffcli.Command{
 		Name:       "review-approve",
 		ShortUsage: "asc screenshots review-approve [--all-ready | --key key1,key2 | --id home] [flags]",
-		ShortHelp:  "[experimental] Write/update approved.json from review manifest selectors.",
-		LongHelp: `Approve review entries and persist to approved.json (experimental).
+		ShortHelp:  "Write/update approved.json from review manifest selectors.",
+		LongHelp: `Approve review entries and persist to approved.json.
 
 Selectors:
 - --all-ready: approve all status=ready entries
@@ -45,13 +45,13 @@ Selectors:
 			deviceVal := strings.TrimSpace(*device)
 			if !*allReady && len(keys) == 0 && id == "" && localeVal == "" && deviceVal == "" {
 				fmt.Fprintln(os.Stderr, "Error: provide at least one selector: --all-ready, --key, --id, --locale, or --device")
-				return flag.ErrHelp
+				return shared.WithDiagnostic(flag.ErrHelp, shared.DiagnosticRequiredInputMissing, "")
 			}
 
 			result, err := screenshots.ApproveReview(ctx, screenshots.ReviewApproveRequest{
-				OutputDir:    strings.TrimSpace(*outputDir),
-				ManifestPath: strings.TrimSpace(*manifestPath),
-				ApprovalPath: strings.TrimSpace(*approvalPath),
+				OutputDir:    *outputDir,
+				ManifestPath: *manifestPath,
+				ApprovalPath: *approvalPath,
 				AllReady:     *allReady,
 				Keys:         keys,
 				ScreenshotID: id,

@@ -47,24 +47,19 @@ func (c *Client) SearchApps(ctx context.Context, term, country string, limit int
 		query.Set("limit", fmt.Sprintf("%d", limit))
 	}
 
-	req, err := c.newRequest(ctx, http.MethodGet, "/search", query)
+	req, err := c.newRequest(ctx, "/search", query)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
 
-	resp, err := c.httpClient().Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("search request failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("search request returned status %d", resp.StatusCode)
-	}
-
 	var payload searchResponse
-	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
-		return nil, fmt.Errorf("failed to parse search response: %w", err)
+	if err := c.do(ctx, "search", req, func(resp *http.Response) error {
+		if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+			return fmt.Errorf("failed to parse search response: %w", err)
+		}
+		return nil
+	}); err != nil {
+		return nil, err
 	}
 
 	results := make([]SearchResult, 0, len(payload.Results))

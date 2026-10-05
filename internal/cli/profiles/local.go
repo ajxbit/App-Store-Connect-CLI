@@ -18,11 +18,30 @@ import (
 
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/asc"
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/cli/shared"
+	xcodecore "github.com/rudrankriyam/App-Store-Connect-CLI/internal/xcode"
 )
+
+const profilesLocalDirectoryHelp = `On macOS, the default directory follows the active Xcode:
+  Xcode 16 or newer: ~/Library/Developer/Xcode/UserData/Provisioning Profiles
+  Xcode 15 or older: ~/Library/MobileDevice/Provisioning Profiles
+
+When no full Xcode is active (for example a Command Line Tools only host),
+~/Library/MobileDevice/Provisioning Profiles is used and a note is written to
+stderr. Use --install-dir to choose a directory explicitly.`
+
+const profilesLocalExtensionHelp = `macOS profiles use the .provisionprofile extension;
+iOS, tvOS, and legacy profiles may use .mobileprovision.`
 
 // profileUUIDValidationRegex ensures the UUID from a provisioning profile is safe to use
 // as a filename component (prevents absolute paths / path traversal).
 var profileUUIDValidationRegex = regexp.MustCompile(`(?i)^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
+
+var (
+	errProfilesInstallDirRequired = errors.New("--install-dir is required on non-macOS platforms")
+	profilesRuntimeGOOS           = runtime.GOOS
+	profilesUserHomeDirFn         = os.UserHomeDir
+	activeXcodeMajorVersionFn     = xcodecore.ActiveXcodeMajorVersion
+)
 
 func isValidProfileUUID(uuid string) bool {
 	return profileUUIDValidationRegex.MatchString(uuid)
@@ -96,8 +115,13 @@ func ProfilesLocalCommand() *ffcli.Command {
 These commands operate on local disk state (Xcode's Provisioning Profiles directory),
 not on App Store Connect API profile resources.
 
+` + profilesLocalDirectoryHelp + `
+
+` + profilesLocalExtensionHelp + `
+
 Examples:
   asc profiles local install --path "./profile.mobileprovision"
+  asc profiles local install --path "./profile.provisionprofile"
   asc profiles local list
   asc profiles local clean --expired --dry-run
   asc profiles local clean --expired --confirm`,
@@ -118,9 +142,9 @@ Examples:
 func ProfilesLocalInstallCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("install", flag.ExitOnError)
 
-	sourcePath := fs.String("path", "", "Path to a .mobileprovision file to install")
-	profileID := fs.String("id", "", "Profile ID to download and install")
-	installDir := fs.String("install-dir", "", "Install directory (defaults to Xcode's Provisioning Profiles dir on macOS)")
+	sourcePath := fs.String("path", "", "Path to a .mobileprovision or .provisionprofile file to install")
+	profileID := shared.BindResourceIDFlag(fs, "id", "profiles", "Profile ID to download and install")
+	installDir := fs.String("install-dir", "", "Directory to use (defaults by active Xcode version on macOS)")
 	force := fs.Bool("force", false, "Overwrite an existing installed profile with the same UUID")
 	output := shared.BindOutputFlags(fs)
 
@@ -130,11 +154,13 @@ func ProfilesLocalInstallCommand() *ffcli.Command {
 		ShortHelp:  "Install a provisioning profile locally.",
 		LongHelp: `Install a provisioning profile locally.
 
-By default, this installs into:
-  ~/Library/MobileDevice/Provisioning Profiles
+` + profilesLocalDirectoryHelp + `
+
+` + profilesLocalExtensionHelp + `
 
 Examples:
   asc profiles local install --path "./profile.mobileprovision"
+  asc profiles local install --path "./profile.provisionprofile"
   asc profiles local install --id "PROFILE_ID"
   asc profiles local install --path "./profile.mobileprovision" --force`,
 		FlagSet:   fs,
@@ -144,15 +170,15 @@ Examples:
 			idValue := strings.TrimSpace(*profileID)
 			if pathValue == "" && idValue == "" {
 				fmt.Fprintln(os.Stderr, "Error: --path or --id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("")
 			}
 			if pathValue != "" && idValue != "" {
 				return shared.UsageError("--path and --id are mutually exclusive")
 			}
 
-			resolvedInstallDir, err := resolveProfilesInstallDir(*installDir)
+			resolvedInstallDir, err := resolveProfilesInstallDirForCommand(ctx, *installDir, "profiles local install")
 			if err != nil {
-				return shared.UsageError(err.Error())
+				return err
 			}
 
 			var (
@@ -209,14 +235,12 @@ Examples:
 				return fmt.Errorf("profiles local install: invalid profile UUID %q", uuid)
 			}
 
-			destPath := filepath.Join(resolvedInstallDir, uuid+".mobileprovision")
-			action := "installed"
-			hadExisting := false
-			if _, err := os.Lstat(destPath); err == nil {
-				hadExisting = true
-			} else if !errors.Is(err, os.ErrNotExist) {
-				return fmt.Errorf("profiles local install: stat output path: %w", err)
+			extension := shared.ProvisioningProfileExtensionForPlatforms(parsed.Platform, "")
+			destPath, hadExisting, err := resolveProfileInstallPath(resolvedInstallDir, uuid, extension)
+			if err != nil {
+				return fmt.Errorf("profiles local install: %w", err)
 			}
+			action := "installed"
 
 			if err := writeProfileFile(destPath, content, *force); err != nil {
 				if errors.Is(err, os.ErrExist) {
@@ -257,11 +281,50 @@ Examples:
 	}
 }
 
+func resolveProfileInstallPath(installDir, uuid, preferredExtension string) (string, bool, error) {
+	preferredPath := filepath.Join(installDir, uuid+preferredExtension)
+	alternateExtension := shared.IOSProvisioningProfileExtension
+	if preferredExtension == shared.IOSProvisioningProfileExtension {
+		alternateExtension = shared.MacOSProvisioningProfileExtension
+	}
+	alternatePath := filepath.Join(installDir, uuid+alternateExtension)
+
+	preferredExists, err := profileInstallPathExists(preferredPath)
+	if err != nil {
+		return "", false, err
+	}
+	alternateExists, err := profileInstallPathExists(alternatePath)
+	if err != nil {
+		return "", false, err
+	}
+	if preferredExists && alternateExists {
+		return "", false, fmt.Errorf("duplicate installed profiles exist for UUID %q at %q and %q", uuid, preferredPath, alternatePath)
+	}
+	if preferredExists {
+		return preferredPath, true, nil
+	}
+	if alternateExists {
+		// Preserve an existing legacy filename instead of creating a second file
+		// for the same profile UUID. A later forced install replaces it in place.
+		return alternatePath, true, nil
+	}
+	return preferredPath, false, nil
+}
+
+func profileInstallPathExists(path string) (bool, error) {
+	if _, err := os.Lstat(path); err == nil {
+		return true, nil
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return false, fmt.Errorf("stat output path: %w", err)
+	}
+	return false, nil
+}
+
 // ProfilesLocalListCommand returns the profiles local list subcommand.
 func ProfilesLocalListCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("list", flag.ExitOnError)
 
-	installDir := fs.String("install-dir", "", "Install directory (defaults to Xcode's Provisioning Profiles dir on macOS)")
+	installDir := fs.String("install-dir", "", "Directory to use (defaults by active Xcode version on macOS)")
 	bundleID := fs.String("bundle-id", "", "Filter by bundle ID")
 	teamID := fs.String("team-id", "", "Filter by team ID")
 	expiredOnly := fs.Bool("expired", false, "Show only expired profiles")
@@ -273,6 +336,10 @@ func ProfilesLocalListCommand() *ffcli.Command {
 		ShortHelp:  "List locally installed provisioning profiles.",
 		LongHelp: `List locally installed provisioning profiles.
 
+` + profilesLocalDirectoryHelp + `
+
+` + profilesLocalExtensionHelp + `
+
 Examples:
   asc profiles local list
   asc profiles local list --expired
@@ -280,9 +347,9 @@ Examples:
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
-			resolvedInstallDir, err := resolveProfilesInstallDir(*installDir)
+			resolvedInstallDir, err := resolveProfilesInstallDirForCommand(ctx, *installDir, "profiles local list")
 			if err != nil {
-				return shared.UsageError(err.Error())
+				return err
 			}
 
 			scanned, skipped, err := scanLocalProfiles(resolvedInstallDir, time.Now())
@@ -340,7 +407,7 @@ Examples:
 func ProfilesLocalCleanCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("clean", flag.ExitOnError)
 
-	installDir := fs.String("install-dir", "", "Install directory (defaults to Xcode's Provisioning Profiles dir on macOS)")
+	installDir := fs.String("install-dir", "", "Directory to use (defaults by active Xcode version on macOS)")
 	expiredOnly := fs.Bool("expired", false, "Delete expired profiles")
 	dryRun := fs.Bool("dry-run", false, "Show deletion plan without deleting")
 	confirm := fs.Bool("confirm", false, "Confirm deletion")
@@ -352,6 +419,10 @@ func ProfilesLocalCleanCommand() *ffcli.Command {
 		ShortHelp:  "Clean up locally installed provisioning profiles.",
 		LongHelp: `Clean up locally installed provisioning profiles.
 
+` + profilesLocalDirectoryHelp + `
+
+` + profilesLocalExtensionHelp + `
+
 Examples:
   asc profiles local clean --expired --dry-run
   asc profiles local clean --expired --confirm`,
@@ -360,16 +431,16 @@ Examples:
 		Exec: func(ctx context.Context, args []string) error {
 			if !*dryRun && !*confirm {
 				fmt.Fprintln(os.Stderr, "Error: --confirm is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--confirm")
 			}
 			if !*expiredOnly {
 				// At least one clean mode is required; currently only --expired exists.
 				return shared.UsageError("at least one clean mode is required (e.g. --expired)")
 			}
 
-			resolvedInstallDir, err := resolveProfilesInstallDir(*installDir)
+			resolvedInstallDir, err := resolveProfilesInstallDirForCommand(ctx, *installDir, "profiles local clean")
 			if err != nil {
-				return shared.UsageError(err.Error())
+				return err
 			}
 
 			now := time.Now()
@@ -442,19 +513,57 @@ Examples:
 	}
 }
 
-func resolveProfilesInstallDir(value string) (string, error) {
+func resolveProfilesInstallDirForCommand(ctx context.Context, value, commandName string) (string, error) {
+	installDir, err := resolveProfilesInstallDir(ctx, value)
+	if err == nil {
+		return installDir, nil
+	}
+	if errors.Is(err, errProfilesInstallDirRequired) {
+		return "", shared.UsageError(err.Error())
+	}
+	return "", fmt.Errorf("%s: resolve install directory: %w", commandName, err)
+}
+
+func resolveProfilesInstallDir(ctx context.Context, value string) (string, error) {
 	trimmed := strings.TrimSpace(value)
 	if trimmed != "" {
 		return filepath.Clean(trimmed), nil
 	}
-	if runtime.GOOS != "darwin" {
-		return "", fmt.Errorf("--install-dir is required on non-macOS platforms")
+	if profilesRuntimeGOOS != "darwin" {
+		return "", errProfilesInstallDirRequired
 	}
-	home, err := os.UserHomeDir()
+
+	home, err := profilesUserHomeDirFn()
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("resolve home directory: %w", err)
 	}
-	return filepath.Join(home, "Library", "MobileDevice", "Provisioning Profiles"), nil
+	legacyDir := filepath.Join(home, "Library", "MobileDevice", "Provisioning Profiles")
+
+	major, err := activeXcodeMajorVersionFn(ctx)
+	if err == nil && major < 1 {
+		err = fmt.Errorf("invalid major version %d", major)
+	}
+	if err != nil {
+		// A cancelled or expired context is the caller giving up, not a host
+		// without a full Xcode.
+		if ctxErr := context.Cause(ctx); ctxErr != nil {
+			return "", ctxErr
+		}
+		// Hosts with only Command Line Tools cannot report an Xcode version.
+		// Keep the pre-4.0 default working there instead of failing closed.
+		fmt.Fprintf(
+			os.Stderr,
+			"Note: could not determine the active Xcode version (%v); using %s. Pass --install-dir to choose another directory.\n",
+			err,
+			legacyDir,
+		)
+		return legacyDir, nil
+	}
+
+	if major >= 16 {
+		return filepath.Join(home, "Library", "Developer", "Xcode", "UserData", "Provisioning Profiles"), nil
+	}
+	return legacyDir, nil
 }
 
 func scanLocalProfiles(installDir string, now time.Time) ([]localProfile, []localSkippedItem, error) {
@@ -474,7 +583,7 @@ func scanLocalProfiles(installDir string, now time.Time) ([]localProfile, []loca
 		if entry.IsDir() {
 			continue
 		}
-		if !strings.HasSuffix(strings.ToLower(entry.Name()), ".mobileprovision") {
+		if !shared.IsProvisioningProfilePath(entry.Name()) {
 			continue
 		}
 

@@ -318,6 +318,7 @@ func TestUsersCommands_DefaultOutputJSON(t *testing.T) {
 			f := cmd.FlagSet.Lookup("output")
 			if f == nil {
 				t.Fatalf("expected --output flag to be defined")
+				return
 			}
 			if f.DefValue != "json" {
 				t.Fatalf("expected --output default to be 'json', got %q", f.DefValue)
@@ -353,8 +354,19 @@ func TestUsersInvitesListCommand_HasPaginationFlags(t *testing.T) {
 func TestUsersListCommand_HasFilterFlags(t *testing.T) {
 	cmd := UsersListCommand()
 
-	flags := []string{"email", "role"}
+	flags := []string{"email", "role", "visible-app", "sort", "fields", "app-fields", "include"}
 	for _, flagName := range flags {
+		f := cmd.FlagSet.Lookup(flagName)
+		if f == nil {
+			t.Fatalf("expected --%s flag to be defined", flagName)
+		}
+	}
+}
+
+func TestUsersListQueryFlagsAreRegistered(t *testing.T) {
+	cmd := UsersListCommand()
+
+	for _, flagName := range []string{"visible-app", "sort", "fields", "app-fields", "include", "visible-apps-limit"} {
 		f := cmd.FlagSet.Lookup(flagName)
 		if f == nil {
 			t.Fatalf("expected --%s flag to be defined", flagName)

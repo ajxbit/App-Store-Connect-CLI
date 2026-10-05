@@ -13,6 +13,7 @@ const (
 	PerfPowerMetricTypeMemory      PerfPowerMetricType = "MEMORY"
 	PerfPowerMetricTypeAnimation   PerfPowerMetricType = "ANIMATION"
 	PerfPowerMetricTypeTermination PerfPowerMetricType = "TERMINATION"
+	PerfPowerMetricTypeStorage     PerfPowerMetricType = "STORAGE"
 )
 
 // DiagnosticSignatureType represents a diagnostic signature category.
@@ -84,6 +85,19 @@ type DiagnosticLogsResponse struct {
 
 // MarshalJSON preserves raw API JSON for diagnostic logs responses.
 func (r DiagnosticLogsResponse) MarshalJSON() ([]byte, error) {
+	if len(r.Data) == 0 {
+		return []byte("null"), nil
+	}
+	return r.Data, nil
+}
+
+// PerformanceOverviewResponse preserves Apple's raw Xcode overview JSON.
+type PerformanceOverviewResponse struct {
+	Data json.RawMessage `json:"-"`
+}
+
+// MarshalJSON returns the original overview payload without an extra envelope.
+func (r PerformanceOverviewResponse) MarshalJSON() ([]byte, error) {
 	if len(r.Data) == 0 {
 		return []byte("null"), nil
 	}

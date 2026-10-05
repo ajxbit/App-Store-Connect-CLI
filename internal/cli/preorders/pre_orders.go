@@ -23,12 +23,12 @@ func PreOrdersCommand() *ffcli.Command {
 		LongHelp: `Manage app pre-orders.
 
 Examples:
-  asc pre-orders get --app "123456789"
+  asc pre-orders view --app "123456789"
   asc pre-orders list --availability "AVAILABILITY_ID"
   asc pre-orders enable --app "123456789" --territory "US,France" --release-date "2026-06-01"
   asc pre-orders update --territory-availability "TERRITORY_AVAILABILITY_ID" --pre-order-enabled true --release-date "2026-03-01"
   asc pre-orders disable --territory-availability "TERRITORY_AVAILABILITY_ID"
-  asc pre-orders end --territory-availability "TA_1,TA_2"`,
+  asc pre-orders end --territory-availability "TA_1,TA_2" --confirm`,
 		UsageFunc: shared.DefaultUsageFunc,
 		Subcommands: []*ffcli.Command{
 			PreOrdersGetCommand(),
@@ -46,31 +46,31 @@ Examples:
 
 // PreOrdersGetCommand returns the get subcommand.
 func PreOrdersGetCommand() *ffcli.Command {
-	fs := flag.NewFlagSet("pre-orders get", flag.ExitOnError)
+	fs := flag.NewFlagSet("pre-orders view", flag.ExitOnError)
 
 	appID := fs.String("app", "", "App Store Connect app ID (or ASC_APP_ID)")
 	output := shared.BindOutputFlags(fs)
 
 	return &ffcli.Command{
-		Name:       "get",
-		ShortUsage: "asc pre-orders get [flags]",
-		ShortHelp:  "Get app pre-order availability.",
-		LongHelp: `Get app pre-order availability.
+		Name:       "view",
+		ShortUsage: "asc pre-orders view [flags]",
+		ShortHelp:  "View app pre-order availability.",
+		LongHelp: `View app pre-order availability.
 
 Examples:
-  asc pre-orders get --app "123456789"`,
+  asc pre-orders view --app "123456789"`,
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
 			resolvedAppID := shared.ResolveAppID(*appID)
 			if resolvedAppID == "" {
 				fmt.Fprintln(os.Stderr, "Error: --app is required (or set ASC_APP_ID)")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--app")
 			}
 
 			client, err := shared.GetASCClient()
 			if err != nil {
-				return fmt.Errorf("pre-orders get: %w", err)
+				return fmt.Errorf("pre-orders view: %w", err)
 			}
 
 			requestCtx, cancel := shared.ContextWithTimeout(ctx)
@@ -79,9 +79,9 @@ Examples:
 			resp, err := client.GetAppAvailabilityV2(requestCtx, resolvedAppID)
 			if err != nil {
 				if shared.IsAppAvailabilityMissing(err) {
-					return fmt.Errorf("pre-orders get: app availability not found for app %q", resolvedAppID)
+					return fmt.Errorf("pre-orders view: app availability not found for app %q", resolvedAppID)
 				}
-				return fmt.Errorf("pre-orders get: %w", err)
+				return fmt.Errorf("pre-orders view: %w", err)
 			}
 
 			return shared.PrintOutput(resp, *output.Output, *output.Pretty)
@@ -105,6 +105,7 @@ Examples:
   asc pre-orders list --next "NEXT_URL"`,
 		ParentFlag:  "availability",
 		ParentUsage: "App availability ID",
+		ParentType:  "appAvailabilities",
 		LimitMax:    200,
 		ErrorPrefix: "pre-orders list",
 		FetchPage: func(ctx context.Context, client *asc.Client, availabilityID string, limit int, next string) (asc.PaginatedResponse, error) {
@@ -147,8 +148,6 @@ func PreOrdersEnableCommand() *ffcli.Command {
 	appID := fs.String("app", "", "App Store Connect app ID (or ASC_APP_ID)")
 	territory := fs.String("territory", "", "Territory inputs (comma-separated; accepts alpha-2, alpha-3, or exact English country names)")
 	releaseDate := fs.String("release-date", "", "Release date (YYYY-MM-DD)")
-	var availableInNewTerritories shared.OptionalBool
-	fs.Var(&availableInNewTerritories, "available-in-new-territories", "[deprecated, ignored] Previously set available-in-new-territories")
 	output := shared.BindOutputFlags(fs)
 
 	return &ffcli.Command{
@@ -169,19 +168,15 @@ Examples:
 			resolvedAppID := shared.ResolveAppID(*appID)
 			if resolvedAppID == "" {
 				fmt.Fprintln(os.Stderr, "Error: --app is required (or set ASC_APP_ID)")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--app")
 			}
 			if strings.TrimSpace(*territory) == "" {
 				fmt.Fprintln(os.Stderr, "Error: --territory is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--territory")
 			}
 			if strings.TrimSpace(*releaseDate) == "" {
 				fmt.Fprintln(os.Stderr, "Error: --release-date is required")
-				return flag.ErrHelp
-			}
-
-			if availableInNewTerritories.IsSet() {
-				fmt.Fprintln(os.Stderr, "Warning: --available-in-new-territories is deprecated and ignored; pre-orders are now enabled by patching territory availabilities directly.")
+				return shared.MissingRequiredUsageError("--release-date")
 			}
 
 			normalizedReleaseDate, err := normalizePreOrderReleaseDate(*releaseDate)
@@ -274,7 +269,7 @@ Examples:
 func PreOrdersUpdateCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("pre-orders update", flag.ExitOnError)
 
-	territoryAvailabilityID := fs.String("territory-availability", "", "Territory availability ID")
+	territoryAvailabilityID := shared.BindResourceIDFlag(fs, "territory-availability", "territoryAvailabilities", "Territory availability ID")
 	releaseDate := fs.String("release-date", "", "Release date (YYYY-MM-DD)")
 	var preOrderEnabled shared.OptionalBool
 	fs.Var(&preOrderEnabled, "pre-order-enabled", "Set pre-order enabled: true or false")
@@ -300,7 +295,7 @@ Examples:
 			trimmedID := strings.TrimSpace(*territoryAvailabilityID)
 			if trimmedID == "" {
 				fmt.Fprintln(os.Stderr, "Error: --territory-availability is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--territory-availability")
 			}
 
 			attrs := asc.TerritoryAvailabilityUpdateAttributes{}
@@ -332,7 +327,7 @@ Examples:
 			}
 			if !hasAttr {
 				fmt.Fprintln(os.Stderr, "Error: at least one of --release-date, --pre-order-enabled, or --available is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("")
 			}
 
 			client, err := shared.GetASCClient()
@@ -357,7 +352,7 @@ Examples:
 func PreOrdersDisableCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("pre-orders disable", flag.ExitOnError)
 
-	territoryAvailabilityID := fs.String("territory-availability", "", "Territory availability ID")
+	territoryAvailabilityID := shared.BindResourceIDFlag(fs, "territory-availability", "territoryAvailabilities", "Territory availability ID")
 	output := shared.BindOutputFlags(fs)
 
 	return &ffcli.Command{
@@ -374,7 +369,7 @@ Examples:
 			trimmedID := strings.TrimSpace(*territoryAvailabilityID)
 			if trimmedID == "" {
 				fmt.Fprintln(os.Stderr, "Error: --territory-availability is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--territory-availability")
 			}
 
 			preOrderEnabled := false
@@ -404,23 +399,28 @@ func PreOrdersEndCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("pre-orders end", flag.ExitOnError)
 
 	territoryAvailabilityIDs := fs.String("territory-availability", "", "Territory availability IDs (comma-separated)")
+	confirm := fs.Bool("confirm", false, "Confirm ending pre-orders (required)")
 	output := shared.BindOutputFlags(fs)
 
 	return &ffcli.Command{
 		Name:       "end",
-		ShortUsage: "asc pre-orders end --territory-availability TERRITORY_AVAILABILITY_ID[,ID...]",
+		ShortUsage: "asc pre-orders end --territory-availability TERRITORY_AVAILABILITY_ID[,ID...] --confirm",
 		ShortHelp:  "End pre-orders for territory availabilities.",
 		LongHelp: `End pre-orders for territory availabilities.
 
 Examples:
-  asc pre-orders end --territory-availability "TA_1,TA_2"`,
+  asc pre-orders end --territory-availability "TA_1,TA_2" --confirm`,
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
 			ids := shared.SplitCSV(*territoryAvailabilityIDs)
 			if len(ids) == 0 {
 				fmt.Fprintln(os.Stderr, "Error: --territory-availability is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--territory-availability")
+			}
+			if !*confirm {
+				fmt.Fprintln(os.Stderr, "Error: --confirm is required")
+				return shared.MissingRequiredUsageError("--confirm")
 			}
 
 			client, err := shared.GetASCClient()

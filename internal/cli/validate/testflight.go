@@ -27,13 +27,13 @@ func ValidateTestFlightCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("testflight", flag.ExitOnError)
 
 	appID := fs.String("app", "", "App Store Connect app ID (or ASC_APP_ID)")
-	buildID := fs.String("build", "", "Build ID (required)")
+	buildID := shared.BindResourceIDFlag(fs, "build-id", "builds", "Build ID (required)")
 	strict := fs.Bool("strict", false, "Treat warnings as errors (exit non-zero)")
 	output := shared.BindOutputFlags(fs)
 
 	return &ffcli.Command{
 		Name:       "testflight",
-		ShortUsage: "asc validate testflight --app \"APP_ID\" --build \"BUILD_ID\" [flags]",
+		ShortUsage: "asc validate testflight --app \"APP_ID\" --build-id \"BUILD_ID\" [flags]",
 		ShortHelp:  "Validate TestFlight build readiness before distribution.",
 		LongHelp: `Validate TestFlight readiness for a build.
 
@@ -43,22 +43,22 @@ Checks:
   - "What to Test" notes present for at least one localization
 
 Examples:
-  asc validate testflight --app "APP_ID" --build "BUILD_ID"
-  asc validate testflight --app "APP_ID" --build "BUILD_ID" --output table
-  asc validate testflight --app "APP_ID" --build "BUILD_ID" --strict`,
+  asc validate testflight --app "APP_ID" --build-id "BUILD_ID"
+  asc validate testflight --app "APP_ID" --build-id "BUILD_ID" --output table
+  asc validate testflight --app "APP_ID" --build-id "BUILD_ID" --strict`,
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
 			buildValue := strings.TrimSpace(*buildID)
 			if buildValue == "" {
-				fmt.Fprintln(os.Stderr, "Error: --build is required")
-				return flag.ErrHelp
+				fmt.Fprintln(os.Stderr, "Error: --build-id is required")
+				return shared.MissingRequiredUsageError("--build-id")
 			}
 
 			resolvedAppID := shared.ResolveAppID(*appID)
 			if resolvedAppID == "" {
 				fmt.Fprintln(os.Stderr, "Error: --app is required (or set ASC_APP_ID)")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--app")
 			}
 
 			return runValidateTestFlight(ctx, validateTestFlightOptions{
@@ -164,7 +164,7 @@ func runValidateTestFlight(ctx context.Context, opts validateTestFlightOptions) 
 	}
 
 	if report.Summary.Blocking > 0 {
-		return shared.NewReportedError(fmt.Errorf("validate testflight: found %d blocking issue(s)", report.Summary.Blocking))
+		return shared.NewValidationReportedError(fmt.Errorf("validate testflight: found %d blocking issue(s)", report.Summary.Blocking))
 	}
 
 	return nil

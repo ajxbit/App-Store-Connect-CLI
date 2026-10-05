@@ -20,22 +20,24 @@ const (
 	buildsWaitDefaultPollInterval = 30 * time.Second
 )
 
+// buildsWaitNow is the clock builds wait reports elapsed time with.
+var buildsWaitNow = time.Now
+
 // BuildsWaitCommand waits for build processing to reach a terminal state.
 func BuildsWaitCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("wait", flag.ExitOnError)
 
-	buildID := fs.String("build-id", "", "Build ID to wait for")
-	legacyBuildID := bindHiddenStringFlag(fs, "build")
-	appID := fs.String("app", "", "App Store Connect app ID, bundle ID, or exact app name (required when --build-id is not provided)")
+	buildID := shared.BindResourceIDFlag(fs, "build-id", "builds", "Build ID to wait for")
+	appID := shared.BindResourceIDFlag(fs, "app", "apps", "App Store Connect app ID, bundle ID, or exact app name (required when --build-id is not provided)")
 	latest := fs.Bool("latest", false, "Wait for the latest matching build for --app context")
-	legacyNewest := bindHiddenBoolFlag(fs, "newest")
 	version := fs.String("version", "", "Optional marketing version filter (CFBundleShortVersionString) for --app")
 	buildNumber := fs.String("build-number", "", "Select a unique build by build number (CFBundleVersion) for --app context")
 	since := fs.String("since", "", "Only consider builds uploaded on or after this RFC3339 timestamp")
-	platform := fs.String("platform", "", "Optional platform filter for --app selectors: IOS, MAC_OS, TV_OS, VISION_OS")
+	platform := fs.String("platform", "", "Platform filter for --app selectors (required with --build-number): IOS, MAC_OS, TV_OS, VISION_OS")
 	timeout := fs.Duration("timeout", buildsWaitDefaultTimeout, "Maximum time to wait for build processing")
 	pollInterval := fs.Duration("poll-interval", buildsWaitDefaultPollInterval, "Polling interval for build status checks")
 	failOnInvalid := fs.Bool("fail-on-invalid", false, "Exit non-zero if build reaches INVALID")
+	reportPending := fs.Bool("report-pending", false, "When --timeout expires first, print the pending state and resume command to stdout and exit 7 instead of failing")
 	output := shared.BindOutputFlags(fs)
 
 	return &ffcli.Command{
@@ -49,6 +51,13 @@ This command polls build processing state until a terminal condition:
   - FAILED  -> exits non-zero
   - INVALID -> exits non-zero only with --fail-on-invalid
 
+When --timeout expires first, the command fails (exit 1) with the last known
+state and the command that resumes the wait. With --report-pending it instead
+prints a pending result (status "pending", phase "discovery" or "processing",
+the matching build or build upload, elapsed time, and resumeCommand) to stdout
+and exits 7, so callers with short time limits can resume. A build upload that
+FAILED is still reported as a failure.
+
 Build selector modes (mutually exclusive):
   - --build-id BUILD_ID
   - --app APP_ID --latest
@@ -61,19 +70,13 @@ Examples:
   asc builds wait --build-id "BUILD_ID" --timeout 20m --poll-interval 15s
   asc builds wait --app "1500196580" --latest
   asc builds wait --app "1500196580" --latest --since "2026-03-02T18:00:00Z"
-  asc builds wait --app "1500196580" --build-number "2" --version "2.4.0"
-  asc builds wait --app "123456789" --build-number "42" --platform MAC_OS --fail-on-invalid`,
+  asc builds wait --app "1500196580" --build-number "2" --platform IOS --version "2.4.0"
+  asc builds wait --app "123456789" --build-number "42" --platform MAC_OS --fail-on-invalid
+  asc builds wait --app "1500196580" --build-number "78" --platform IOS --timeout 50s --report-pending`,
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
-			if err := applyLegacyBuildIDAlias(buildID, legacyBuildID); err != nil {
-				return err
-			}
-			if err := applyLegacyLatestAlias(latest, flagWasProvided(fs, "latest"), legacyNewest); err != nil {
-				return err
-			}
-
-			started := time.Now()
+			started := buildsWaitNow()
 			buildValue := strings.TrimSpace(*buildID)
 			resolvedAppID := shared.ResolveAppID(*appID)
 			versionValue := strings.TrimSpace(*version)
@@ -101,6 +104,9 @@ Examples:
 				}
 				if !*latest && buildNumberValue == "" {
 					return shared.UsageError("--latest or --build-number is required when using --app")
+				}
+				if buildNumberValue != "" && platformValue == "" {
+					return shared.UsageError(buildNumberRequiresPlatformMessage)
 				}
 			}
 
@@ -131,6 +137,25 @@ Examples:
 			defer cancel()
 
 			var buildResp *asc.BuildResponse
+			failureContext := shared.BuildProcessingFailureContext{
+				ShortVersion: versionValue,
+				Platform:     normalizedPlatform,
+			}
+			timedOut := buildsWaitTimeout{
+				fs:            fs,
+				started:       started,
+				timeout:       *timeout,
+				reportPending: *reportPending,
+				output:        output,
+				selector: appBuildWaitSelector{
+					Latest:      *latest,
+					Version:     versionValue,
+					BuildNumber: buildNumberValue,
+					Platform:    normalizedPlatform,
+					Since:       sinceTime,
+				},
+				sinceValue: sinceValue,
+			}
 			if buildValue != "" {
 				buildResp = &asc.BuildResponse{
 					Data: asc.Resource[asc.BuildAttributes]{
@@ -142,33 +167,23 @@ Examples:
 				if err != nil {
 					return fmt.Errorf("builds wait: %w", err)
 				}
+				failureContext.AppID = lookupAppID
+				timedOut.selector.AppID = lookupAppID
 
-				selector := appBuildWaitSelector{
-					Latest:      *latest,
-					AppID:       lookupAppID,
-					Version:     versionValue,
-					BuildNumber: buildNumberValue,
-					Platform:    normalizedPlatform,
-					Since:       sinceTime,
-				}
-				if !selector.Latest {
-					selector.Platform = applyLegacyImplicitBuildNumberPlatformDefault(selector.BuildNumber, selector.Platform)
-				}
-
-				buildResp, err = waitForBuildDiscovery(requestCtx, client, selector, *pollInterval)
+				buildResp, err = waitForBuildDiscovery(requestCtx, client, timedOut.selector, *pollInterval, &timedOut.observed)
 				if err != nil {
-					if errors.Is(err, context.DeadlineExceeded) {
-						return fmt.Errorf("builds wait: timed out resolving build selector after %s", (*timeout).Round(time.Second))
+					if requestCtx.Err() != nil && errors.Is(err, context.DeadlineExceeded) {
+						return timedOut.discoveryTimeout()
 					}
 					return fmt.Errorf("builds wait: %w", err)
 				}
 			}
 
 			waitBuildID := buildResp.Data.ID
-			buildResp, err = waitForBuildProcessingState(requestCtx, client, buildResp.Data.ID, *pollInterval, *failOnInvalid)
+			buildResp, err = waitForBuildProcessingState(requestCtx, client, buildResp.Data.ID, *pollInterval, *failOnInvalid, failureContext, &timedOut.observed)
 			if err != nil {
-				if errors.Is(err, context.DeadlineExceeded) {
-					return fmt.Errorf("builds wait: timed out waiting for build %s after %s", waitBuildID, (*timeout).Round(time.Second))
+				if requestCtx.Err() != nil && errors.Is(err, context.DeadlineExceeded) {
+					return timedOut.processingTimeout(waitBuildID)
 				}
 				return fmt.Errorf("builds wait: %w", err)
 			}
@@ -182,22 +197,19 @@ Examples:
 			if processingState == "" {
 				processingState = "UNKNOWN"
 			}
-			result := &buildWaitResult{
+			result := &asc.BuildWaitResult{
 				Data:            buildResp.Data,
 				Links:           buildResp.Links,
 				BuildID:         strings.TrimSpace(buildResp.Data.ID),
 				BuildNumber:     strings.TrimSpace(buildResp.Data.Attributes.Version),
 				ProcessingState: processingState,
-				Elapsed:         time.Since(started).Round(time.Second).String(),
+				Elapsed:         buildsWaitNow().Sub(started).Round(time.Second).String(),
 			}
 			if versionValue != "" {
 				result.Version = versionValue
 			}
 
-			if format == "json" {
-				return shared.PrintOutput(result, format, *output.Pretty)
-			}
-			return shared.PrintOutput(buildResp, format, *output.Pretty)
+			return shared.PrintOutput(result, format, *output.Pretty)
 		},
 	}
 }
@@ -211,25 +223,30 @@ type appBuildWaitSelector struct {
 	Since       *time.Time
 }
 
-type buildWaitResult struct {
-	Data            asc.Resource[asc.BuildAttributes] `json:"data"`
-	Links           asc.Links                         `json:"links,omitempty"`
-	BuildID         string                            `json:"buildId"`
-	Version         string                            `json:"version,omitempty"`
-	BuildNumber     string                            `json:"buildNumber,omitempty"`
-	ProcessingState string                            `json:"processingState"`
-	Elapsed         string                            `json:"elapsed"`
+// buildWaitObservation is the latest state a wait has seen, kept so a wait
+// that times out can say where the build stands.
+type buildWaitObservation struct {
+	// upload is the newest build upload matching the selector, read while no
+	// build is visible yet. It is nil when none matched or none was read.
+	upload *asc.BuildUploadResponse
+	// build is the last build state read while waiting for processing.
+	build *asc.BuildResponse
 }
 
+// waitForBuildDiscovery polls until a build matches selector. When observed is
+// non-nil, every poll that finds no build also records the newest matching
+// build upload, best effort, so a timeout can report an upload that App Store
+// Connect accepted but has not exposed as a build yet.
 func waitForBuildDiscovery(
 	ctx context.Context,
 	client *asc.Client,
 	selector appBuildWaitSelector,
 	pollInterval time.Duration,
+	observed *buildWaitObservation,
 ) (*asc.BuildResponse, error) {
-	started := time.Now()
-	return asc.PollUntil(ctx, pollInterval, func(ctx context.Context) (*asc.BuildResponse, bool, error) {
-		buildResp, err := resolveBuildForAppWait(ctx, client, selector)
+	started := buildsWaitNow()
+	return asc.PollUntilTolerant(ctx, pollInterval, func(ctx context.Context) (*asc.BuildResponse, bool, error) {
+		buildResp, err := resolveBuildForAppWait(ctx, client, selector, true)
 		if err != nil {
 			return nil, false, err
 		}
@@ -237,19 +254,35 @@ func waitForBuildDiscovery(
 			return buildResp, true, nil
 		}
 
+		if observed != nil {
+			upload, uploadErr := shared.LatestBuildUploadForWait(ctx, client, shared.BuildUploadWaitSelector{
+				AppID:       selector.AppID,
+				Version:     selector.Version,
+				BuildNumber: selector.BuildNumber,
+				Platform:    selector.Platform,
+				Since:       selector.Since,
+			})
+			// The upload only describes the wait; a failed read keeps the
+			// previous observation instead of failing discovery.
+			if uploadErr == nil {
+				observed.upload = upload
+			}
+		}
+
 		fmt.Fprintf(
 			os.Stderr,
 			"Waiting for build discovery... (%s elapsed)\n",
-			time.Since(started).Round(time.Second),
+			buildsWaitNow().Sub(started).Round(time.Second),
 		)
 		return nil, false, nil
-	})
+	}, asc.PollOptions{Tolerate: asc.IsTransientWaitError})
 }
 
 func resolveBuildForAppWait(
 	ctx context.Context,
 	client *asc.Client,
 	selector appBuildWaitSelector,
+	allowEmpty bool,
 ) (*asc.BuildResponse, error) {
 	if selector.Latest {
 		buildResp, err := shared.ResolveLatestBuild(ctx, client, shared.LatestBuildSelectionOptions{
@@ -257,7 +290,7 @@ func resolveBuildForAppWait(
 			Version:               selector.Version,
 			Platform:              selector.Platform,
 			ProcessingStateValues: buildsWaitProcessingStates(),
-		}, true)
+		}, allowEmpty)
 		if err != nil {
 			return nil, err
 		}
@@ -271,7 +304,7 @@ func resolveBuildForAppWait(
 		Platform:              selector.Platform,
 		Since:                 selector.Since,
 		ProcessingStateValues: buildsWaitProcessingStates(),
-	}, true)
+	}, allowEmpty)
 	if err != nil {
 		return nil, err
 	}
@@ -316,19 +349,27 @@ func buildsWaitProcessingStates() []string {
 	}
 }
 
+// waitForBuildProcessingState polls until the build reaches a terminal
+// processing state. When observed is non-nil, it records every build state it
+// reads so a timeout can report the last known processing state.
 func waitForBuildProcessingState(
 	ctx context.Context,
 	client *asc.Client,
 	buildID string,
 	pollInterval time.Duration,
 	failOnInvalid bool,
+	failure shared.BuildProcessingFailureContext,
+	observed *buildWaitObservation,
 ) (*asc.BuildResponse, error) {
-	started := time.Now()
+	started := buildsWaitNow()
 
-	for {
+	buildResp, err := asc.PollUntilTolerant(ctx, pollInterval, func(ctx context.Context) (*asc.BuildResponse, bool, error) {
 		buildResp, err := client.GetBuild(ctx, buildID)
 		if err != nil {
-			return nil, err
+			return nil, false, err
+		}
+		if observed != nil {
+			observed.build = buildResp
 		}
 
 		state := strings.ToUpper(strings.TrimSpace(buildResp.Data.Attributes.ProcessingState))
@@ -340,25 +381,55 @@ func waitForBuildProcessingState(
 			"Waiting for build %s... (%s, %s elapsed)\n",
 			buildID,
 			state,
-			time.Since(started).Round(time.Second),
+			buildsWaitNow().Sub(started).Round(time.Second),
 		)
 
 		switch state {
 		case asc.BuildProcessingStateValid:
-			return buildResp, nil
+			return buildResp, true, nil
 		case asc.BuildProcessingStateFailed:
-			return nil, fmt.Errorf("build processing failed with state %s", state)
+			return nil, false, &terminalBuildProcessingState{build: buildResp, state: state}
 		case asc.BuildProcessingStateInvalid:
 			if failOnInvalid {
-				return nil, fmt.Errorf("build processing failed with state %s", state)
+				return nil, false, &terminalBuildProcessingState{build: buildResp, state: state}
 			}
-			return buildResp, nil
+			return buildResp, true, nil
 		}
+		return nil, false, nil
+	}, asc.PollOptions{Tolerate: asc.IsTransientWaitError})
 
-		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		case <-time.After(pollInterval):
-		}
+	// Processing details are fetched after polling stops: the poller reports an
+	// expired context in place of any callback error, so a slow details lookup
+	// inside the callback could turn a FAILED build into a timeout.
+	var terminal *terminalBuildProcessingState
+	if errors.As(err, &terminal) {
+		return nil, buildProcessingFailureError(ctx, client, buildID, terminal.build, terminal.state, failure)
 	}
+	return buildResp, err
+}
+
+// terminalBuildProcessingState stops polling at a failing processing state.
+type terminalBuildProcessingState struct {
+	build *asc.BuildResponse
+	state string
+}
+
+func (e *terminalBuildProcessingState) Error() string {
+	return fmt.Sprintf("build processing failed with state %s", e.state)
+}
+
+func buildProcessingFailureError(
+	ctx context.Context,
+	client *asc.Client,
+	buildID string,
+	buildResp *asc.BuildResponse,
+	state string,
+	failure shared.BuildProcessingFailureContext,
+) error {
+	baseErr := fmt.Errorf("build processing failed with state %s", state)
+	failure.BuildID = buildID
+	if buildResp != nil {
+		failure.BundleVersion = buildResp.Data.Attributes.Version
+	}
+	return shared.EnrichBuildProcessingFailure(ctx, client, failure, baseErr)
 }

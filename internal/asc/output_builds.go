@@ -16,6 +16,9 @@ type BuildUploadResult struct {
 	Uploaded            *bool             `json:"uploaded,omitempty"`
 	ChecksumVerified    *bool             `json:"checksumVerified,omitempty"`
 	SourceFileChecksums *Checksums        `json:"sourceFileChecksums,omitempty"`
+	// BuildID is the build resource created from this upload, set once the
+	// command resolves it (--wait, --test-notes, or --verify-timeout).
+	BuildID string `json:"buildId,omitempty"`
 }
 
 // BuildBetaGroupsUpdateResult represents CLI output for build beta group updates.
@@ -23,6 +26,7 @@ type BuildBetaGroupsUpdateResult struct {
 	BuildID  string   `json:"buildId"`
 	GroupIDs []string `json:"groupIds"`
 	Action   string   `json:"action"`
+	DryRun   bool     `json:"dryRun,omitempty"`
 }
 
 // BuildIndividualTestersUpdateResult represents CLI output for build individual tester updates.
@@ -78,6 +82,7 @@ type BuildExpireAllFailure struct {
 type BuildExpireAllResult struct {
 	DryRun              bool                    `json:"dryRun"`
 	AppID               string                  `json:"appId"`
+	Version             *string                 `json:"version,omitempty"`
 	OlderThan           *string                 `json:"olderThan,omitempty"`
 	KeepLatest          *int                    `json:"keepLatest,omitempty"`
 	SelectedCount       int                     `json:"selectedCount"`
@@ -86,6 +91,72 @@ type BuildExpireAllResult struct {
 	SkippedInvalidCount *int                    `json:"skippedInvalidCount,omitempty"`
 	Builds              []BuildExpireAllItem    `json:"builds"`
 	Failures            []BuildExpireAllFailure `json:"failures,omitempty"`
+}
+
+// DSYMDownloadResult is the structured output for dSYM downloads.
+type DSYMDownloadResult struct {
+	BuildID     string             `json:"buildId,omitempty"`
+	Version     string             `json:"version,omitempty"`
+	BuildNumber string             `json:"buildNumber,omitempty"`
+	Dir         string             `json:"dir"`
+	Status      string             `json:"status,omitempty"`
+	Files       []DSYMDownloadFile `json:"files"`
+}
+
+// DSYMDownloadFile describes one downloaded dSYM file.
+type DSYMDownloadFile struct {
+	BuildID     string `json:"buildId,omitempty"`
+	Version     string `json:"version,omitempty"`
+	BuildNumber string `json:"buildNumber,omitempty"`
+	BundleID    string `json:"bundleId,omitempty"`
+	FileName    string `json:"fileName"`
+	FilePath    string `json:"filePath"`
+	FileSize    int64  `json:"fileSize"`
+	SHA256      string `json:"sha256,omitempty"`
+	Skipped     bool   `json:"skipped,omitempty"`
+}
+
+// BuildWaitResult represents CLI output for builds wait: the resolved build
+// resource plus computed wait metadata.
+type BuildWaitResult struct {
+	Data            Resource[BuildAttributes] `json:"data"`
+	Links           Links                     `json:"links,omitempty"`
+	BuildID         string                    `json:"buildId"`
+	Version         string                    `json:"version,omitempty"`
+	BuildNumber     string                    `json:"buildNumber,omitempty"`
+	ProcessingState string                    `json:"processingState"`
+	Elapsed         string                    `json:"elapsed"`
+}
+
+// BuildWaitPendingResult is the builds wait --report-pending receipt for a
+// wait whose --timeout expired before the build reached a terminal processing
+// state. Status is always "pending"; Phase is "discovery" while no build
+// matches the selector yet and "processing" once the build exists.
+type BuildWaitPendingResult struct {
+	Status          string                  `json:"status"`
+	Phase           string                  `json:"phase"`
+	Summary         string                  `json:"summary"`
+	AppID           string                  `json:"appId,omitempty"`
+	BuildID         string                  `json:"buildId,omitempty"`
+	Version         string                  `json:"version,omitempty"`
+	BuildNumber     string                  `json:"buildNumber,omitempty"`
+	Platform        string                  `json:"platform,omitempty"`
+	ProcessingState string                  `json:"processingState,omitempty"`
+	Upload          *BuildWaitPendingUpload `json:"upload,omitempty"`
+	Elapsed         string                  `json:"elapsed"`
+	Timeout         string                  `json:"timeout"`
+	ResumeCommand   string                  `json:"resumeCommand,omitempty"`
+}
+
+// BuildWaitPendingUpload describes the newest build upload that matches a
+// builds wait selector while no build is visible for it yet.
+type BuildWaitPendingUpload struct {
+	ID           string `json:"id"`
+	State        string `json:"state,omitempty"`
+	Version      string `json:"version,omitempty"`
+	BuildNumber  string `json:"buildNumber,omitempty"`
+	Platform     string `json:"platform,omitempty"`
+	UploadedDate string `json:"uploadedDate,omitempty"`
 }
 
 // formatEncryptionStatus formats the UsesNonExemptEncryption field for display.
@@ -201,11 +272,11 @@ func buildIconsRows(resp *BuildIconsResponse) ([]string, [][]string) {
 	rows := make([][]string, 0, len(resp.Data))
 	for _, item := range resp.Data {
 		rows = append(rows, []string{
-			item.ID,
+			SanitizeTerminalText(item.ID),
 			compactWhitespace(item.Attributes.Name),
-			string(item.Attributes.IconType),
+			SanitizeTerminalText(string(item.Attributes.IconType)),
 			fmt.Sprintf("%t", item.Attributes.Masked),
-			sanitizeTerminal(buildIconAssetURL(item.Attributes)),
+			SanitizeTerminalText(buildIconAssetURL(item.Attributes)),
 		})
 	}
 	return headers, rows
@@ -301,6 +372,10 @@ func buildUploadResultRows(result *BuildUploadResult) ([]string, [][]string) {
 		headers = append(headers, "Checksum Verified")
 		values = append(values, fmt.Sprintf("%t", *result.ChecksumVerified))
 	}
+	if result.BuildID != "" {
+		headers = append(headers, "Build ID")
+		values = append(values, result.BuildID)
+	}
 	return headers, [][]string{values}
 }
 
@@ -363,6 +438,71 @@ func buildsNextBuildNumberRows(result *BuildsNextBuildNumberResult) ([]string, [
 		buildsLatestNextValue(result.LatestObservedBuildNumber),
 		result.NextBuildNumber,
 		buildsLatestNextSources(result.SourcesConsidered),
+	}}
+	return headers, rows
+}
+
+func dsymDownloadResultRows(result *DSYMDownloadResult) ([]string, [][]string) {
+	headers := []string{"Build ID", "Bundle ID", "File Name", "File Size", "Dir"}
+	includeSHA := false
+	for _, file := range result.Files {
+		if file.SHA256 != "" {
+			includeSHA = true
+			break
+		}
+	}
+	if includeSHA {
+		headers = append(headers, "SHA-256")
+	}
+	rows := make([][]string, 0, len(result.Files))
+	for _, file := range result.Files {
+		buildID := file.BuildID
+		if buildID == "" {
+			buildID = result.BuildID
+		}
+		row := []string{
+			buildID,
+			file.BundleID,
+			file.FileName,
+			fmt.Sprintf("%d", file.FileSize),
+			result.Dir,
+		}
+		if includeSHA {
+			row = append(row, file.SHA256)
+		}
+		rows = append(rows, row)
+	}
+	return headers, rows
+}
+
+func buildWaitResultRows(result *BuildWaitResult) ([]string, [][]string) {
+	headers := []string{"Build ID", "Version", "Build Number", "Processing State", "Elapsed"}
+	rows := [][]string{{
+		result.BuildID,
+		result.Version,
+		result.BuildNumber,
+		result.ProcessingState,
+		result.Elapsed,
+	}}
+	return headers, rows
+}
+
+func buildWaitPendingResultRows(result *BuildWaitPendingResult) ([]string, [][]string) {
+	headers := []string{"Status", "Phase", "Build ID", "Processing State", "Upload ID", "Upload State", "Elapsed", "Resume Command"}
+	uploadID, uploadState := "", ""
+	if result.Upload != nil {
+		uploadID = result.Upload.ID
+		uploadState = result.Upload.State
+	}
+	rows := [][]string{{
+		result.Status,
+		result.Phase,
+		result.BuildID,
+		result.ProcessingState,
+		uploadID,
+		uploadState,
+		result.Elapsed,
+		result.ResumeCommand,
 	}}
 	return headers, rows
 }

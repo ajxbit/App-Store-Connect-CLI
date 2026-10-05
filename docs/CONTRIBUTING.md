@@ -9,14 +9,18 @@ This file covers patterns for AI agents working on the codebase.
 - Branch from `main` and keep one logical change per branch
 - Do not commit directly to `main` unless explicitly instructed; prefer PRs
 - Prefer `git worktree add` for parallel tasks; remove with `git worktree remove` when done
-- Rebase on `main` before merging; avoid merge commits
+- Compare the branch with current `main` before merging. Do not rebase or merge `main` into a clean branch merely because `main` advanced; update only when GitHub reports an actual merge conflict or refuses an explicitly authorized merge attempt made after every readiness gate passes under strict up-to-date branch protection, and never bypass protection with an admin merge
+- Preserve additive PR commits. Do not force-push, rebase, squash, or otherwise rewrite shared history unless the user explicitly requests it. When merging, use a regular merge commit by default
 - Commit small, coherent changes; no WIP commits on shared branches
 - Use concise, present-tense commit messages that match repo style
 - Never commit secrets or local config files (keys, `.env`, `.asc/config.json`)
 
 ## Before Committing
 
+For substantive behavior changes, run:
+
 ```bash
+make build      # Build the CLI
 make format     # Format code
 make lint       # Check for issues
 make check-docs  # Verify repo docs, website docs, and command docs stay in sync
@@ -24,11 +28,25 @@ ASC_BYPASS_KEYCHAIN=1 make test  # Run all tests without keychain prompts
 git diff        # Review changes before staging
 ```
 
+For a narrowly scoped documentation or skill change, run `make check-docs`; it includes the repository and skill validators. Use broader checks when the changed surface or repository policy requires them.
+
 If `docs/wall-of-apps.json` is the only staged change, the local hook skips the full Go pipeline and only runs:
 
 ```bash
 make check-wall-of-apps
 ```
+
+## Repository Agent Skills
+
+Keep always-on repository invariants in `AGENTS.md` and task-specific maintainer workflows in `.agents/skills/<skill-name>/`.
+
+Each skill must contain a `SKILL.md` with only `name` and `description` frontmatter plus matching `agents/openai.yaml` UI metadata. Keep trigger descriptions specific, link detailed references through progressive disclosure, and run:
+
+```bash
+make check-agent-skills
+```
+
+`make check-docs` includes this validation.
 
 ## CLI Structure
 
@@ -65,12 +83,11 @@ Before tagging a release, verify:
 
 ```bash
 # 1. Update release-facing docs
-#    - refresh resources/changelog.mdx for the new version
 #    - update any website pages affected by the release
+#    - release notes are auto-generated from merged PRs on tag push
 
 # 2. Verify documentation
 make check-docs
-make check-release-docs VERSION=0.1.0
 
 # 3. All tests pass
 ASC_BYPASS_KEYCHAIN=1 make test
@@ -90,3 +107,7 @@ done
 - No duplicate "Subcommands:" sections (don't list subcommands in LongHelp; DefaultUsageFunc handles it)
 - All flags have descriptions
 - Examples are up to date
+
+## Parity map
+
+Remaining fastlane/ASC parity areas and the intentional non-goal list live in [PARITY.md](PARITY.md).

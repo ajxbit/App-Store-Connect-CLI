@@ -4,11 +4,66 @@ import (
 	"context"
 	"errors"
 	"flag"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/asc"
 )
+
+func TestHandleMetadataExistingConflictUpdatesAfterRequestScopedMatchTimeout(t *testing.T) {
+	updated := false
+	outcome := handleMetadataExistingConflict(context.Background(), metadataCreateConflict{
+		options: metadataIfExistsOptions{mode: "update", prefix: "metadata push"},
+		scope:   versionDirName,
+		locale:  "ja",
+		version: "1.2.3",
+		lookup:  func(context.Context) (string, bool, error) { return "existing", true, nil },
+		update: func(context.Context, string) (string, error) {
+			updated = true
+			return "existing", nil
+		},
+		readback: func(context.Context) (string, bool, error) {
+			return "", false, context.DeadlineExceeded
+		},
+	}, "existing")
+
+	if outcome.err != nil || !outcome.handled {
+		t.Fatalf("outcome = %+v, want a handled successful update", outcome)
+	}
+	if !updated {
+		t.Fatal("expected PATCH update to proceed after the optional request-scoped timeout")
+	}
+	if outcome.action.Action != "update" || outcome.action.Status != metadataActionStatusSucceeded || !outcome.action.AlreadyExists {
+		t.Fatalf("action = %+v, want successful update of an existing localization", outcome.action)
+	}
+}
+
+func TestHandleMetadataExistingConflictUpdatesReplacementLocalizationID(t *testing.T) {
+	patchedID := ""
+	outcome := handleMetadataExistingConflict(context.Background(), metadataCreateConflict{
+		options: metadataIfExistsOptions{mode: "update", prefix: "metadata push"},
+		scope:   versionDirName,
+		locale:  "ja",
+		version: "1.2.3",
+		update: func(_ context.Context, id string) (string, error) {
+			patchedID = id
+			return id, nil
+		},
+		readback: func(context.Context) (string, bool, error) {
+			return "replacement", false, nil
+		},
+	}, "stale")
+
+	if outcome.err != nil || !outcome.handled {
+		t.Fatalf("outcome = %+v, want a handled successful update", outcome)
+	}
+	if patchedID != "replacement" {
+		t.Fatalf("PATCH localization ID = %q, want refreshed replacement ID", patchedID)
+	}
+}
 
 func TestExecutePushPrefixesLocalMetadataReadErrors(t *testing.T) {
 	for _, commandName := range []string{"push", "apply"} {
@@ -34,6 +89,36 @@ func TestExecutePushPrefixesLocalMetadataReadErrors(t *testing.T) {
 				t.Fatalf("expected %q in error, got %v", want, err)
 			}
 		})
+	}
+}
+
+func TestRepresentativeMetadataMutationErrorPrefersPositiveHTTPStatusWithinFirstAction(t *testing.T) {
+	mutationErr := &asc.RetryableError{Err: errors.New("connection reset")}
+	readbackErr := &asc.APIError{StatusCode: 503, Code: "SERVICE_UNAVAILABLE"}
+	laterActionErr := &asc.APIError{StatusCode: 404, Code: "NOT_FOUND"}
+	firstActionErr := fmt.Errorf("mutation and readback failed: %w", errors.Join(mutationErr, readbackErr))
+
+	got := representativeMetadataMutationError(fmt.Errorf("metadata apply: %w", errors.Join(
+		errors.Join(newMetadataMutationActionError(fmt.Errorf("update version localization fr-FR: %w", firstActionErr))),
+		errors.Join(newMetadataMutationActionError(fmt.Errorf("update version localization ja: %w", laterActionErr))),
+	)))
+	if !errors.Is(got, readbackErr) {
+		t.Fatalf("representative error = %T %v, want first action HTTP cause %v", got, got, readbackErr)
+	}
+}
+
+func TestRepresentativeMetadataMutationErrorStaysWithinFirstAction(t *testing.T) {
+	firstMutationErr := errors.New("connection reset")
+	firstReadbackErr := errors.New("readback timeout")
+	laterActionErr := &asc.APIError{StatusCode: 404, Code: "NOT_FOUND"}
+	firstActionErr := fmt.Errorf("mutation and readback failed: %w", errors.Join(firstMutationErr, firstReadbackErr))
+
+	got := representativeMetadataMutationError(fmt.Errorf("metadata apply: %w", errors.Join(
+		errors.Join(newMetadataMutationActionError(fmt.Errorf("update version localization fr-FR: %w", firstActionErr))),
+		errors.Join(newMetadataMutationActionError(fmt.Errorf("update version localization ja: %w", laterActionErr))),
+	)))
+	if !errors.Is(got, firstMutationErr) {
+		t.Fatalf("representative error = %T %v, want first action leaf %v", got, got, firstMutationErr)
 	}
 }
 
@@ -121,6 +206,23 @@ func TestBuildScopePlanTreatsMissingLocalFieldsAsNoOp(t *testing.T) {
 	}
 	if calls.create != 0 || calls.delete != 0 || calls.update != 1 {
 		t.Fatalf("unexpected call counts: %+v", calls)
+	}
+}
+
+func TestApplyAppInfoChangesIgnoresRemoteOnlyEmptyLocalization(t *testing.T) {
+	remote := []asc.Resource[asc.AppInfoLocalizationAttributes]{
+		{
+			ID: "loc-empty",
+			Attributes: asc.AppInfoLocalizationAttributes{
+				Locale: "en-US",
+			},
+		},
+	}
+	for _, allowDeletes := range []bool{false, true} {
+		actions, err := applyAppInfoChanges(context.Background(), nil, "appinfo-1", map[string]appInfoLocalPatch{}, remote, allowDeletes, metadataIfExistsOptions{})
+		if err != nil || len(actions) != 0 {
+			t.Fatalf("allowDeletes=%t: expected empty remote locale no-op, actions=%+v err=%v", allowDeletes, actions, err)
+		}
 	}
 }
 
@@ -247,10 +349,10 @@ func TestReadVersionLocalizationPatchAcceptsCaseInsensitiveKeys(t *testing.T) {
 	}
 }
 
-func TestReadVersionLocalizationPatchRejectsOverLimitKeywordBytes(t *testing.T) {
+func TestReadVersionLocalizationPatchRejectsOverLimitKeywordCharacters(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "ja.json")
-	body := `{"keywords":"` + strings.Repeat("語", 34) + `"}`
+	body := `{"keywords":"` + strings.Repeat("語", 101) + `"}`
 	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
 		t.Fatalf("write file: %v", err)
 	}
@@ -259,7 +361,7 @@ func TestReadVersionLocalizationPatchRejectsOverLimitKeywordBytes(t *testing.T) 
 	if err == nil {
 		t.Fatal("expected keyword limit error")
 	}
-	if !strings.Contains(err.Error(), "keywords exceed 100 bytes") {
+	if !strings.Contains(err.Error(), "keywords exceed 100 characters") {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }

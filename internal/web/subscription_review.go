@@ -13,14 +13,15 @@ const reviewSubscriptionsFields = "productId,name,state,isAppStoreReviewInProgre
 
 // ReviewSubscription summarizes a subscription's attach state for the next app version review.
 type ReviewSubscription struct {
-	ID                            string `json:"id"`
-	GroupID                       string `json:"groupId,omitempty"`
-	GroupReferenceName            string `json:"groupReferenceName,omitempty"`
-	ProductID                     string `json:"productId,omitempty"`
-	Name                          string `json:"name,omitempty"`
-	State                         string `json:"state,omitempty"`
-	IsAppStoreReviewInProgress    bool   `json:"isAppStoreReviewInProgress"`
-	SubmitWithNextAppStoreVersion bool   `json:"submitWithNextAppStoreVersion"`
+	ID                                 string `json:"id"`
+	GroupID                            string `json:"groupId,omitempty"`
+	GroupReferenceName                 string `json:"groupReferenceName,omitempty"`
+	ProductID                          string `json:"productId,omitempty"`
+	Name                               string `json:"name,omitempty"`
+	State                              string `json:"state,omitempty"`
+	IsAppStoreReviewInProgress         bool   `json:"isAppStoreReviewInProgress"`
+	SubmitWithNextAppStoreVersion      bool   `json:"submitWithNextAppStoreVersion"`
+	SubmitWithNextAppStoreVersionKnown bool   `json:"submitWithNextAppStoreVersionKnown"`
 }
 
 // ReviewSubscriptionSubmission captures the hidden submission resource returned by the web attach flow.
@@ -36,6 +37,7 @@ func decodeReviewSubscriptions(resources []jsonAPIResource, included []jsonAPIRe
 	}
 	includedMap := buildIncludedMap(included)
 	subscriptions := make([]ReviewSubscription, 0, len(included))
+	seenSubscriptionIDs := make(map[string]struct{}, len(included))
 	for _, group := range resources {
 		groupID := strings.TrimSpace(group.ID)
 		groupName := stringAttr(group.Attributes, "referenceName")
@@ -43,23 +45,42 @@ func decodeReviewSubscriptions(resources []jsonAPIResource, included []jsonAPIRe
 			if !strings.EqualFold(strings.TrimSpace(ref.Type), "subscriptions") {
 				continue
 			}
+			subscriptionID := strings.TrimSpace(ref.ID)
+			if _, seen := seenSubscriptionIDs[subscriptionID]; seen {
+				continue
+			}
+			seenSubscriptionIDs[subscriptionID] = struct{}{}
 			resource, ok := includedMap[jsonAPIResourceKey(ref.Type, ref.ID)]
 			if !ok {
 				resource = jsonAPIResource{ID: ref.ID, Type: ref.Type}
 			}
+			attached, attachedKnown := boolAttrKnown(resource.Attributes, "submitWithNextAppStoreVersion")
 			subscriptions = append(subscriptions, ReviewSubscription{
-				ID:                            strings.TrimSpace(ref.ID),
-				GroupID:                       groupID,
-				GroupReferenceName:            groupName,
-				ProductID:                     stringAttr(resource.Attributes, "productId"),
-				Name:                          stringAttr(resource.Attributes, "name"),
-				State:                         stringAttr(resource.Attributes, "state"),
-				IsAppStoreReviewInProgress:    boolAttr(resource.Attributes, "isAppStoreReviewInProgress"),
-				SubmitWithNextAppStoreVersion: boolAttr(resource.Attributes, "submitWithNextAppStoreVersion"),
+				ID:                                 subscriptionID,
+				GroupID:                            groupID,
+				GroupReferenceName:                 groupName,
+				ProductID:                          stringAttr(resource.Attributes, "productId"),
+				Name:                               stringAttr(resource.Attributes, "name"),
+				State:                              stringAttr(resource.Attributes, "state"),
+				IsAppStoreReviewInProgress:         boolAttr(resource.Attributes, "isAppStoreReviewInProgress"),
+				SubmitWithNextAppStoreVersion:      attached,
+				SubmitWithNextAppStoreVersionKnown: attachedKnown,
 			})
 		}
 	}
 	return subscriptions
+}
+
+func boolAttrKnown(attrs map[string]any, key string) (bool, bool) {
+	if attrs == nil {
+		return false, false
+	}
+	value, ok := attrs[key]
+	if !ok {
+		return false, false
+	}
+	result, ok := value.(bool)
+	return result, ok
 }
 
 // ListReviewSubscriptions lists subscriptions and their next-version attach state for an app.
@@ -95,6 +116,11 @@ func (c *Client) ListReviewSubscriptions(ctx context.Context, appID string) ([]R
 		var payload jsonAPIListPayload
 		if err := json.Unmarshal(responseBody, &payload); err != nil {
 			return nil, fmt.Errorf("failed to parse review subscriptions response: %w", err)
+		}
+		for _, resource := range payload.Data {
+			if resourceType := strings.TrimSpace(resource.Type); !strings.EqualFold(resourceType, "subscriptionGroups") {
+				return nil, fmt.Errorf("failed to parse review subscriptions response: unexpected resource type %q", resource.Type)
+			}
 		}
 		allResources = append(allResources, payload.Data...)
 		allIncluded = append(allIncluded, payload.Included...)
@@ -155,15 +181,26 @@ func (c *Client) CreateSubscriptionSubmission(ctx context.Context, subscriptionI
 	if err := json.Unmarshal(responseBody, &payload); err != nil {
 		return ReviewSubscriptionSubmission{}, fmt.Errorf("failed to parse subscription submission response: %w", err)
 	}
+	if strings.TrimSpace(payload.Data.ID) == "" {
+		return ReviewSubscriptionSubmission{}, fmt.Errorf("failed to parse subscription submission response: missing submission id")
+	}
+	if submissionType := strings.TrimSpace(payload.Data.Type); submissionType == "" {
+		return ReviewSubscriptionSubmission{}, fmt.Errorf("failed to parse subscription submission response: missing submission resource type")
+	} else if submissionType != "subscriptionSubmissions" {
+		return ReviewSubscriptionSubmission{}, fmt.Errorf("failed to parse subscription submission response: unexpected resource type %q", payload.Data.Type)
+	}
 
 	result := ReviewSubscriptionSubmission{
 		ID:                            strings.TrimSpace(payload.Data.ID),
 		SubmitWithNextAppStoreVersion: boolAttr(payload.Data.Attributes, "submitWithNextAppStoreVersion"),
 	}
-	if ref := firstRelationshipRef(payload.Data, "subscription"); ref != nil {
-		result.SubscriptionID = strings.TrimSpace(ref.ID)
+	relationshipID, relationshipPresent, err := validateReviewSubmissionRelationship(payload.Data, "subscription", "subscriptions", subscriptionID)
+	if err != nil {
+		return ReviewSubscriptionSubmission{}, fmt.Errorf("failed to parse subscription submission response: %w", err)
 	}
-	if result.SubscriptionID == "" {
+	if relationshipPresent {
+		result.SubscriptionID = relationshipID
+	} else {
 		result.SubscriptionID = subscriptionID
 	}
 	return result, nil

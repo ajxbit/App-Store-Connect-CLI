@@ -4,33 +4,31 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"flag"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
-	"github.com/peterbourgon/ff/v3/ffcli"
-
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/asc"
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/cli/metadata"
+	routingcoveragecli "github.com/rudrankriyam/App-Store-Connect-CLI/internal/cli/routingcoverage"
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/cli/shared"
 	submitcli "github.com/rudrankriyam/App-Store-Connect-CLI/internal/cli/submit"
 	validatecli "github.com/rudrankriyam/App-Store-Connect-CLI/internal/cli/validate"
+	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/rootfs"
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/validation"
 )
 
 const (
-	stepEnsureVersion            = "ensure_version"
-	stepApplyMetadata            = "apply_metadata"
-	stepAttachBuild              = "attach_build"
-	stepValidateReadiness        = "validate_readiness"
-	stepSubmitReview             = "submit_review"
-	releaseModeRun               = "run"
-	releaseModeStage             = "stage"
-	releaseRunTimeout            = 30 * time.Minute
-	releaseRunDeprecationWarning = "Warning: `asc release run` is deprecated. Use `asc release stage`, then `asc review submissions-create` / `asc review items-add` / `asc review submissions-submit` for metadata workflows, or `asc publish appstore --submit` when local metadata is already synced."
+	stepValidateBuild        = "validate_build"
+	stepEnsureVersion        = "ensure_version"
+	stepApplyMetadata        = "apply_metadata"
+	stepApplyRoutingCoverage = "apply_routing_coverage"
+	stepAttachBuild          = "attach_build"
+	stepValidateReadiness    = "validate_readiness"
+	releaseModeStage         = "stage"
+	releaseRunTimeout        = 30 * time.Minute
 )
 
 var (
@@ -43,20 +41,22 @@ var (
 type metadataCopyOptions = shared.VersionMetadataCopyOptions
 
 type runOptions struct {
-	AppID              string
-	Version            string
-	BuildID            string
-	MetadataDir        string
-	CopyMetadataFrom   string
-	SelectedCopyFields []string
-	Platform           string
-	Timeout            time.Duration
-	DryRun             bool
-	Confirm            bool
-	StrictValidate     bool
-	CheckpointFile     string
-	Mode               string
-	SubmitForReview    bool
+	AppID                       string
+	Version                     string
+	BuildID                     string
+	MetadataDir                 string
+	CopyMetadataFrom            string
+	SelectedCopyFields          []string
+	RoutingCoverageFile         string
+	PreparedRoutingCoverageFile *routingcoveragecli.PreparedRoutingCoverageFile
+	Platform                    string
+	Timeout                     time.Duration
+	DryRun                      bool
+	Confirm                     bool
+	AllowDeletes                bool
+	StrictValidate              bool
+	CheckpointFile              string
+	Mode                        string
 }
 
 type stepResult struct {
@@ -69,243 +69,143 @@ type stepResult struct {
 }
 
 type runResult struct {
-	AppID            string       `json:"appId"`
-	Version          string       `json:"version"`
-	VersionID        string       `json:"versionId,omitempty"`
-	BuildID          string       `json:"buildId"`
-	SubmissionID     string       `json:"submissionId,omitempty"`
-	MetadataDir      string       `json:"metadataDir,omitempty"`
-	CopyMetadataFrom string       `json:"copyMetadataFrom,omitempty"`
-	Platform         string       `json:"platform"`
-	DryRun           bool         `json:"dryRun"`
-	StrictValidate   bool         `json:"strictValidate,omitempty"`
-	CheckpointFile   string       `json:"checkpointFile,omitempty"`
-	Resumed          bool         `json:"resumed,omitempty"`
-	Status           string       `json:"status"`
-	FailedStep       string       `json:"failedStep,omitempty"`
-	Error            string       `json:"error,omitempty"`
-	Steps            []stepResult `json:"steps"`
+	AppID               string       `json:"appId"`
+	Version             string       `json:"version"`
+	VersionID           string       `json:"versionId,omitempty"`
+	BuildID             string       `json:"buildId"`
+	MetadataDir         string       `json:"metadataDir,omitempty"`
+	CopyMetadataFrom    string       `json:"copyMetadataFrom,omitempty"`
+	RoutingCoverageFile string       `json:"routingCoverageFile,omitempty"`
+	Platform            string       `json:"platform"`
+	DryRun              bool         `json:"dryRun"`
+	StrictValidate      bool         `json:"strictValidate,omitempty"`
+	CheckpointFile      string       `json:"checkpointFile,omitempty"`
+	Resumed             bool         `json:"resumed,omitempty"`
+	Status              string       `json:"status"`
+	FailedStep          string       `json:"failedStep,omitempty"`
+	Error               string       `json:"error,omitempty"`
+	Steps               []stepResult `json:"steps"`
 }
 
 type runCheckpoint struct {
-	AppID              string          `json:"appId"`
-	Version            string          `json:"version"`
-	BuildID            string          `json:"buildId"`
-	MetadataDir        string          `json:"metadataDir,omitempty"`
-	CopyMetadataFrom   string          `json:"copyMetadataFrom,omitempty"`
-	SelectedCopyFields []string        `json:"selectedCopyFields,omitempty"`
-	Platform           string          `json:"platform"`
-	VersionID          string          `json:"versionId,omitempty"`
-	SubmissionID       string          `json:"submissionId,omitempty"`
-	Mode               string          `json:"mode,omitempty"`
-	Completed          map[string]bool `json:"completed"`
-	UpdatedAt          string          `json:"updatedAt,omitempty"`
+	AppID               string          `json:"appId"`
+	Version             string          `json:"version"`
+	BuildID             string          `json:"buildId"`
+	MetadataDir         string          `json:"metadataDir,omitempty"`
+	CopyMetadataFrom    string          `json:"copyMetadataFrom,omitempty"`
+	SelectedCopyFields  []string        `json:"selectedCopyFields,omitempty"`
+	RoutingCoverageFile string          `json:"routingCoverageFile,omitempty"`
+	Platform            string          `json:"platform"`
+	VersionID           string          `json:"versionId,omitempty"`
+	Mode                string          `json:"mode,omitempty"`
+	Completed           map[string]bool `json:"completed"`
+	UpdatedAt           string          `json:"updatedAt,omitempty"`
 }
 
 type stepOutcome struct {
-	Status       string
-	Message      string
-	Details      any
-	Persist      bool
-	ResolvedID   string
-	SubmissionID string
+	Status      string
+	Message     string
+	Remediation string
+	Details     any
+	Persist     bool
+	ResolvedID  string
 }
 
-// ReleaseRunCommand runs the end-to-end release orchestration flow.
-func ReleaseRunCommand() *ffcli.Command {
-	fs := flag.NewFlagSet("release run", flag.ExitOnError)
-
-	appID := fs.String("app", "", "App Store Connect app ID (or ASC_APP_ID)")
-	version := fs.String("version", "", "App Store version string (required)")
-	buildID := fs.String("build", "", "Build ID to attach (required)")
-	metadataDir := fs.String("metadata-dir", "", "Metadata directory to apply (required)")
-	platform := fs.String("platform", "IOS", "Platform: IOS, MAC_OS, TV_OS, VISION_OS")
-	timeout := fs.Duration("timeout", releaseRunTimeout, "Maximum time to run the release pipeline")
-	dryRun := fs.Bool("dry-run", false, "Preview deterministic plan without mutations")
-	confirm := fs.Bool("confirm", false, "Confirm release mutations (required unless --dry-run)")
-	strictValidate := fs.Bool("strict-validate", false, "Treat readiness warnings as blocking")
-	checkpointFile := fs.String("checkpoint-file", "", "Checkpoint path for resumable runs")
-	output := shared.BindOutputFlags(fs)
-
-	return &ffcli.Command{
-		Name:       "run",
-		ShortUsage: "asc release run --app \"APP_ID\" --version \"2.4.0\" --build \"BUILD_ID\" --metadata-dir \"./metadata/version/2.4.0\" [flags]",
-		ShortHelp:  "DEPRECATED: use `asc release stage` + `asc review submissions-*`, or `asc publish appstore --submit`.",
-		LongHelp: `DEPRECATED: use ` + "`asc release stage`" + ` + ` + "`asc review submissions-*`" + ` when you need the metadata workflow, or ` + "`asc publish appstore --submit`" + ` when local metadata is already synced.
-
-Deprecated compatibility pipeline that still runs the old single-command
-release flow:
-1. Ensure/create version
-2. Apply metadata/localizations
-3. Attach selected build
-4. Run readiness checks
-5. Submit for review
-
-	Prefer:
-	  - ` + "`asc release stage`" + ` + ` + "`asc review submissions-create`" + ` / ` + "`asc review items-add`" + ` / ` + "`asc review submissions-submit`" + ` when you need the old metadata-dir staging + submit workflow
-	  - ` + "`asc publish appstore --submit`" + ` for the canonical high-level App Store upload + submit flow when local metadata is already applied
-
-Supports dry-run planning, step-level structured output, and checkpointed resume.
-
-Examples:
-  asc release run --app "APP_ID" --version "2.4.0" --build "BUILD_ID" --metadata-dir "./metadata/version/2.4.0" --dry-run
-  asc release run --app "APP_ID" --version "2.4.0" --build "BUILD_ID" --metadata-dir "./metadata/version/2.4.0" --confirm`,
-		FlagSet:   fs,
-		UsageFunc: shared.DefaultUsageFunc,
-		Exec: func(ctx context.Context, args []string) error {
-			fmt.Fprintln(os.Stderr, releaseRunDeprecationWarning)
-			if len(args) > 0 {
-				return shared.UsageError("release run does not accept positional arguments")
-			}
-			if !*dryRun && !*confirm {
-				return shared.UsageError("--confirm is required unless --dry-run is set")
-			}
-
-			resolvedAppID := shared.ResolveAppID(*appID)
-			if strings.TrimSpace(resolvedAppID) == "" {
-				return shared.UsageError("--app is required (or set ASC_APP_ID)")
-			}
-			trimmedVersion := strings.TrimSpace(*version)
-			if trimmedVersion == "" {
-				return shared.UsageError("--version is required")
-			}
-			trimmedBuildID := strings.TrimSpace(*buildID)
-			if trimmedBuildID == "" {
-				return shared.UsageError("--build is required")
-			}
-			trimmedMetadataDir := strings.TrimSpace(*metadataDir)
-			if trimmedMetadataDir == "" {
-				return shared.UsageError("--metadata-dir is required")
-			}
-
-			normalizedPlatform, err := shared.NormalizeAppStoreVersionPlatform(*platform)
-			if err != nil {
-				return shared.UsageError(err.Error())
-			}
-			if *timeout <= 0 {
-				return shared.UsageError("--timeout must be greater than 0")
-			}
-
-			checkpointPath := strings.TrimSpace(*checkpointFile)
-			if checkpointPath == "" {
-				checkpointPath = defaultCheckpointPath(resolvedAppID, trimmedVersion, trimmedBuildID, normalizedPlatform)
-			}
-			absCheckpointPath, err := filepath.Abs(checkpointPath)
-			if err != nil {
-				return fmt.Errorf("release run: resolve checkpoint path: %w", err)
-			}
-
-			result, runErr := executeRun(ctx, runOptions{
-				AppID:          resolvedAppID,
-				Version:        trimmedVersion,
-				BuildID:        trimmedBuildID,
-				MetadataDir:    trimmedMetadataDir,
-				Platform:       normalizedPlatform,
-				Timeout:        *timeout,
-				DryRun:         *dryRun,
-				Confirm:        *confirm,
-				StrictValidate: *strictValidate,
-				CheckpointFile: absCheckpointPath,
-			})
-
-			if printErr := shared.PrintOutput(result, *output.Output, *output.Pretty); printErr != nil {
-				return printErr
-			}
-			if runErr != nil {
-				return shared.NewReportedError(runErr)
-			}
-			return nil
-		},
-	}
+// readinessBlockedError carries the readiness report so the stage command can
+// summarize the blockers on stderr.
+type readinessBlockedError struct {
+	report validation.Report
 }
 
-func RemovedReleaseRunCommand() *ffcli.Command {
-	cmd := ReleaseRunCommand()
-	cmd.ShortHelp = "DEPRECATED: removed; use `asc release stage`."
-	cmd.LongHelp = "Removed legacy command. Use `asc release stage` instead."
-	cmd.UsageFunc = shared.DeprecatedUsageFunc
-	cmd.Exec = func(ctx context.Context, args []string) error {
-		fmt.Fprintln(os.Stderr, "Error: `asc release run` was removed. Use `asc release stage` instead.")
-		return flag.ErrHelp
-	}
-	return cmd
-}
-
-func executeRun(ctx context.Context, opts runOptions) (runResult, error) {
-	opts.Mode = releaseModeRun
-	opts.SubmitForReview = true
-	return executePipeline(ctx, opts)
+func (e readinessBlockedError) Error() string {
+	return fmt.Sprintf("validate readiness: found %d blocking issue(s)", e.report.Summary.Blocking)
 }
 
 func executeStage(ctx context.Context, opts runOptions) (runResult, error) {
 	opts.Mode = releaseModeStage
-	opts.SubmitForReview = false
 	return executePipeline(ctx, opts)
 }
 
 func executePipeline(ctx context.Context, opts runOptions) (runResult, error) {
-	stepCapacity := 4
-	if opts.SubmitForReview {
-		stepCapacity = 5
+	stepCapacity := 5
+	if strings.TrimSpace(opts.RoutingCoverageFile) != "" {
+		stepCapacity++
 	}
 	result := runResult{
-		AppID:            opts.AppID,
-		Version:          opts.Version,
-		BuildID:          opts.BuildID,
-		MetadataDir:      opts.MetadataDir,
-		CopyMetadataFrom: opts.CopyMetadataFrom,
-		Platform:         opts.Platform,
-		DryRun:           opts.DryRun,
-		StrictValidate:   opts.StrictValidate,
-		CheckpointFile:   opts.CheckpointFile,
-		Status:           "ok",
-		Steps:            make([]stepResult, 0, stepCapacity),
+		AppID:               opts.AppID,
+		Version:             opts.Version,
+		BuildID:             opts.BuildID,
+		MetadataDir:         opts.MetadataDir,
+		CopyMetadataFrom:    opts.CopyMetadataFrom,
+		RoutingCoverageFile: opts.RoutingCoverageFile,
+		Platform:            opts.Platform,
+		DryRun:              opts.DryRun,
+		StrictValidate:      opts.StrictValidate,
+		CheckpointFile:      opts.CheckpointFile,
+		Status:              "ok",
+		Steps:               make([]stepResult, 0, stepCapacity),
 	}
 	if opts.DryRun {
 		result.Status = "dry-run"
 	}
-
-	checkpoint := runCheckpoint{
-		AppID:              opts.AppID,
-		Version:            opts.Version,
-		BuildID:            opts.BuildID,
-		MetadataDir:        opts.MetadataDir,
-		CopyMetadataFrom:   opts.CopyMetadataFrom,
-		SelectedCopyFields: append([]string(nil), opts.SelectedCopyFields...),
-		Platform:           opts.Platform,
-		Mode:               opts.Mode,
-		Completed:          map[string]bool{},
-	}
-
-	if !opts.DryRun {
-		existing, err := loadCheckpoint(opts.CheckpointFile)
-		if err != nil {
-			result.Status = "error"
-			result.Error = err.Error()
-			return result, err
-		}
-		if existing != nil {
-			if existing.AppID != opts.AppID ||
-				existing.Version != opts.Version ||
-				existing.BuildID != opts.BuildID ||
-				existing.Platform != opts.Platform ||
-				existing.MetadataDir != opts.MetadataDir ||
-				existing.CopyMetadataFrom != opts.CopyMetadataFrom ||
-				!equalStringSlices(existing.SelectedCopyFields, opts.SelectedCopyFields) ||
-				!checkpointModeMatches(existing.Mode, opts.Mode) {
-				err := fmt.Errorf("checkpoint does not match current run arguments")
+	if strings.TrimSpace(opts.RoutingCoverageFile) != "" {
+		if opts.PreparedRoutingCoverageFile == nil {
+			prepared, err := routingcoveragecli.PrepareRoutingCoverageFile(opts.RoutingCoverageFile)
+			if err != nil {
 				result.Status = "error"
 				result.Error = err.Error()
 				return result, err
 			}
-			checkpoint = *existing
-			if checkpoint.Completed == nil {
-				checkpoint.Completed = map[string]bool{}
-			}
-			result.Resumed = len(checkpoint.Completed) > 0
-			result.VersionID = checkpoint.VersionID
-			result.SubmissionID = checkpoint.SubmissionID
+			opts.PreparedRoutingCoverageFile = &prepared
 		}
+		opts.RoutingCoverageFile = opts.PreparedRoutingCoverageFile.Path
+		result.RoutingCoverageFile = opts.RoutingCoverageFile
+	}
+
+	checkpoint := runCheckpoint{
+		AppID:               opts.AppID,
+		Version:             opts.Version,
+		BuildID:             opts.BuildID,
+		MetadataDir:         opts.MetadataDir,
+		CopyMetadataFrom:    opts.CopyMetadataFrom,
+		SelectedCopyFields:  append([]string(nil), opts.SelectedCopyFields...),
+		RoutingCoverageFile: opts.RoutingCoverageFile,
+		Platform:            opts.Platform,
+		Mode:                opts.Mode,
+		Completed:           map[string]bool{},
+	}
+
+	// A dry-run loads the checkpoint too, read-only: the plan has to show the
+	// steps the confirmed run would skip, and a checkpoint that no longer
+	// matches the run arguments has to fail the preview rather than only the
+	// confirmed run. Nothing below this point writes a checkpoint in dry-run.
+	existing, err := loadCheckpoint(opts.CheckpointFile)
+	if err != nil {
+		result.Status = "error"
+		result.Error = err.Error()
+		return result, err
+	}
+	if existing != nil {
+		if !checkpointMatchesRunArguments(existing, opts) {
+			err := errors.New("checkpoint does not match current run arguments")
+			if isLegacyReleaseRunCheckpoint(existing.Mode, opts.Mode) {
+				err = fmt.Errorf(
+					"checkpoint mode %q belongs to the `asc release run` pipeline removed in 1.0; delete %q or pass a different --checkpoint-file to start a new `asc release stage` run",
+					strings.TrimSpace(existing.Mode),
+					opts.CheckpointFile,
+				)
+			}
+			result.Status = "error"
+			result.Error = err.Error()
+			return result, err
+		}
+		checkpoint = *existing
+		checkpoint.RoutingCoverageFile = opts.RoutingCoverageFile
+		if checkpoint.Completed == nil {
+			checkpoint.Completed = map[string]bool{}
+		}
+		result.Resumed = len(checkpoint.Completed) > 0
+		result.VersionID = checkpoint.VersionID
 	}
 
 	client, err := releaseClientFactory()
@@ -318,17 +218,45 @@ func executePipeline(ctx context.Context, opts runOptions) (runResult, error) {
 	requestCtx, cancel := shared.ContextWithTimeoutDuration(ctx, opts.Timeout)
 	defer cancel()
 
+	if result.Resumed || strings.TrimSpace(checkpoint.VersionID) != "" {
+		completedBeforeVerification := len(checkpoint.Completed)
+		if err := verifyResumedCheckpointBinding(requestCtx, client, opts, &checkpoint, nil); err != nil {
+			result.Status = "error"
+			result.Error = err.Error()
+			result.VersionID = ""
+			return result, err
+		}
+		// Verification only ever discards completions. Persist those discards
+		// before the pipeline mutates anything: otherwise a later checkpoint
+		// write that fails leaves the stale flags on disk, and the next resume
+		// finds the mutation already applied and skips the steps the discard
+		// was meant to force.
+		discarded := len(checkpoint.Completed) != completedBeforeVerification
+		if !opts.DryRun && discarded {
+			if saveErr := saveCheckpoint(opts.CheckpointFile, checkpoint); saveErr != nil {
+				result.Status = "error"
+				result.Error = saveErr.Error()
+				return result, saveErr
+			}
+		}
+		result.Resumed = len(checkpoint.Completed) > 0
+		result.VersionID = strings.TrimSpace(checkpoint.VersionID)
+	}
+
 	versionID := strings.TrimSpace(checkpoint.VersionID)
-	submissionID := strings.TrimSpace(checkpoint.SubmissionID)
 	versionPlannedCreate := false
 
 	runStep := func(name, remediation string, fn func() (stepOutcome, error)) error {
 		start := time.Now()
 		step := stepResult{Name: name}
 
-		if !opts.DryRun && checkpoint.Completed[name] {
+		if checkpoint.Completed[name] {
 			step.Status = "skipped"
 			step.Message = "skipped (already completed in checkpoint)"
+			if opts.DryRun {
+				step.Status = "dry-run"
+				step.Message = "would skip (already completed in checkpoint)"
+			}
 			step.DurationMS = time.Since(start).Milliseconds()
 			result.Steps = append(result.Steps, step)
 			return nil
@@ -344,6 +272,9 @@ func executePipeline(ctx context.Context, opts runOptions) (runResult, error) {
 				step.Message = stepErr.Error()
 			}
 			step.Remediation = remediation
+			if strings.TrimSpace(outcome.Remediation) != "" {
+				step.Remediation = outcome.Remediation
+			}
 			step.Details = outcome.Details
 			result.Steps = append(result.Steps, step)
 			result.Status = "error"
@@ -365,11 +296,6 @@ func executePipeline(ctx context.Context, opts runOptions) (runResult, error) {
 			result.VersionID = versionID
 			checkpoint.VersionID = versionID
 		}
-		if strings.TrimSpace(outcome.SubmissionID) != "" {
-			submissionID = strings.TrimSpace(outcome.SubmissionID)
-			result.SubmissionID = submissionID
-			checkpoint.SubmissionID = submissionID
-		}
 
 		if !opts.DryRun && outcome.Persist {
 			checkpoint.Completed[name] = true
@@ -384,6 +310,64 @@ func executePipeline(ctx context.Context, opts runOptions) (runResult, error) {
 		return nil
 	}
 
+	// attach_build runs after the metadata and routing coverage steps, both of
+	// which mutate. Resolve the requested build before any of them so a build
+	// that does not exist, belongs to another app, or targets another platform
+	// fails the run (and the dry-run preview) instead of the version being left
+	// half-updated.
+	if err := runStep(stepValidateBuild, "Pass a --build-id that exists, belongs to --app, and matches --platform (try `asc builds list --app <id>`).", func() (stepOutcome, error) {
+		buildAppID, buildErr := resolveBuildOwningApp(requestCtx, client, opts.BuildID)
+		if buildErr != nil {
+			return stepOutcome{}, fmt.Errorf("validate build: %w", buildErr)
+		}
+		if !strings.EqualFold(buildAppID, strings.TrimSpace(opts.AppID)) {
+			return stepOutcome{}, fmt.Errorf(
+				"validate build: build %s belongs to app %s, not %s",
+				strings.TrimSpace(opts.BuildID),
+				buildAppID,
+				strings.TrimSpace(opts.AppID),
+			)
+		}
+
+		buildPlatform, platformErr := resolveBuildPlatform(requestCtx, client, opts.BuildID)
+		if platformErr != nil {
+			return stepOutcome{}, fmt.Errorf("validate build: %w", platformErr)
+		}
+		if !strings.EqualFold(buildPlatform, strings.TrimSpace(opts.Platform)) {
+			buildDetails := map[string]any{
+				"buildId":           strings.TrimSpace(opts.BuildID),
+				"appId":             buildAppID,
+				"buildPlatform":     buildPlatform,
+				"requestedPlatform": strings.TrimSpace(opts.Platform),
+			}
+			return stepOutcome{Details: buildDetails}, fmt.Errorf(
+				"validate build: build %s is on platform %q, not %q",
+				strings.TrimSpace(opts.BuildID),
+				buildPlatform,
+				strings.TrimSpace(opts.Platform),
+			)
+		}
+
+		status := "ok"
+		message := "build belongs to app and matches platform"
+		if opts.DryRun {
+			status = "dry-run"
+			message = "build belongs to app and matches platform (no action needed)"
+		}
+		return stepOutcome{
+			Status:  status,
+			Message: message,
+			Details: map[string]any{
+				"buildId":       strings.TrimSpace(opts.BuildID),
+				"appId":         buildAppID,
+				"buildPlatform": buildPlatform,
+			},
+			Persist: false,
+		}, nil
+	}); err != nil {
+		return result, err
+	}
+
 	if err := runStep(stepEnsureVersion, "Verify app/version/platform and ensure only one matching version exists.", func() (stepOutcome, error) {
 		versionResp, getErr := client.GetAppStoreVersions(
 			requestCtx,
@@ -395,9 +379,16 @@ func executePipeline(ctx context.Context, opts runOptions) (runResult, error) {
 		if getErr != nil {
 			return stepOutcome{}, fmt.Errorf("ensure version: %w", getErr)
 		}
+		if versionResp == nil {
+			return stepOutcome{}, fmt.Errorf("ensure version: empty app store versions response")
+		}
+		pageHasNext := strings.TrimSpace(versionResp.Links.Next) != ""
 
 		switch len(versionResp.Data) {
 		case 0:
+			if pageHasNext {
+				return stepOutcome{}, fmt.Errorf("ensure version: %w", shared.MarkAmbiguousSelectionSample(shared.AmbiguousAppStoreVersionError(opts.Version, opts.Platform, versionResp.Data, "", "")))
+			}
 			if opts.DryRun {
 				versionPlannedCreate = true
 				return stepOutcome{
@@ -422,6 +413,9 @@ func executePipeline(ctx context.Context, opts runOptions) (runResult, error) {
 				ResolvedID: created.Data.ID,
 			}, nil
 		case 1:
+			if pageHasNext {
+				return stepOutcome{}, fmt.Errorf("ensure version: %w", shared.MarkAmbiguousSelectionSample(shared.AmbiguousAppStoreVersionError(opts.Version, opts.Platform, versionResp.Data, "", "")))
+			}
 			foundID := strings.TrimSpace(versionResp.Data[0].ID)
 			status := "ok"
 			message := "reused existing app store version"
@@ -437,7 +431,11 @@ func executePipeline(ctx context.Context, opts runOptions) (runResult, error) {
 				ResolvedID: foundID,
 			}, nil
 		default:
-			return stepOutcome{}, fmt.Errorf("ensure version: multiple app store versions found for version %q and platform %q", opts.Version, opts.Platform)
+			ambiguous := shared.AmbiguousAppStoreVersionError(opts.Version, opts.Platform, versionResp.Data, "", "")
+			if pageHasNext {
+				ambiguous = shared.MarkAmbiguousSelectionSample(ambiguous)
+			}
+			return stepOutcome{}, fmt.Errorf("ensure version: %w", ambiguous)
 		}
 	}); err != nil {
 		return result, err
@@ -465,11 +463,30 @@ func executePipeline(ctx context.Context, opts runOptions) (runResult, error) {
 				Dir:          opts.MetadataDir,
 				Include:      "localizations",
 				DryRun:       opts.DryRun,
-				AllowDeletes: false,
-				Confirm:      false,
+				AllowDeletes: opts.AllowDeletes,
+				Confirm:      opts.Confirm,
 			})
 			if pushErr != nil {
 				return stepOutcome{}, fmt.Errorf("apply metadata: %w", pushErr)
+			}
+
+			details := map[string]any{
+				"adds":     len(pushResult.Adds),
+				"updates":  len(pushResult.Updates),
+				"deletes":  len(pushResult.Deletes),
+				"apiCalls": pushResult.APICalls,
+			}
+
+			// metadata.ExecutePush returns the plan before its delete guard when
+			// DryRun is set. Apply the same requirement here so the preview and
+			// the confirmed run agree instead of reporting a plan that --confirm
+			// would refuse to apply.
+			if opts.DryRun && len(pushResult.Deletes) > 0 && !opts.AllowDeletes {
+				return stepOutcome{
+					Message:     "metadata plan requires --allow-deletes",
+					Remediation: "Add the missing localizations to --metadata-dir, or rerun with --allow-deletes to apply the planned deletions.",
+					Details:     details,
+				}, shared.NewValidationError(errors.New("apply metadata: --allow-deletes is required to apply delete operations"))
 			}
 
 			changeCount := len(pushResult.Adds) + len(pushResult.Updates) + len(pushResult.Deletes)
@@ -490,12 +507,7 @@ func executePipeline(ctx context.Context, opts runOptions) (runResult, error) {
 			return stepOutcome{
 				Status:  status,
 				Message: message,
-				Details: map[string]any{
-					"adds":     len(pushResult.Adds),
-					"updates":  len(pushResult.Updates),
-					"deletes":  len(pushResult.Deletes),
-					"apiCalls": pushResult.APICalls,
-				},
+				Details: details,
 				Persist: !opts.DryRun,
 			}, nil
 		}
@@ -538,7 +550,19 @@ func executePipeline(ctx context.Context, opts runOptions) (runResult, error) {
 		return result, err
 	}
 
-	if err := runStep(stepAttachBuild, "Ensure --build points to a valid processed build for this app.", func() (stepOutcome, error) {
+	if strings.TrimSpace(opts.RoutingCoverageFile) != "" {
+		if err := runStep(stepApplyRoutingCoverage, "Fix the routing coverage file or remove --routing-coverage-file and rerun.", func() (stepOutcome, error) {
+			outcome, err := applyPreparedRoutingCoverageStep(requestCtx, client, versionID, *opts.PreparedRoutingCoverageFile, opts.DryRun)
+			if err != nil {
+				return outcome, fmt.Errorf("apply routing coverage: %w", err)
+			}
+			return outcome, nil
+		}); err != nil {
+			return result, err
+		}
+	}
+
+	if err := runStep(stepAttachBuild, "Ensure --build-id points to a valid processed build for this app.", func() (stepOutcome, error) {
 		if strings.TrimSpace(versionID) == "" {
 			if opts.DryRun {
 				return stepOutcome{
@@ -615,7 +639,7 @@ func executePipeline(ctx context.Context, opts runOptions) (runResult, error) {
 			return stepOutcome{
 				Message: "readiness checks reported blocking issues",
 				Details: map[string]any{"report": report},
-			}, fmt.Errorf("validate readiness: found %d blocking issue(s)", report.Summary.Blocking)
+			}, shared.NewValidationError(readinessBlockedError{report: report})
 		}
 
 		status := "ok"
@@ -633,80 +657,56 @@ func executePipeline(ctx context.Context, opts runOptions) (runResult, error) {
 		return result, err
 	}
 
-	if opts.SubmitForReview {
-		if err := runStep(stepSubmitReview, "Check review submission prerequisites and rerun with --confirm.", func() (stepOutcome, error) {
-			if strings.TrimSpace(versionID) == "" {
-				if opts.DryRun {
-					return stepOutcome{
-						Status:  "dry-run",
-						Message: "submission deferred until version exists",
-						Details: map[string]any{"deferred": true},
-						Persist: false,
-					}, nil
-				}
-				return stepOutcome{}, fmt.Errorf("submit review: resolved version ID is empty")
-			}
-
-			submitResult, submitErr := submitcli.SubmitResolvedVersion(requestCtx, client, submitcli.SubmitResolvedVersionOptions{
-				AppID:                    opts.AppID,
-				VersionID:                versionID,
-				BuildID:                  opts.BuildID,
-				Platform:                 opts.Platform,
-				EnsureBuildAttached:      false,
-				LookupExistingSubmission: true,
-				DryRun:                   opts.DryRun,
-				Emit: func(message string) {
-					fmt.Fprintln(os.Stderr, message)
-				},
-			})
-			if submitErr != nil {
-				return stepOutcome{Details: submitResult}, submitErr
-			}
-
-			switch {
-			case submitResult.AlreadySubmitted:
-				status := "skipped"
-				message := "submission already exists for version"
-				if opts.DryRun {
-					status = "dry-run"
-					message = "submission already exists for version (no action needed)"
-				}
-				return stepOutcome{
-					Status:       status,
-					Message:      message,
-					Details:      submitResult,
-					Persist:      !opts.DryRun,
-					SubmissionID: submitResult.SubmissionID,
-				}, nil
-			case submitResult.WouldSubmit:
-				return stepOutcome{
-					Status:  "dry-run",
-					Message: "would create and submit review submission",
-					Details: submitResult,
-					Persist: false,
-				}, nil
-			default:
-				return stepOutcome{
-					Status:       "ok",
-					Message:      "submitted version for review",
-					Details:      submitResult,
-					Persist:      true,
-					SubmissionID: submitResult.SubmissionID,
-				}, nil
-			}
-		}); err != nil {
-			return result, err
-		}
-	}
-
-	if strings.TrimSpace(result.SubmissionID) == "" {
-		result.SubmissionID = strings.TrimSpace(submissionID)
-	}
 	if strings.TrimSpace(result.VersionID) == "" {
 		result.VersionID = strings.TrimSpace(versionID)
 	}
 
 	return result, nil
+}
+
+// resolveBuildOwningApp reads the build's app linkage, which both proves the
+// build exists and reports the app that owns it.
+func resolveBuildOwningApp(ctx context.Context, client *asc.Client, buildID string) (string, error) {
+	trimmedBuildID := strings.TrimSpace(buildID)
+	if trimmedBuildID == "" {
+		return "", fmt.Errorf("build ID is required")
+	}
+	linkage, err := client.GetBuildAppRelationship(ctx, trimmedBuildID)
+	if err != nil {
+		if asc.IsNotFound(err) {
+			return "", fmt.Errorf("build %s was not found", trimmedBuildID)
+		}
+		return "", fmt.Errorf("resolve app for build %s: %w", trimmedBuildID, err)
+	}
+	if linkage == nil || strings.TrimSpace(linkage.Data.ID) == "" {
+		return "", fmt.Errorf("build %s is missing a related app ID", trimmedBuildID)
+	}
+	return strings.TrimSpace(linkage.Data.ID), nil
+}
+
+// resolveBuildPlatform reads the build's pre-release version metadata so the
+// selected build cannot be staged into a version for another platform.
+func resolveBuildPlatform(ctx context.Context, client *asc.Client, buildID string) (string, error) {
+	trimmedBuildID := strings.TrimSpace(buildID)
+	if trimmedBuildID == "" {
+		return "", fmt.Errorf("build ID is required")
+	}
+
+	preReleaseVersion, err := client.GetBuildPreReleaseVersion(ctx, trimmedBuildID)
+	if err != nil {
+		if asc.IsNotFound(err) {
+			return "", fmt.Errorf("build %s pre-release version was not found", trimmedBuildID)
+		}
+		return "", fmt.Errorf("resolve platform for build %s: %w", trimmedBuildID, err)
+	}
+	if preReleaseVersion == nil {
+		return "", fmt.Errorf("build %s returned an empty pre-release version", trimmedBuildID)
+	}
+	platform := strings.TrimSpace(string(preReleaseVersion.Data.Attributes.Platform))
+	if platform == "" {
+		return "", fmt.Errorf("build %s pre-release version has no platform", trimmedBuildID)
+	}
+	return platform, nil
 }
 
 func releaseReadinessSuccessMessage(report validation.Report, dryRun bool) string {
@@ -758,17 +758,6 @@ func hasReleaseReadinessCheckID(checks []validation.CheckResult, wantID string) 
 	return false
 }
 
-func defaultCheckpointPath(appID, version, buildID, platform string) string {
-	fileName := fmt.Sprintf(
-		"%s_%s_%s_%s.json",
-		sanitizeCheckpointToken(appID),
-		sanitizeCheckpointToken(version),
-		sanitizeCheckpointToken(buildID),
-		sanitizeCheckpointToken(platform),
-	)
-	return filepath.Join(".asc", "release", "checkpoints", fileName)
-}
-
 func defaultStageCheckpointPath(appID, version, buildID, platform string) string {
 	fileName := fmt.Sprintf(
 		"stage_%s_%s_%s_%s.json",
@@ -780,14 +769,70 @@ func defaultStageCheckpointPath(appID, version, buildID, platform string) string
 	return filepath.Join(".asc", "release", "checkpoints", fileName)
 }
 
+// checkpointModeMatches reports whether an existing checkpoint was written by
+// the pipeline that is being resumed. A checkpoint without a mode was written
+// by the `release run` pipeline removed in 1.0, so it never matches.
 func checkpointModeMatches(existingMode, desiredMode string) bool {
-	normalizedExistingMode := strings.TrimSpace(existingMode)
-	switch normalizedExistingMode {
-	case "":
-		return desiredMode == releaseModeRun
-	default:
-		return normalizedExistingMode == desiredMode
+	return strings.TrimSpace(existingMode) == strings.TrimSpace(desiredMode)
+}
+
+func isLegacyReleaseRunCheckpoint(existingMode, desiredMode string) bool {
+	existing := strings.TrimSpace(existingMode)
+	desired := strings.TrimSpace(desiredMode)
+	return desired == releaseModeStage && (existing == "" || existing == "run")
+}
+
+func checkpointMatchesRunArguments(existing *runCheckpoint, opts runOptions) bool {
+	if existing == nil ||
+		existing.AppID != opts.AppID ||
+		existing.Version != opts.Version ||
+		existing.BuildID != opts.BuildID ||
+		existing.Platform != opts.Platform ||
+		existing.MetadataDir != opts.MetadataDir ||
+		existing.CopyMetadataFrom != opts.CopyMetadataFrom ||
+		!equalStringSlices(existing.SelectedCopyFields, opts.SelectedCopyFields) ||
+		!checkpointModeMatches(existing.Mode, opts.Mode) {
+		return false
 	}
+	if existing.RoutingCoverageFile == opts.RoutingCoverageFile {
+		return true
+	}
+	return checkpointCanDropPendingRoutingCoverage(existing, opts.RoutingCoverageFile) ||
+		checkpointCanAddRoutingCoverage(existing, opts.RoutingCoverageFile)
+}
+
+func checkpointCanDropPendingRoutingCoverage(existing *runCheckpoint, desiredFile string) bool {
+	if strings.TrimSpace(existing.RoutingCoverageFile) == "" || strings.TrimSpace(desiredFile) != "" {
+		return false
+	}
+	for name, completed := range existing.Completed {
+		if !completed {
+			continue
+		}
+		switch name {
+		case stepEnsureVersion, stepApplyMetadata:
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+func checkpointCanAddRoutingCoverage(existing *runCheckpoint, desiredFile string) bool {
+	if strings.TrimSpace(existing.RoutingCoverageFile) != "" || strings.TrimSpace(desiredFile) == "" {
+		return false
+	}
+	for name, completed := range existing.Completed {
+		if !completed {
+			continue
+		}
+		switch name {
+		case stepEnsureVersion, stepApplyMetadata, stepAttachBuild, stepValidateReadiness:
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 func equalStringSlices(a, b []string) bool {
@@ -829,8 +874,46 @@ func sanitizeCheckpointToken(value string) string {
 	return result
 }
 
+// checkpointRoot anchors checkpoint reads and writes to a trusted root so the
+// checkpoint file and its staging file cannot redirect through symlinks.
+//
+// Checkpoints under the working directory (including the default
+// .asc/release/checkpoints path) are anchored to the working directory so every
+// repository-controlled directory component is validated. A checkpoint the
+// operator placed outside the working directory is anchored to its own parent,
+// which keeps explicitly selected external locations working.
+func checkpointRoot(path string) (rootfs.Root, string, error) {
+	if path == "" {
+		return rootfs.Root{}, "", fmt.Errorf("checkpoint path is empty")
+	}
+	absolute, err := filepath.Abs(path)
+	if err != nil {
+		return rootfs.Root{}, "", err
+	}
+
+	if cwd, cwdErr := os.Getwd(); cwdErr == nil {
+		if root, rootErr := rootfs.New(cwd); rootErr == nil {
+			if relative, relErr := filepath.Rel(root.Path(), absolute); relErr == nil {
+				if relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+					return root, relative, nil
+				}
+			}
+		}
+	}
+
+	root, err := rootfs.New(filepath.Dir(absolute))
+	if err != nil {
+		return rootfs.Root{}, "", err
+	}
+	return root, filepath.Base(absolute), nil
+}
+
 func loadCheckpoint(path string) (*runCheckpoint, error) {
-	data, err := os.ReadFile(path)
+	root, name, err := checkpointRoot(path)
+	if err != nil {
+		return nil, fmt.Errorf("read checkpoint: %w", err)
+	}
+	data, err := root.ReadFile(name)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil, nil
@@ -853,15 +936,12 @@ func saveCheckpoint(path string, checkpoint runCheckpoint) error {
 	if err != nil {
 		return fmt.Errorf("marshal checkpoint: %w", err)
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return fmt.Errorf("create checkpoint directory: %w", err)
-	}
-	tmpPath := path + ".tmp"
-	if err := os.WriteFile(tmpPath, data, 0o600); err != nil {
+	root, name, err := checkpointRoot(path)
+	if err != nil {
 		return fmt.Errorf("write checkpoint: %w", err)
 	}
-	if err := os.Rename(tmpPath, path); err != nil {
-		return fmt.Errorf("persist checkpoint: %w", err)
+	if err := root.WriteFile(name, data, 0o600); err != nil {
+		return fmt.Errorf("write checkpoint: %w", err)
 	}
 	return nil
 }

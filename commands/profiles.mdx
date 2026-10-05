@@ -32,6 +32,20 @@ asc profiles list --paginate
 * `--next` - Fetch next page using a `links.next` URL
 * `--paginate` - Automatically fetch all pages
 
+### Stale Profiles
+
+A profile is stale when it is `INVALID` or its expiration date has passed.
+
+```bash  theme={null}
+# Only stale profiles, across every page
+asc profiles list --stale-only
+
+# Add a Stale column to table output
+asc profiles list --include-stale --output table
+```
+
+`--stale-only` always reads every page and cannot be combined with `--next`. Its JSON keeps Apple's envelope shape but is a computed view: `data` holds only stale profiles, and `meta` and pagination links are dropped because they describe the unfiltered list; `included` keeps only resources the stale profiles reference. With `--fields`, both flags need `profileState` and `expirationDate`. `--include-stale` works with table and markdown output only; with JSON it is a usage error.
+
 ## Get Profile Details
 
 Retrieve a specific profile by ID:
@@ -170,22 +184,54 @@ asc profiles download --id "PROFILE_ID" \
   --output "./profile.mobileprovision"
 ```
 
-The downloaded `.mobileprovision` file can be:
+Native macOS profiles conventionally use `.provisionprofile`; iOS, tvOS, and
+legacy profiles use `.mobileprovision`. Both extensions can be:
 
-* Installed in Xcode (drag and drop)
-* Copied to `~/Library/MobileDevice/Provisioning Profiles/`
+* Installed with `asc profiles local install --path "./profile.mobileprovision"`
+* Opened with Xcode
 * Used in CI/CD pipelines
+
+## Inspect Profile
+
+Inspect a downloaded provisioning profile file:
+
+```bash  theme={null}
+asc profiles inspect --path "./profile.mobileprovision"
+```
+
+Use JSON when scripts need to validate the embedded bundle ID, team ID, certificates, or entitlements:
+
+```bash  theme={null}
+asc profiles inspect --path "./profile.mobileprovision" --output json
+```
+
+Print entitlement key/value rows for quick terminal checks:
+
+```bash  theme={null}
+asc profiles inspect --path "./profile.mobileprovision" --entitlements
+```
+
+This command reads local disk only. It decodes the signed provisioning profile payload and reports identifiers, expiration, certificate fingerprints, device counts, and entitlement values.
+
+For a native macOS profile, use the same commands with a `.provisionprofile`
+path. Local list and clean operations recognize both extensions.
 
 ### Install Profile
 
 ```bash  theme={null}
-# Copy to standard location
-mkdir -p ~/Library/MobileDevice/Provisioning\ Profiles
-cp profile.mobileprovision ~/Library/MobileDevice/Provisioning\ Profiles/
+# Install into the active Xcode's provisioning profile directory
+asc profiles local install --path "./profile.mobileprovision"
 
 # Or open with Xcode
 open profile.mobileprovision
 ```
+
+On macOS, the default directory follows the active Xcode selected by `DEVELOPER_DIR` or `xcode-select`:
+
+* Xcode 16 or newer: `~/Library/Developer/Xcode/UserData/Provisioning Profiles`
+* Xcode 15 or older: `~/Library/MobileDevice/Provisioning Profiles`
+
+Pass `--install-dir` to choose a directory explicitly or when no full Xcode is active. Xcode 16 and newer can still load previously downloaded profiles from the older directory, but `profiles local` operates on one directory per invocation. Use an explicit `--install-dir "$HOME/Library/MobileDevice/Provisioning Profiles"` when you need to inspect or clean that compatibility store.
 
 ## Delete Profile
 
@@ -221,10 +267,10 @@ Manage profiles on your local machine:
 asc profiles local list
 
 # Remove expired profiles
-asc profiles local clean
+asc profiles local clean --expired --confirm
 
 # Get UUID of a profile file
-asc profiles local install --path ./profile.mobileprovision
+asc profiles inspect --path "./profile.mobileprovision" --output json | jq -r '.uuid'
 ```
 
 ## Complete Example Workflows
@@ -251,8 +297,8 @@ asc profiles download --id "PROFILE_ID" \
   --output "./signing/appstore.mobileprovision"
 
 # 5. Install profile
-cp ./signing/appstore.mobileprovision \
-  ~/Library/MobileDevice/Provisioning\ Profiles/
+asc profiles local install \
+  --path "./signing/appstore.mobileprovision"
 ```
 
 ### Create Development Profile
@@ -278,8 +324,7 @@ asc profiles create --name "Example Development" \
 # 4. Download and install
 asc profiles download --id "PROFILE_ID" \
   --output "./dev.mobileprovision"
-cp ./dev.mobileprovision \
-  ~/Library/MobileDevice/Provisioning\ Profiles/
+asc profiles local install --path "./dev.mobileprovision"
 ```
 
 ### Update Profile with New Device
@@ -347,15 +392,11 @@ set -e
 asc profiles download --id "$PROFILE_ID" \
   --output "./build.mobileprovision"
 
-# Create provisioning profiles directory
-mkdir -p ~/Library/MobileDevice/Provisioning\ Profiles
-
 # Install profile
-cp ./build.mobileprovision \
-  ~/Library/MobileDevice/Provisioning\ Profiles/
+asc profiles local install --path "./build.mobileprovision"
 
 # Get profile UUID for Xcode
-PROFILE_UUID=$(asc profiles local install --path ./build.mobileprovision)
+PROFILE_UUID=$(asc profiles inspect --path "./build.mobileprovision" --output json | jq -r '.uuid')
 echo "PROFILE_UUID=$PROFILE_UUID" >> $GITHUB_ENV
 ```
 
@@ -435,11 +476,11 @@ Profiles must be installed in the correct location:
 
 ```bash  theme={null}
 # Check installed profiles
-ls -la ~/Library/MobileDevice/Provisioning\ Profiles/
+asc profiles local list --output table
 
 # Re-install profile
 asc profiles download --id "PROFILE_ID" --output ./profile.mobileprovision
-cp ./profile.mobileprovision ~/Library/MobileDevice/Provisioning\ Profiles/
+asc profiles local install --path "./profile.mobileprovision"
 
 # Restart Xcode
 ```

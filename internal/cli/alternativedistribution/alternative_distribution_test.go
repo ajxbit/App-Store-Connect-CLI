@@ -4,8 +4,34 @@ import (
 	"context"
 	"errors"
 	"flag"
+	"strings"
 	"testing"
 )
+
+func TestAlternativeDistributionCommandIncludesEUAddendumAgentGuidance(t *testing.T) {
+	cmd := AlternativeDistributionCommand()
+	if cmd == nil {
+		t.Fatal("expected alternative-distribution command")
+	}
+
+	for _, expected := range []string{
+		"Agent guidance:",
+		"Alternative Distribution Addendum for EU Apps",
+		"Account Holder",
+		"cannot accept or sign",
+		"https://appstoreconnect.apple.com/agreements/#/",
+	} {
+		if !strings.Contains(cmd.LongHelp, expected) {
+			t.Fatalf("expected long help to contain %q, got %q", expected, cmd.LongHelp)
+		}
+	}
+
+	for _, sub := range cmd.Subcommands {
+		if sub.Name == "agreements" {
+			t.Fatal("did not expect a separate agreements subcommand")
+		}
+	}
+}
 
 func TestAlternativeDistributionDomainsGetCommand_MissingID(t *testing.T) {
 	cmd := AlternativeDistributionDomainsGetCommand()
@@ -68,8 +94,8 @@ func TestAlternativeDistributionDomainsListCommand_InvalidLimit(t *testing.T) {
 		t.Fatalf("failed to parse flags: %v", err)
 	}
 
-	if err := cmd.Exec(context.Background(), []string{}); err == nil || errors.Is(err, flag.ErrHelp) {
-		t.Fatalf("expected validation error for invalid --limit, got %v", err)
+	if err := cmd.Exec(context.Background(), []string{}); err == nil || !errors.Is(err, flag.ErrHelp) {
+		t.Fatalf("expected usage error for invalid --limit, got %v", err)
 	}
 }
 
@@ -259,8 +285,8 @@ func TestAlternativeDistributionPackageVersionsDeltasCommand_InvalidLimit(t *tes
 		t.Fatalf("failed to parse flags: %v", err)
 	}
 
-	if err := cmd.Exec(context.Background(), []string{}); err == nil || errors.Is(err, flag.ErrHelp) {
-		t.Fatalf("expected validation error for invalid --limit, got %v", err)
+	if err := cmd.Exec(context.Background(), []string{}); err == nil || !errors.Is(err, flag.ErrHelp) {
+		t.Fatalf("expected usage error for invalid --limit, got %v", err)
 	}
 }
 
@@ -270,7 +296,7 @@ func TestAlternativeDistributionPackageVersionsListCommand_InvalidLimit(t *testi
 		t.Fatalf("failed to parse flags: %v", err)
 	}
 
-	if err := cmd.Exec(context.Background(), []string{}); err == nil || errors.Is(err, flag.ErrHelp) {
-		t.Fatalf("expected validation error for invalid --limit, got %v", err)
+	if err := cmd.Exec(context.Background(), []string{}); err == nil || !errors.Is(err, flag.ErrHelp) {
+		t.Fatalf("expected usage error for invalid --limit, got %v", err)
 	}
 }

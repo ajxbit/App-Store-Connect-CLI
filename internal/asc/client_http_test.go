@@ -10,7 +10,11 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -20,6 +24,23 @@ type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (fn roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
 	return fn(req)
+}
+
+type timeoutTransportError struct{}
+
+func (timeoutTransportError) Error() string { return "transport timeout" }
+func (timeoutTransportError) Timeout() bool { return true }
+
+type unexpectedEOFReader struct {
+	read bool
+}
+
+func (r *unexpectedEOFReader) Read(p []byte) (int, error) {
+	if r.read {
+		return 0, io.EOF
+	}
+	r.read = true
+	return copy(p, `{"data":`), io.ErrUnexpectedEOF
 }
 
 func newTestClient(t *testing.T, check func(*http.Request), responses ...*http.Response) *Client {
@@ -82,6 +103,33 @@ func newTestClientWithResponses(t *testing.T, check func(*http.Request), respons
 	}
 }
 
+func newTestServerClient(t *testing.T, handler http.HandlerFunc) *Client {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("GenerateKey() error: %v", err)
+	}
+	server := httptest.NewServer(handler)
+	t.Cleanup(server.Close)
+	serverURL, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatalf("parse test server URL: %v", err)
+	}
+	serverClient := server.Client()
+	transport := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		forwarded := req.Clone(req.Context())
+		forwarded.URL.Scheme = serverURL.Scheme
+		forwarded.URL.Host = serverURL.Host
+		return serverClient.Transport.RoundTrip(forwarded)
+	})
+	return &Client{
+		httpClient: &http.Client{Transport: transport},
+		keyID:      "KEY123",
+		issuerID:   "ISS456",
+		privateKey: key,
+	}
+}
+
 func jsonResponse(status int, body string) *http.Response {
 	return &http.Response{
 		Status:     fmt.Sprintf("%d %s", status, http.StatusText(status)),
@@ -112,6 +160,14 @@ func TestListEndpoints_UseNextURL(t *testing.T) {
 			next: "https://api.appstoreconnect.apple.com/v1/apps?cursor=abc",
 			call: func(c *Client, next string) error {
 				_, err := c.GetApps(ctx, WithAppsLimit(5), WithAppsSort("name"), WithAppsNextURL(next))
+				return err
+			},
+		},
+		{
+			name: "GetAppInfos",
+			next: "https://api.appstoreconnect.apple.com/v1/apps/app-1/appInfos?cursor=abc",
+			call: func(c *Client, next string) error {
+				_, err := c.GetAppInfos(ctx, "app-1", WithAppInfosNextURL(next))
 				return err
 			},
 		},
@@ -344,7 +400,11 @@ func TestListEndpoints_UseNextURL(t *testing.T) {
 	for _, tt := range tests {
 		tt := tt
 		t.Run(tt.name, func(t *testing.T) {
-			response := jsonResponse(http.StatusOK, `{"data":[]}`)
+			body := `{"data":[]}`
+			if tt.name == "ListReviewSubmissions" {
+				body = `{"data":[],"links":{"self":"https://api.appstoreconnect.apple.com/v1/reviewSubmissions"}}`
+			}
+			response := jsonResponse(http.StatusOK, body)
 			client := newTestClient(t, func(req *http.Request) {
 				if req.URL.String() != tt.next {
 					t.Fatalf("expected next URL %q, got %q", tt.next, req.URL.String())
@@ -380,6 +440,249 @@ func TestGetApps_RateLimitedIncludesRetryAfter(t *testing.T) {
 	}
 	if got := GetRetryAfter(err); got != 2*time.Minute {
 		t.Fatalf("expected retry-after 2m, got %s", got)
+	}
+}
+
+func TestGetApps_RetryExhaustedExposesHTTPStatus(t *testing.T) {
+	t.Setenv("ASC_MAX_RETRIES", "1")
+	t.Setenv("ASC_BASE_DELAY", "1ms")
+	t.Setenv("ASC_MAX_DELAY", "1ms")
+	resetConfigCacheForTest()
+	t.Cleanup(resetConfigCacheForTest)
+
+	body := `{"errors":[{"code":"UNEXPECTED_ERROR","title":"Service Unavailable","detail":"try again later"}]}`
+	client := newTestClient(
+		t, nil,
+		jsonResponse(http.StatusServiceUnavailable, body),
+		jsonResponse(http.StatusServiceUnavailable, body),
+	)
+
+	_, err := client.GetApps(context.Background())
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !IsRetryable(err) {
+		t.Fatalf("expected retryable error, got %v", err)
+	}
+	apiErr, ok := errors.AsType[*APIError](err)
+	if !ok {
+		t.Fatalf("expected *APIError in chain after retries exhausted, got %v", err)
+	}
+	if apiErr.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("expected status %d, got %d", http.StatusServiceUnavailable, apiErr.StatusCode)
+	}
+	var statusErr interface{ HTTPStatusCode() int }
+	if !errors.As(err, &statusErr) || statusErr.HTTPStatusCode() != http.StatusServiceUnavailable {
+		t.Fatalf("expected HTTPStatusCode() to report %d, got %v", http.StatusServiceUnavailable, err)
+	}
+}
+
+func TestClientDo_ConflictStatusMatchesSentinelAndPreservesDetails(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if req.Method != http.MethodPost {
+			t.Fatalf("expected POST, got %s", req.Method)
+		}
+		if req.URL.Path != "/v1/apps" {
+			t.Fatalf("expected path /v1/apps, got %s", req.URL.Path)
+		}
+		assertAuthorized(t, req)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusConflict)
+		_, _ = io.WriteString(w, `{
+			"errors": [{
+				"status": "409",
+				"code": "STATE_ERROR.ENTITY_STATE_INVALID",
+				"title": "The resource is not in a valid state",
+				"detail": "Resolve the conflicting state before retrying."
+			}]
+		}`)
+	}))
+	t.Cleanup(server.Close)
+
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("GenerateKey() error: %v", err)
+	}
+	client := &Client{
+		httpClient: server.Client(),
+		keyID:      "KEY123",
+		issuerID:   "ISS456",
+		privateKey: key,
+	}
+
+	_, err = client.do(context.Background(), http.MethodPost, server.URL+"/v1/apps", nil)
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+
+	apiErr, ok := errors.AsType[*APIError](err)
+	if !ok {
+		t.Fatalf("expected *APIError, got %T", err)
+	}
+	if apiErr.StatusCode != http.StatusConflict {
+		t.Fatalf("expected status %d, got %d", http.StatusConflict, apiErr.StatusCode)
+	}
+	if apiErr.Code != "STATE_ERROR.ENTITY_STATE_INVALID" {
+		t.Fatalf("expected structured code to be preserved, got %q", apiErr.Code)
+	}
+	if apiErr.Title != "The resource is not in a valid state" {
+		t.Fatalf("expected structured title to be preserved, got %q", apiErr.Title)
+	}
+	if apiErr.Detail != "Resolve the conflicting state before retrying." {
+		t.Fatalf("expected structured detail to be preserved, got %q", apiErr.Detail)
+	}
+	if !errors.Is(err, ErrConflict) {
+		t.Fatalf("expected HTTP 409 to match ErrConflict, got %v", err)
+	}
+}
+
+func TestBuildRetryableError_CarriesStatusWithoutBody(t *testing.T) {
+	err := buildRetryableError(http.StatusServiceUnavailable, 0, nil)
+
+	if got, want := err.Error(), "App Store Connect service unavailable (status 503)"; got != want {
+		t.Fatalf("unexpected message: got %q, want %q", got, want)
+	}
+	apiErr, ok := errors.AsType[*APIError](err)
+	if !ok {
+		t.Fatalf("expected *APIError in chain, got %v", err)
+	}
+	if apiErr.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("expected status %d, got %d", http.StatusServiceUnavailable, apiErr.StatusCode)
+	}
+}
+
+func TestGetApps_RetriesTransientServerErrors(t *testing.T) {
+	tests := []struct {
+		name   string
+		status int
+	}{
+		{name: "request timeout", status: http.StatusRequestTimeout},
+		{name: "internal server error", status: http.StatusInternalServerError},
+		{name: "bad gateway", status: http.StatusBadGateway},
+		{name: "gateway timeout", status: http.StatusGatewayTimeout},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("ASC_MAX_RETRIES", "1")
+			t.Setenv("ASC_BASE_DELAY", "1ms")
+			t.Setenv("ASC_MAX_DELAY", "1ms")
+			resetConfigCacheForTest()
+			t.Cleanup(resetConfigCacheForTest)
+
+			attempts := 0
+			client := newTestClient(
+				t, func(req *http.Request) {
+					attempts++
+					if req.Method != http.MethodGet {
+						t.Fatalf("expected GET, got %s", req.Method)
+					}
+				},
+				jsonResponse(tt.status, `{"errors":[{"code":"UNEXPECTED_ERROR","detail":"temporary"}]}`),
+				jsonResponse(http.StatusOK, `{"data":[]}`),
+			)
+
+			if _, err := client.GetApps(context.Background()); err != nil {
+				t.Fatalf("GetApps() error: %v", err)
+			}
+			if attempts != 2 {
+				t.Fatalf("expected 2 attempts, got %d", attempts)
+			}
+		})
+	}
+}
+
+func TestGetApps_RetriesTransportTimeout(t *testing.T) {
+	t.Setenv("ASC_MAX_RETRIES", "1")
+	t.Setenv("ASC_BASE_DELAY", "1ms")
+	t.Setenv("ASC_MAX_DELAY", "1ms")
+	resetConfigCacheForTest()
+	t.Cleanup(resetConfigCacheForTest)
+
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("GenerateKey() error: %v", err)
+	}
+	attempts := 0
+	client := &Client{
+		httpClient: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			attempts++
+			if attempts == 1 {
+				return nil, timeoutTransportError{}
+			}
+			return jsonResponse(http.StatusOK, `{"data":[]}`), nil
+		})},
+		keyID:      "KEY123",
+		issuerID:   "ISS456",
+		privateKey: key,
+	}
+
+	if _, err := client.GetApps(context.Background()); err != nil {
+		t.Fatalf("GetApps() error: %v", err)
+	}
+	if attempts != 2 {
+		t.Fatalf("expected 2 attempts, got %d", attempts)
+	}
+}
+
+func TestGetApps_RetriesTruncatedSuccessBody(t *testing.T) {
+	t.Setenv("ASC_MAX_RETRIES", "1")
+	t.Setenv("ASC_BASE_DELAY", "1ms")
+	t.Setenv("ASC_MAX_DELAY", "1ms")
+	resetConfigCacheForTest()
+	t.Cleanup(resetConfigCacheForTest)
+
+	attempts := 0
+	client := newTestClient(
+		t, func(req *http.Request) {
+			attempts++
+			if req.Method != http.MethodGet {
+				t.Fatalf("expected GET, got %s", req.Method)
+			}
+		},
+		&http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(&unexpectedEOFReader{}),
+		},
+		jsonResponse(http.StatusOK, `{"data":[]}`),
+	)
+
+	if _, err := client.GetApps(context.Background()); err != nil {
+		t.Fatalf("GetApps() error: %v", err)
+	}
+	if attempts != 2 {
+		t.Fatalf("expected 2 attempts, got %d", attempts)
+	}
+}
+
+func TestGetApps_DoesNotRetryDeadlineExceeded(t *testing.T) {
+	t.Setenv("ASC_MAX_RETRIES", "3")
+	t.Setenv("ASC_BASE_DELAY", "1ms")
+	resetConfigCacheForTest()
+	t.Cleanup(resetConfigCacheForTest)
+
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("GenerateKey() error: %v", err)
+	}
+	attempts := 0
+	client := &Client{
+		httpClient: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			attempts++
+			return nil, context.DeadlineExceeded
+		})},
+		keyID:      "KEY123",
+		issuerID:   "ISS456",
+		privateKey: key,
+	}
+
+	_, err = client.GetApps(context.Background())
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("expected context deadline exceeded, got %v", err)
+	}
+	if attempts != 1 {
+		t.Fatalf("expected 1 attempt, got %d", attempts)
 	}
 }
 
@@ -1209,6 +1512,34 @@ func TestGetBuilds_WithProcessingStateFilter(t *testing.T) {
 	}
 }
 
+func TestGetBuilds_WithBetaReviewStateFilter(t *testing.T) {
+	response := jsonResponse(http.StatusOK, `{"data":[{"type":"builds","id":"build-review","attributes":{"version":"42"}}]}`)
+	client := newTestClient(t, func(req *http.Request) {
+		if req.Method != http.MethodGet {
+			t.Fatalf("expected GET, got %s", req.Method)
+		}
+		if req.URL.Path != "/v1/builds" {
+			t.Fatalf("expected path /v1/builds, got %s", req.URL.Path)
+		}
+		values := req.URL.Query()
+		if values.Get("filter[app]") != "123" {
+			t.Fatalf("expected filter[app]=123, got %q", values.Get("filter[app]"))
+		}
+		if got := values.Get("filter[betaAppReviewSubmission.betaReviewState]"); got != "WAITING_FOR_REVIEW,IN_REVIEW" {
+			t.Fatalf("expected active beta review states, got %q", got)
+		}
+		assertAuthorized(t, req)
+	}, response)
+
+	builds, err := client.GetBuilds(context.Background(), "123", WithBuildsBetaReviewStates([]string{"waiting_for_review", "IN_REVIEW"}))
+	if err != nil {
+		t.Fatalf("GetBuilds() error: %v", err)
+	}
+	if len(builds.Data) != 1 || builds.Data[0].ID != "build-review" {
+		t.Fatalf("expected active review build, got %+v", builds.Data)
+	}
+}
+
 func TestGetBuilds_WithPreReleaseVersion(t *testing.T) {
 	response := jsonResponse(http.StatusOK, `{"data":[{"type":"builds","id":"build-1","attributes":{"version":"1.0","uploadedDate":"2026-01-20T00:00:00Z"}}]}`)
 	client := newTestClient(t, func(req *http.Request) {
@@ -1235,7 +1566,8 @@ func TestGetBuilds_WithPreReleaseVersion(t *testing.T) {
 		assertAuthorized(t, req)
 	}, response)
 
-	builds, err := client.GetBuilds(context.Background(), "123",
+	builds, err := client.GetBuilds(
+		context.Background(), "123",
 		WithBuildsLimit(1),
 		WithBuildsSort("-uploadedDate"),
 		WithBuildsPreReleaseVersion("prv-456"),
@@ -1367,6 +1699,9 @@ func TestGetAppStoreVersions_WithFilters(t *testing.T) {
 		if values.Get("filter[appStoreState]") != "READY_FOR_REVIEW" {
 			t.Fatalf("expected filter[appStoreState]=READY_FOR_REVIEW, got %q", values.Get("filter[appStoreState]"))
 		}
+		if values.Get("filter[appVersionState]") != "READY_FOR_DISTRIBUTION" {
+			t.Fatalf("expected filter[appVersionState]=READY_FOR_DISTRIBUTION, got %q", values.Get("filter[appVersionState]"))
+		}
 		if values.Get("limit") != "5" {
 			t.Fatalf("expected limit=5, got %q", values.Get("limit"))
 		}
@@ -1380,13 +1715,53 @@ func TestGetAppStoreVersions_WithFilters(t *testing.T) {
 		WithAppStoreVersionsPlatforms([]string{"IOS"}),
 		WithAppStoreVersionsVersionStrings([]string{"1.0.0"}),
 		WithAppStoreVersionsStates([]string{"READY_FOR_REVIEW"}),
+		WithAppStoreVersionsVersionStates([]string{"READY_FOR_DISTRIBUTION"}),
 	); err != nil {
 		t.Fatalf("GetAppStoreVersions() error: %v", err)
 	}
 }
 
+func TestGetAppStoreVersionsDecodesDownloadable(t *testing.T) {
+	response := jsonResponse(http.StatusOK, `{"data":[{"type":"appStoreVersions","id":"version-1","attributes":{"downloadable":false}},{"type":"appStoreVersions","id":"version-2","attributes":{"downloadable":true}},{"type":"appStoreVersions","id":"version-3","attributes":{"downloadable":null}}]}`)
+	client := newTestClient(t, func(req *http.Request) {
+		if req.Method != http.MethodGet {
+			t.Fatalf("expected GET, got %s", req.Method)
+		}
+		if req.URL.Path != "/v1/apps/123/appStoreVersions" {
+			t.Fatalf("expected path /v1/apps/123/appStoreVersions, got %s", req.URL.Path)
+		}
+		assertAuthorized(t, req)
+	}, response)
+
+	versions, err := client.GetAppStoreVersions(context.Background(), "123")
+	if err != nil {
+		t.Fatalf("GetAppStoreVersions() error: %v", err)
+	}
+	if len(versions.Data) != 3 {
+		t.Fatalf("expected 3 versions, got %d", len(versions.Data))
+	}
+
+	want := []struct {
+		set   bool
+		value bool
+	}{
+		{set: true, value: false},
+		{set: true, value: true},
+		{set: false},
+	}
+	for i, expected := range want {
+		got := versions.Data[i].Attributes.Downloadable
+		if (got != nil) != expected.set {
+			t.Fatalf("version %d downloadable presence = %v, want %v", i, got != nil, expected.set)
+		}
+		if got != nil && *got != expected.value {
+			t.Fatalf("version %d downloadable = %v, want %v", i, *got, expected.value)
+		}
+	}
+}
+
 func TestGetPreReleaseVersions_WithFilters(t *testing.T) {
-	response := jsonResponse(http.StatusOK, `{"data":[{"type":"preReleaseVersions","id":"1","attributes":{"version":"1.0.0","platform":"IOS"}}]}`)
+	response := jsonResponse(http.StatusOK, `{"data":[{"type":"preReleaseVersions","id":"1","attributes":{"version":"1.0.0","platform":"IOS"},"relationships":{"app":{"data":{"type":"apps","id":"app-1"}}},"links":{"self":"https://api.appstoreconnect.apple.com/v1/preReleaseVersions/1"}}],"included":[{"type":"apps","id":"app-1"}],"links":{"self":"https://api.appstoreconnect.apple.com/v1/preReleaseVersions"},"meta":{"paging":{"total":1,"limit":5}}}`)
 	client := newTestClient(t, func(req *http.Request) {
 		if req.Method != http.MethodGet {
 			t.Fatalf("expected GET, got %s", req.Method)
@@ -1410,19 +1785,40 @@ func TestGetPreReleaseVersions_WithFilters(t *testing.T) {
 		assertAuthorized(t, req)
 	}, response)
 
-	if _, err := client.GetPreReleaseVersions(
+	result, err := client.GetPreReleaseVersions(
 		context.Background(),
 		"123",
 		WithPreReleaseVersionsLimit(5),
 		WithPreReleaseVersionsPlatform("ios"),
 		WithPreReleaseVersionsVersion("1.0.0"),
-	); err != nil {
+	)
+	if err != nil {
 		t.Fatalf("GetPreReleaseVersions() error: %v", err)
+	}
+	encoded, err := json.Marshal(result)
+	if err != nil {
+		t.Fatalf("marshal pre-release versions response: %v", err)
+	}
+	var envelope map[string]json.RawMessage
+	if err := json.Unmarshal(encoded, &envelope); err != nil {
+		t.Fatalf("unmarshal pre-release versions envelope: %v", err)
+	}
+	if len(envelope["included"]) == 0 {
+		t.Fatal("expected included resources to be preserved")
+	}
+	if total := ParsePagingTotal(envelope["meta"]); total != 1 {
+		t.Fatalf("expected paging total 1, got %d", total)
+	}
+	if len(result.Data) != 1 || len(result.Data[0].Relationships) == 0 {
+		t.Fatalf("expected resource relationships to be preserved: %#v", result.Data)
+	}
+	if len(result.Data[0].Links) == 0 {
+		t.Fatalf("expected resource links to be preserved: %#v", result.Data[0])
 	}
 }
 
 func TestGetPreReleaseVersion(t *testing.T) {
-	response := jsonResponse(http.StatusOK, `{"data":{"type":"preReleaseVersions","id":"pr-1","attributes":{"version":"1.0.0","platform":"IOS"}}}`)
+	response := jsonResponse(http.StatusOK, `{"data":{"type":"preReleaseVersions","id":"pr-1","attributes":{"version":"1.0.0","platform":"IOS"},"relationships":{"builds":{"data":[{"type":"builds","id":"build-1"}]}},"links":{"self":"https://api.appstoreconnect.apple.com/v1/preReleaseVersions/pr-1"}},"included":[{"type":"builds","id":"build-1"}],"links":{"self":"https://api.appstoreconnect.apple.com/v1/preReleaseVersions/pr-1"}}`)
 	client := newTestClient(t, func(req *http.Request) {
 		if req.Method != http.MethodGet {
 			t.Fatalf("expected GET, got %s", req.Method)
@@ -1433,8 +1829,15 @@ func TestGetPreReleaseVersion(t *testing.T) {
 		assertAuthorized(t, req)
 	}, response)
 
-	if _, err := client.GetPreReleaseVersion(context.Background(), "pr-1"); err != nil {
+	result, err := client.GetPreReleaseVersion(context.Background(), "pr-1")
+	if err != nil {
 		t.Fatalf("GetPreReleaseVersion() error: %v", err)
+	}
+	if len(result.Data.Relationships) == 0 || len(result.Data.Links) == 0 {
+		t.Fatalf("expected resource relationships and links to be preserved: %#v", result.Data)
+	}
+	if len(result.Included) == 0 {
+		t.Fatal("expected top-level included resources to be preserved")
 	}
 }
 
@@ -1451,6 +1854,31 @@ func TestGetAppStoreVersion(t *testing.T) {
 	}, response)
 
 	if _, err := client.GetAppStoreVersion(context.Background(), "1"); err != nil {
+		t.Fatalf("GetAppStoreVersion() error: %v", err)
+	}
+}
+
+func TestGetAppStoreVersion_WithCompoundReadOptions(t *testing.T) {
+	response := jsonResponse(http.StatusOK, `{"data":{"type":"appStoreVersions","id":"1"},"included":[]}`)
+	client := newTestClient(t, func(req *http.Request) {
+		if req.Method != http.MethodGet || req.URL.Path != "/v1/appStoreVersions/1" {
+			t.Fatalf("unexpected request: %s %s", req.Method, req.URL.Path)
+		}
+		if got := req.URL.Query().Get("include"); got != "appStoreVersionLocalizations,build,appStoreReviewDetail" {
+			t.Fatalf("include = %q", got)
+		}
+		if got := req.URL.Query().Get("limit[appStoreVersionLocalizations]"); got != "50" {
+			t.Fatalf("localization include limit = %q", got)
+		}
+		assertAuthorized(t, req)
+	}, response)
+
+	if _, err := client.GetAppStoreVersion(
+		context.Background(),
+		"1",
+		WithAppStoreVersionInclude([]string{"appStoreVersionLocalizations", "build", "appStoreReviewDetail"}),
+		WithAppStoreVersionLocalizationsIncludeLimit(50),
+	); err != nil {
 		t.Fatalf("GetAppStoreVersion() error: %v", err)
 	}
 }
@@ -2022,6 +2450,45 @@ func TestGetBetaTesters_WithAppFilter(t *testing.T) {
 	}
 }
 
+func TestGetBetaTesters_WithNameAndIDFilters(t *testing.T) {
+	response := jsonResponse(http.StatusOK, `{"data":[{"type":"betaTesters","id":"1","attributes":{"firstName":"Ada","lastName":"Lovelace"}}]}`)
+	client := newTestClient(t, func(req *http.Request) {
+		if req.Method != http.MethodGet {
+			t.Fatalf("expected GET, got %s", req.Method)
+		}
+		if req.URL.Path != "/v1/betaTesters" {
+			t.Fatalf("expected path /v1/betaTesters, got %s", req.URL.Path)
+		}
+		values := req.URL.Query()
+		if values.Get("filter[apps]") != "123" {
+			t.Fatalf("expected filter[apps]=123, got %q", values.Get("filter[apps]"))
+		}
+		if values.Get("filter[firstName]") != "Ada" {
+			t.Fatalf("expected filter[firstName]=Ada, got %q", values.Get("filter[firstName]"))
+		}
+		if values.Get("filter[lastName]") != "Lovelace" {
+			t.Fatalf("expected filter[lastName]=Lovelace, got %q", values.Get("filter[lastName]"))
+		}
+		if values.Get("filter[id]") != "tester-1,tester-2" {
+			t.Fatalf("expected filter[id]=tester-1,tester-2, got %q", values.Get("filter[id]"))
+		}
+		if values.Get("filter[email]") != "" {
+			t.Fatalf("expected no filter[email], got %q", values.Get("filter[email]"))
+		}
+		assertAuthorized(t, req)
+	}, response)
+
+	if _, err := client.GetBetaTesters(
+		context.Background(),
+		"123",
+		WithBetaTestersFirstName(" Ada "),
+		WithBetaTestersLastName(" Lovelace "),
+		WithBetaTestersIDs([]string{"tester-1", "tester-2"}),
+	); err != nil {
+		t.Fatalf("GetBetaTesters() error: %v", err)
+	}
+}
+
 func TestGetBetaTesters_WithBuildFilter(t *testing.T) {
 	// API only allows one relationship filter; build filter takes precedence over apps.
 	response := jsonResponse(http.StatusOK, `{"data":[{"type":"betaTesters","id":"1","attributes":{"email":"tester@example.com"}}]}`)
@@ -2078,7 +2545,7 @@ func TestGetBetaTesters_RejectsGroupAndBuildConflict(t *testing.T) {
 }
 
 func TestGetBuild_ByID(t *testing.T) {
-	response := jsonResponse(http.StatusOK, `{"data":{"type":"builds","id":"123","attributes":{"version":"1.0","uploadedDate":"2026-01-20T00:00:00Z","expired":false}}}`)
+	response := jsonResponse(http.StatusOK, `{"data":{"type":"builds","id":"123","attributes":{"version":"1.0","uploadedDate":"2026-01-20T00:00:00Z","expired":false,"lsMinimumSystemVersion":"13.0","computedMinMacOsVersion":"13.0","computedMinVisionOsVersion":"1.0","iconAssetToken":{"templateUrl":"https://example.com/{w}x{h}.png","width":1024,"height":1024},"buildAudienceType":"APP_STORE_ELIGIBLE"}}}`)
 	client := newTestClient(t, func(req *http.Request) {
 		if req.Method != http.MethodGet {
 			t.Fatalf("expected GET, got %s", req.Method)
@@ -2089,8 +2556,66 @@ func TestGetBuild_ByID(t *testing.T) {
 		assertAuthorized(t, req)
 	}, response)
 
-	if _, err := client.GetBuild(context.Background(), "123"); err != nil {
+	result, err := client.GetBuild(context.Background(), "123")
+	if err != nil {
 		t.Fatalf("GetBuild() error: %v", err)
+	}
+	encoded, err := json.Marshal(result.Data.Attributes)
+	if err != nil {
+		t.Fatalf("marshal build attributes: %v", err)
+	}
+	for _, field := range []string{"lsMinimumSystemVersion", "computedMinMacOsVersion", "computedMinVisionOsVersion", "iconAssetToken", "buildAudienceType"} {
+		if !strings.Contains(string(encoded), `"`+field+`"`) {
+			t.Errorf("expected decoded build attributes to preserve %s: %s", field, encoded)
+		}
+	}
+	if result.Data.Attributes.LSMinimumSystemVersion != "13.0" || result.Data.Attributes.ComputedMinMacOSVersion != "13.0" || result.Data.Attributes.ComputedMinVisionOSVersion != "1.0" {
+		t.Fatalf("unexpected decoded minimum OS versions: %#v", result.Data.Attributes)
+	}
+	if result.Data.Attributes.IconAssetToken == nil || result.Data.Attributes.IconAssetToken.Width != 1024 {
+		t.Fatalf("unexpected decoded icon asset token: %#v", result.Data.Attributes.IconAssetToken)
+	}
+	if result.Data.Attributes.BuildAudienceType != BuildAudienceTypeAppStoreEligible {
+		t.Fatalf("unexpected build audience type: %q", result.Data.Attributes.BuildAudienceType)
+	}
+	if !strings.Contains(string(encoded), `"expired":false`) {
+		t.Fatalf("expected explicit expired=false to survive decode and encode: %s", encoded)
+	}
+}
+
+func TestBuildAttributesPreservesExpiredPresence(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		input    string
+		contains string
+		excludes string
+		known    bool
+		value    bool
+	}{
+		{name: "explicit false", input: `{"version":"1","uploadedDate":"2026-01-20T00:00:00Z","expired":false}`, contains: `"expired":false`, known: true},
+		{name: "explicit true", input: `{"version":"1","uploadedDate":"2026-01-20T00:00:00Z","expired":true}`, contains: `"expired":true`, known: true, value: true},
+		{name: "absent", input: `{"version":"1","uploadedDate":"2026-01-20T00:00:00Z"}`, excludes: `"expired"`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var attrs BuildAttributes
+			if err := json.Unmarshal([]byte(tc.input), &attrs); err != nil {
+				t.Fatalf("unmarshal build attributes: %v", err)
+			}
+			encoded, err := json.Marshal(attrs)
+			if err != nil {
+				t.Fatalf("marshal build attributes: %v", err)
+			}
+			if tc.contains != "" && !strings.Contains(string(encoded), tc.contains) {
+				t.Fatalf("expected %q in %s", tc.contains, encoded)
+			}
+			if tc.excludes != "" && strings.Contains(string(encoded), tc.excludes) {
+				t.Fatalf("did not expect %q in %s", tc.excludes, encoded)
+			}
+			expired, known := attrs.ExpiredValue()
+			if known != tc.known || expired != tc.value {
+				t.Fatalf("ExpiredValue() = (%t, %t), want (%t, %t)", expired, known, tc.value, tc.known)
+			}
+		})
 	}
 }
 
@@ -2230,29 +2755,30 @@ func TestUpdateBuild_EmptyBuildIDReturnsError(t *testing.T) {
 
 func TestUpdateBuild_RefetchesCurrentStateAfterPatchError(t *testing.T) {
 	requestCount := 0
-	client := newTestClientWithResponses(t, func(req *http.Request) {
-		requestCount++
-		switch requestCount {
-		case 1:
-			if req.Method != http.MethodPatch {
-				t.Fatalf("expected PATCH, got %s", req.Method)
+	client := newTestClientWithResponses(
+		t, func(req *http.Request) {
+			requestCount++
+			switch requestCount {
+			case 1:
+				if req.Method != http.MethodPatch {
+					t.Fatalf("expected PATCH, got %s", req.Method)
+				}
+				if req.URL.Path != "/v1/builds/build-99" {
+					t.Fatalf("expected path /v1/builds/build-99, got %s", req.URL.Path)
+				}
+				assertAuthorized(t, req)
+			case 2:
+				if req.Method != http.MethodGet {
+					t.Fatalf("expected GET, got %s", req.Method)
+				}
+				if req.URL.Path != "/v1/builds/build-99" {
+					t.Fatalf("expected path /v1/builds/build-99, got %s", req.URL.Path)
+				}
+				assertAuthorized(t, req)
+			default:
+				t.Fatalf("unexpected request count %d", requestCount)
 			}
-			if req.URL.Path != "/v1/builds/build-99" {
-				t.Fatalf("expected path /v1/builds/build-99, got %s", req.URL.Path)
-			}
-			assertAuthorized(t, req)
-		case 2:
-			if req.Method != http.MethodGet {
-				t.Fatalf("expected GET, got %s", req.Method)
-			}
-			if req.URL.Path != "/v1/builds/build-99" {
-				t.Fatalf("expected path /v1/builds/build-99, got %s", req.URL.Path)
-			}
-			assertAuthorized(t, req)
-		default:
-			t.Fatalf("unexpected request count %d", requestCount)
-		}
-	},
+		},
 		jsonResponse(http.StatusConflict, `{"errors":[{"status":"409","code":"ENTITY_ERROR.ATTRIBUTE.INVALID","title":"Build update conflict","detail":"The request could not be completed."}]}`),
 		jsonResponse(http.StatusOK, `{"data":{"type":"builds","id":"build-99","attributes":{"version":"2.0","uploadedDate":"2026-03-18T00:00:00Z","usesNonExemptEncryption":false}}}`),
 	)
@@ -2264,6 +2790,7 @@ func TestUpdateBuild_RefetchesCurrentStateAfterPatchError(t *testing.T) {
 	}
 	if resp == nil {
 		t.Fatal("expected response")
+		return
 	}
 	if resp.Data.Attributes.UsesNonExemptEncryption == nil || *resp.Data.Attributes.UsesNonExemptEncryption != false {
 		t.Fatalf("expected usesNonExemptEncryption=false, got %+v", resp.Data.Attributes.UsesNonExemptEncryption)
@@ -2275,29 +2802,30 @@ func TestUpdateBuild_RefetchesCurrentStateAfterPatchError(t *testing.T) {
 
 func TestUpdateBuild_ReturnsOriginalErrorWhenCurrentStateDoesNotMatch(t *testing.T) {
 	requestCount := 0
-	client := newTestClientWithResponses(t, func(req *http.Request) {
-		requestCount++
-		switch requestCount {
-		case 1:
-			if req.Method != http.MethodPatch {
-				t.Fatalf("expected PATCH, got %s", req.Method)
+	client := newTestClientWithResponses(
+		t, func(req *http.Request) {
+			requestCount++
+			switch requestCount {
+			case 1:
+				if req.Method != http.MethodPatch {
+					t.Fatalf("expected PATCH, got %s", req.Method)
+				}
+				if req.URL.Path != "/v1/builds/build-99" {
+					t.Fatalf("expected path /v1/builds/build-99, got %s", req.URL.Path)
+				}
+				assertAuthorized(t, req)
+			case 2:
+				if req.Method != http.MethodGet {
+					t.Fatalf("expected GET, got %s", req.Method)
+				}
+				if req.URL.Path != "/v1/builds/build-99" {
+					t.Fatalf("expected path /v1/builds/build-99, got %s", req.URL.Path)
+				}
+				assertAuthorized(t, req)
+			default:
+				t.Fatalf("unexpected request count %d", requestCount)
 			}
-			if req.URL.Path != "/v1/builds/build-99" {
-				t.Fatalf("expected path /v1/builds/build-99, got %s", req.URL.Path)
-			}
-			assertAuthorized(t, req)
-		case 2:
-			if req.Method != http.MethodGet {
-				t.Fatalf("expected GET, got %s", req.Method)
-			}
-			if req.URL.Path != "/v1/builds/build-99" {
-				t.Fatalf("expected path /v1/builds/build-99, got %s", req.URL.Path)
-			}
-			assertAuthorized(t, req)
-		default:
-			t.Fatalf("unexpected request count %d", requestCount)
-		}
-	},
+		},
 		jsonResponse(http.StatusConflict, `{"errors":[{"status":"409","code":"ENTITY_ERROR.ATTRIBUTE.INVALID","title":"Build update conflict","detail":"The request could not be completed."}]}`),
 		jsonResponse(http.StatusOK, `{"data":{"type":"builds","id":"build-99","attributes":{"version":"2.0","uploadedDate":"2026-03-18T00:00:00Z","usesNonExemptEncryption":true}}}`),
 	)
@@ -2320,29 +2848,30 @@ func TestUpdateBuild_ReturnsOriginalErrorWhenCurrentStateDoesNotMatch(t *testing
 
 func TestUpdateBuild_DoesNotTreatNonConflictErrorAsNoOp(t *testing.T) {
 	requestCount := 0
-	client := newTestClientWithResponses(t, func(req *http.Request) {
-		requestCount++
-		switch requestCount {
-		case 1:
-			if req.Method != http.MethodPatch {
-				t.Fatalf("expected PATCH, got %s", req.Method)
+	client := newTestClientWithResponses(
+		t, func(req *http.Request) {
+			requestCount++
+			switch requestCount {
+			case 1:
+				if req.Method != http.MethodPatch {
+					t.Fatalf("expected PATCH, got %s", req.Method)
+				}
+				if req.URL.Path != "/v1/builds/build-99" {
+					t.Fatalf("expected path /v1/builds/build-99, got %s", req.URL.Path)
+				}
+				assertAuthorized(t, req)
+			case 2:
+				if req.Method != http.MethodGet {
+					t.Fatalf("expected GET, got %s", req.Method)
+				}
+				if req.URL.Path != "/v1/builds/build-99" {
+					t.Fatalf("expected path /v1/builds/build-99, got %s", req.URL.Path)
+				}
+				assertAuthorized(t, req)
+			default:
+				t.Fatalf("unexpected request count %d", requestCount)
 			}
-			if req.URL.Path != "/v1/builds/build-99" {
-				t.Fatalf("expected path /v1/builds/build-99, got %s", req.URL.Path)
-			}
-			assertAuthorized(t, req)
-		case 2:
-			if req.Method != http.MethodGet {
-				t.Fatalf("expected GET, got %s", req.Method)
-			}
-			if req.URL.Path != "/v1/builds/build-99" {
-				t.Fatalf("expected path /v1/builds/build-99, got %s", req.URL.Path)
-			}
-			assertAuthorized(t, req)
-		default:
-			t.Fatalf("unexpected request count %d", requestCount)
-		}
-	},
+		},
 		jsonResponse(http.StatusForbidden, `{"errors":[{"status":"403","code":"FORBIDDEN","title":"Forbidden","detail":"not allowed"}]}`),
 		jsonResponse(http.StatusOK, `{"data":{"type":"builds","id":"build-99","attributes":{"version":"2.0","uploadedDate":"2026-03-18T00:00:00Z","usesNonExemptEncryption":false}}}`),
 	)
@@ -2392,16 +2921,31 @@ func TestCreateBetaGroup_SendsRequest(t *testing.T) {
 		if payload.Data.Relationships.App.Data.ID != "app-1" {
 			t.Fatalf("expected app id app-1, got %q", payload.Data.Relationships.App.Data.ID)
 		}
+		var rawPayload struct {
+			Data struct {
+				Attributes map[string]any `json:"attributes"`
+			} `json:"data"`
+		}
+		if err := json.Unmarshal(body, &rawPayload); err != nil {
+			t.Fatalf("decode raw body error: %v", err)
+		}
+		for _, field := range []string{"createdDate", "publicLinkId", "publicLink", "iosBuildsAvailableForAppleSiliconMac", "iosBuildsAvailableForAppleVision"} {
+			if _, ok := rawPayload.Data.Attributes[field]; ok {
+				t.Errorf("response-only field %s leaked into create payload: %s", field, body)
+			}
+		}
 		assertAuthorized(t, req)
 	}, response)
 
-	if _, err := client.CreateBetaGroup(context.Background(), "app-1", "Beta"); err != nil {
+	if _, err := client.CreateBetaGroupWithAttributes(context.Background(), "app-1", BetaGroupCreateAttributes{
+		Name: "Beta",
+	}); err != nil {
 		t.Fatalf("CreateBetaGroup() error: %v", err)
 	}
 }
 
 func TestGetBetaGroup_SendsRequest(t *testing.T) {
-	response := jsonResponse(http.StatusOK, `{"data":{"type":"betaGroups","id":"bg1","attributes":{"name":"Beta Testers","isInternalGroup":true}}}`)
+	response := jsonResponse(http.StatusOK, `{"data":{"type":"betaGroups","id":"bg1","attributes":{"name":"Beta Testers","isInternalGroup":true,"publicLinkId":"public-1","iosBuildsAvailableForAppleSiliconMac":true,"iosBuildsAvailableForAppleVision":false}}}`)
 	client := newTestClient(t, func(req *http.Request) {
 		if req.Method != http.MethodGet {
 			t.Fatalf("expected GET, got %s", req.Method)
@@ -2412,13 +2956,25 @@ func TestGetBetaGroup_SendsRequest(t *testing.T) {
 		assertAuthorized(t, req)
 	}, response)
 
-	if _, err := client.GetBetaGroup(context.Background(), "bg1"); err != nil {
+	result, err := client.GetBetaGroup(context.Background(), "bg1")
+	if err != nil {
 		t.Fatalf("GetBetaGroup() error: %v", err)
+	}
+	if result.Data.Attributes.PublicLinkID != "public-1" {
+		t.Fatalf("expected public link ID public-1, got %q", result.Data.Attributes.PublicLinkID)
+	}
+	if result.Data.Attributes.IOSBuildsAvailableForAppleSiliconMac == nil ||
+		!*result.Data.Attributes.IOSBuildsAvailableForAppleSiliconMac {
+		t.Fatal("expected Apple Silicon Mac availability to be true")
+	}
+	if result.Data.Attributes.IOSBuildsAvailableForAppleVision == nil ||
+		*result.Data.Attributes.IOSBuildsAvailableForAppleVision {
+		t.Fatal("expected Apple Vision availability to be false")
 	}
 }
 
 func TestGetBetaTester_SendsRequest(t *testing.T) {
-	response := jsonResponse(http.StatusOK, `{"data":{"type":"betaTesters","id":"bt1","attributes":{"email":"tester@example.com","firstName":"Test","lastName":"User","state":"INVITED","inviteType":"EMAIL"}}}`)
+	response := jsonResponse(http.StatusOK, `{"data":{"type":"betaTesters","id":"bt1","attributes":{"email":"tester@example.com","firstName":"Test","lastName":"User","state":"INVITED","inviteType":"EMAIL","appDevices":[{"model":"iPhone17,1","platform":"IOS","osVersion":"18.0","appBuildVersion":"42"}]}}}`)
 	client := newTestClient(t, func(req *http.Request) {
 		if req.Method != http.MethodGet {
 			t.Fatalf("expected GET, got %s", req.Method)
@@ -2444,6 +3000,50 @@ func TestGetBetaTester_SendsRequest(t *testing.T) {
 	}
 	if tester.Data.Attributes.InviteType != BetaInviteTypeEmail {
 		t.Fatalf("expected invite type %q, got %q", BetaInviteTypeEmail, tester.Data.Attributes.InviteType)
+	}
+	encoded, err := json.Marshal(tester.Data.Attributes)
+	if err != nil {
+		t.Fatalf("marshal beta tester attributes: %v", err)
+	}
+	if !strings.Contains(string(encoded), `"appDevices"`) {
+		t.Fatalf("expected decoded beta tester attributes to preserve appDevices: %s", encoded)
+	}
+	if len(tester.Data.Attributes.AppDevices) != 1 || tester.Data.Attributes.AppDevices[0].AppBuildVersion != "42" {
+		t.Fatalf("unexpected decoded app devices: %#v", tester.Data.Attributes.AppDevices)
+	}
+}
+
+func TestBetaTesterAttributesPreservesAppDevicesPresence(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		input       string
+		wantPresent bool
+		wantValue   string
+	}{
+		{name: "explicit empty array", input: `{"email":"tester@example.com","appDevices":[]}`, wantPresent: true, wantValue: `[]`},
+		{name: "absent", input: `{"email":"tester@example.com"}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var attrs BetaTesterAttributes
+			if err := json.Unmarshal([]byte(tc.input), &attrs); err != nil {
+				t.Fatalf("unmarshal beta tester attributes: %v", err)
+			}
+			encoded, err := json.Marshal(attrs)
+			if err != nil {
+				t.Fatalf("marshal beta tester attributes: %v", err)
+			}
+			var output map[string]json.RawMessage
+			if err := json.Unmarshal(encoded, &output); err != nil {
+				t.Fatalf("decode beta tester attributes output: %v", err)
+			}
+			value, present := output["appDevices"]
+			if present != tc.wantPresent {
+				t.Fatalf("appDevices presence = %t in %s, want %t", present, encoded, tc.wantPresent)
+			}
+			if tc.wantPresent && string(value) != tc.wantValue {
+				t.Fatalf("appDevices JSON = %s, want %s", value, tc.wantValue)
+			}
+		})
 	}
 }
 
@@ -2993,6 +3593,45 @@ func TestUpdateAppStoreVersionLocalization_OmitsLocale(t *testing.T) {
 	}
 }
 
+func TestUpdateAppStoreVersionLocalizationFields_PreservesExplicitEmpty(t *testing.T) {
+	response := jsonResponse(http.StatusOK, `{"data":{"type":"appStoreVersionLocalizations","id":"loc-1","attributes":{"description":"Updated","promotionalText":""}}}`)
+	client := newTestClient(t, func(req *http.Request) {
+		if req.Method != http.MethodPatch || req.URL.Path != "/v1/appStoreVersionLocalizations/loc-1" {
+			t.Fatalf("unexpected request: %s %s", req.Method, req.URL.Path)
+		}
+		body, err := io.ReadAll(req.Body)
+		if err != nil {
+			t.Fatalf("read body: %v", err)
+		}
+		var envelope struct {
+			Data struct {
+				Type       string            `json:"type"`
+				ID         string            `json:"id"`
+				Attributes map[string]string `json:"attributes"`
+			} `json:"data"`
+		}
+		if err := json.Unmarshal(body, &envelope); err != nil {
+			t.Fatalf("decode body: %v", err)
+		}
+		if envelope.Data.Type != string(ResourceTypeAppStoreVersionLocalizations) || envelope.Data.ID != "loc-1" {
+			t.Fatalf("unexpected resource identity: %+v", envelope.Data)
+		}
+		if value, ok := envelope.Data.Attributes["promotionalText"]; !ok || value != "" {
+			t.Fatalf("expected explicit empty promotionalText, got %+v", envelope.Data.Attributes)
+		}
+		if _, ok := envelope.Data.Attributes["keywords"]; ok {
+			t.Fatalf("expected omitted keywords, got %+v", envelope.Data.Attributes)
+		}
+	}, response)
+
+	if _, err := client.UpdateAppStoreVersionLocalizationFields(context.Background(), "loc-1", map[string]string{
+		"description":     "Updated",
+		"promotionalText": "",
+	}); err != nil {
+		t.Fatalf("UpdateAppStoreVersionLocalizationFields() error: %v", err)
+	}
+}
+
 func TestDeleteAppStoreVersionLocalization_SendsRequest(t *testing.T) {
 	response := jsonResponse(http.StatusNoContent, "")
 	client := newTestClient(t, func(req *http.Request) {
@@ -3422,6 +4061,45 @@ func TestUpdateAppInfoLocalization_OmitsLocale(t *testing.T) {
 	}
 }
 
+func TestUpdateAppInfoLocalizationFields_PreservesExplicitEmpty(t *testing.T) {
+	response := jsonResponse(http.StatusOK, `{"data":{"type":"appInfoLocalizations","id":"loc-1","attributes":{"name":"Updated","subtitle":""}}}`)
+	client := newTestClient(t, func(req *http.Request) {
+		if req.Method != http.MethodPatch || req.URL.Path != "/v1/appInfoLocalizations/loc-1" {
+			t.Fatalf("unexpected request: %s %s", req.Method, req.URL.Path)
+		}
+		body, err := io.ReadAll(req.Body)
+		if err != nil {
+			t.Fatalf("read body: %v", err)
+		}
+		var envelope struct {
+			Data struct {
+				Type       string            `json:"type"`
+				ID         string            `json:"id"`
+				Attributes map[string]string `json:"attributes"`
+			} `json:"data"`
+		}
+		if err := json.Unmarshal(body, &envelope); err != nil {
+			t.Fatalf("decode body: %v", err)
+		}
+		if envelope.Data.Type != string(ResourceTypeAppInfoLocalizations) || envelope.Data.ID != "loc-1" {
+			t.Fatalf("unexpected resource identity: %+v", envelope.Data)
+		}
+		if value, ok := envelope.Data.Attributes["subtitle"]; !ok || value != "" {
+			t.Fatalf("expected explicit empty subtitle, got %+v", envelope.Data.Attributes)
+		}
+		if _, ok := envelope.Data.Attributes["privacyPolicyUrl"]; ok {
+			t.Fatalf("expected omitted privacyPolicyUrl, got %+v", envelope.Data.Attributes)
+		}
+	}, response)
+
+	if _, err := client.UpdateAppInfoLocalizationFields(context.Background(), "loc-1", map[string]string{
+		"name":     "Updated",
+		"subtitle": "",
+	}); err != nil {
+		t.Fatalf("UpdateAppInfoLocalizationFields() error: %v", err)
+	}
+}
+
 func TestGetAppInfos(t *testing.T) {
 	response := jsonResponse(http.StatusOK, `{"data":[{"type":"appInfos","id":"info-1"}]}`)
 	client := newTestClient(t, func(req *http.Request) {
@@ -3435,6 +4113,31 @@ func TestGetAppInfos(t *testing.T) {
 	}, response)
 
 	if _, err := client.GetAppInfos(context.Background(), "app-1"); err != nil {
+		t.Fatalf("GetAppInfos() error: %v", err)
+	}
+}
+
+func TestGetAppInfos_WithCompoundReadOptions(t *testing.T) {
+	response := jsonResponse(http.StatusOK, `{"data":[{"type":"appInfos","id":"info-1"}],"included":[]}`)
+	client := newTestClient(t, func(req *http.Request) {
+		if req.Method != http.MethodGet || req.URL.Path != "/v1/apps/app-1/appInfos" {
+			t.Fatalf("unexpected request: %s %s", req.Method, req.URL.Path)
+		}
+		if got := req.URL.Query().Get("include"); got != "app,ageRatingDeclaration,appInfoLocalizations,primaryCategory" {
+			t.Fatalf("include = %q", got)
+		}
+		if got := req.URL.Query().Get("limit[appInfoLocalizations]"); got != "50" {
+			t.Fatalf("localization include limit = %q", got)
+		}
+		assertAuthorized(t, req)
+	}, response)
+
+	if _, err := client.GetAppInfos(
+		context.Background(),
+		"app-1",
+		WithAppInfoInclude([]string{"app", "ageRatingDeclaration", "appInfoLocalizations", "primaryCategory"}),
+		WithAppInfoLocalizationsIncludeLimit(50),
+	); err != nil {
 		t.Fatalf("GetAppInfos() error: %v", err)
 	}
 }
@@ -3527,11 +4230,19 @@ func TestUpdateAgeRatingDeclaration(t *testing.T) {
 		if payload.Data.Attributes.Gambling == nil || !*payload.Data.Attributes.Gambling {
 			t.Fatalf("expected gambling=true in request")
 		}
+		if payload.Data.Attributes.SocialMedia == nil || payload.Data.Attributes.SocialMedia.Value == nil || !*payload.Data.Attributes.SocialMedia.Value {
+			t.Fatalf("expected socialMedia=true in request")
+		}
+		if payload.Data.Attributes.SocialMediaAgeRestricted == nil || payload.Data.Attributes.SocialMediaAgeRestricted.Value == nil || *payload.Data.Attributes.SocialMediaAgeRestricted.Value {
+			t.Fatalf("expected socialMediaAgeRestricted=false in request")
+		}
 		assertAuthorized(t, req)
 	}, response)
 
 	attrs := AgeRatingDeclarationAttributes{
-		Gambling: func() *bool { value := true; return &value }(),
+		Gambling:                 func() *bool { value := true; return &value }(),
+		SocialMedia:              &NullableBool{Value: func() *bool { value := true; return &value }()},
+		SocialMediaAgeRestricted: &NullableBool{Value: func() *bool { value := false; return &value }()},
 	}
 	if _, err := client.UpdateAgeRatingDeclaration(context.Background(), "age-3", attrs); err != nil {
 		t.Fatalf("UpdateAgeRatingDeclaration() error: %v", err)
@@ -3593,18 +4304,58 @@ func TestGetFeedback_BuildsQuery(t *testing.T) {
 }
 
 func TestGetFeedback_IncludesScreenshots(t *testing.T) {
-	response := jsonResponse(http.StatusOK, `{"data":[{"type":"betaFeedbackScreenshotSubmissions","id":"1","attributes":{"createdDate":"2026-01-20T00:00:00Z","comment":"Nice","email":"tester@example.com","screenshots":[{"url":"https://example.com/shot.png","width":320,"height":640,"expirationDate":"2026-01-21T00:00:00Z"}]}}]}`)
+	response := jsonResponse(http.StatusOK, `{"data":[{"type":"betaFeedbackScreenshotSubmissions","id":"1","attributes":{"createdDate":"2026-01-20T00:00:00Z","comment":"Nice","email":"tester@example.com","deviceModel":"iPhone17,1","osVersion":"18.0","locale":"en-US","timeZone":"America/Los_Angeles","architecture":"arm64","connectionType":"WIFI","pairedAppleWatch":"Watch7,1","appUptimeInMilliseconds":1234,"diskBytesAvailable":2000,"diskBytesTotal":4000,"batteryPercentage":85,"screenWidthInPoints":430,"screenHeightInPoints":932,"appPlatform":"IOS","devicePlatform":"IOS","deviceFamily":"IPHONE","buildBundleId":"com.example.app","screenshots":[{"url":"https://example.com/shot.png","width":320,"height":640,"expirationDate":"2026-01-21T00:00:00Z"}]},"relationships":{"build":{"data":{"type":"builds","id":"build-1"}},"tester":{"data":{"type":"betaTesters","id":"tester-1"}}}}]}`)
 	client := newTestClient(t, func(req *http.Request) {
+		if req.Method != http.MethodGet || req.URL.Path != "/v1/apps/123/betaFeedbackScreenshotSubmissions" {
+			t.Fatalf("unexpected request: %s %s", req.Method, req.URL.String())
+		}
 		values := req.URL.Query()
-		expected := "createdDate,comment,email,deviceModel,osVersion,appPlatform,devicePlatform,screenshots"
+		if len(values) != 1 {
+			t.Fatalf("expected only the feedback sparse fieldset, got %q", values.Encode())
+		}
+		expected := "createdDate,comment,email,deviceModel,osVersion,locale,timeZone,architecture,connectionType,pairedAppleWatch,appUptimeInMilliseconds,diskBytesAvailable,diskBytesTotal,batteryPercentage,screenWidthInPoints,screenHeightInPoints,appPlatform,devicePlatform,deviceFamily,buildBundleId,screenshots,build,tester"
 		if values.Get("fields[betaFeedbackScreenshotSubmissions]") != expected {
 			t.Fatalf("expected screenshot fields, got %q", values.Get("fields[betaFeedbackScreenshotSubmissions]"))
 		}
 		assertAuthorized(t, req)
 	}, response)
 
-	if _, err := client.GetFeedback(context.Background(), "123", WithFeedbackIncludeScreenshots()); err != nil {
+	feedback, err := client.GetFeedback(context.Background(), "123", WithFeedbackIncludeScreenshots())
+	if err != nil {
 		t.Fatalf("GetFeedback() error: %v", err)
+	}
+	if len(feedback.Data) != 1 {
+		t.Fatalf("feedback count = %d, want 1", len(feedback.Data))
+	}
+	attributes := feedback.Data[0].Attributes
+	if attributes.Locale != "en-US" || attributes.TimeZone != "America/Los_Angeles" || attributes.Architecture != "arm64" {
+		t.Fatalf("environment attributes were not decoded: %+v", attributes)
+	}
+	if attributes.ConnectionType != DeviceConnectionType("WIFI") || attributes.PairedAppleWatch != "Watch7,1" {
+		t.Fatalf("device attributes were not decoded: %+v", attributes)
+	}
+	if attributes.AppUptimeInMilliseconds != 1234 || attributes.DiskBytesAvailable != 2000 || attributes.DiskBytesTotal != 4000 {
+		t.Fatalf("runtime attributes were not decoded: %+v", attributes)
+	}
+	if attributes.BatteryPercentage != 85 || attributes.ScreenWidthInPoints != 430 || attributes.ScreenHeightInPoints != 932 {
+		t.Fatalf("screen and battery attributes were not decoded: %+v", attributes)
+	}
+	if attributes.DeviceFamily != DeviceFamily("IPHONE") || attributes.BuildBundleID != "com.example.app" {
+		t.Fatalf("family and bundle attributes were not decoded: %+v", attributes)
+	}
+	if len(attributes.Screenshots) != 1 || attributes.Screenshots[0].URL != "https://example.com/shot.png" {
+		t.Fatalf("screenshots were not decoded: %+v", attributes.Screenshots)
+	}
+	var relationships map[string]struct {
+		Data struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(feedback.Data[0].Relationships, &relationships); err != nil {
+		t.Fatalf("failed to decode relationships: %v", err)
+	}
+	if relationships["build"].Data.ID != "build-1" || relationships["tester"].Data.ID != "tester-1" {
+		t.Fatalf("relationships were not preserved: %+v", relationships)
 	}
 }
 
@@ -4001,7 +4752,8 @@ func TestGetBuildUploads_WithFilters(t *testing.T) {
 		assertAuthorized(t, req)
 	}, response)
 
-	_, err := client.GetBuildUploads(context.Background(), "app-1",
+	_, err := client.GetBuildUploads(
+		context.Background(), "app-1",
 		WithBuildUploadsCFBundleShortVersionStrings([]string{"1.0.0", "1.0.1"}),
 		WithBuildUploadsCFBundleVersions([]string{"100"}),
 		WithBuildUploadsPlatforms([]string{"ios", "mac_os"}),
@@ -4193,7 +4945,8 @@ func TestGetBetaTesterUsagesMetrics_WithFilters(t *testing.T) {
 		assertAuthorized(t, req)
 	}, response)
 
-	resp, err := client.GetBetaTesterUsagesMetrics(context.Background(), "tester-1",
+	resp, err := client.GetBetaTesterUsagesMetrics(
+		context.Background(), "tester-1",
 		WithBetaTesterUsagesPeriod("P30D"),
 		WithBetaTesterUsagesAppID("app-1"),
 		WithBetaTesterUsagesLimit(20),
@@ -4228,7 +4981,8 @@ func TestGetAppBetaTesterUsagesMetrics_WithPeriodAndLimit(t *testing.T) {
 		assertAuthorized(t, req)
 	}, response)
 
-	resp, err := client.GetAppBetaTesterUsagesMetrics(context.Background(), "app-1",
+	resp, err := client.GetAppBetaTesterUsagesMetrics(
+		context.Background(), "app-1",
 		WithBetaTesterUsagesPeriod("P90D"),
 		WithBetaTesterUsagesLimit(12),
 	)
@@ -4715,6 +5469,46 @@ func TestGetAppPreviews(t *testing.T) {
 	}
 }
 
+func TestGetAppPreviewsUsesNextURL(t *testing.T) {
+	response := jsonResponse(http.StatusOK, `{"data":[{"type":"appPreviews","id":"PREVIEW_456","attributes":{"fileName":"later.mov"}}]}`)
+	client := newTestClient(t, func(req *http.Request) {
+		if req.Method != http.MethodGet {
+			t.Fatalf("expected GET, got %s", req.Method)
+		}
+		if req.URL.Path != "/v1/appPreviewSets/SET_123/appPreviews" || req.URL.RawQuery != "cursor=next" {
+			t.Fatalf("expected next page path and query, got %s", req.URL.RequestURI())
+		}
+		assertAuthorized(t, req)
+	}, response)
+
+	result, err := client.GetAppPreviews(
+		context.Background(),
+		"SET_123",
+		WithAppPreviewsNextURL("https://api.appstoreconnect.apple.com/v1/appPreviewSets/SET_123/appPreviews?cursor=next"),
+	)
+	if err != nil {
+		t.Fatalf("GetAppPreviews() error: %v", err)
+	}
+	if len(result.Data) != 1 || result.Data[0].ID != "PREVIEW_456" {
+		t.Fatalf("unexpected previews response: %+v", result.Data)
+	}
+}
+
+func TestGetAppPreviewsRejectsUntrustedNextURL(t *testing.T) {
+	client := newTestClient(t, func(req *http.Request) {
+		t.Fatalf("unexpected request: %s", req.URL.String())
+	}, jsonResponse(http.StatusInternalServerError, `{}`))
+
+	_, err := client.GetAppPreviews(
+		context.Background(),
+		"SET_123",
+		WithAppPreviewsNextURL("https://example.com/v1/appPreviews?cursor=next"),
+	)
+	if err == nil || !strings.Contains(err.Error(), "untrusted host") {
+		t.Fatalf("GetAppPreviews() error = %v, want untrusted next URL rejection", err)
+	}
+}
+
 func TestGetAppPreview(t *testing.T) {
 	response := jsonResponse(http.StatusOK, `{"data":{"type":"appPreviews","id":"PREVIEW_123","attributes":{"fileName":"preview.mov","fileSize":2048}}}`)
 	client := newTestClient(t, func(req *http.Request) {
@@ -5043,7 +5837,20 @@ func TestGetCiProducts_WithAppFilterAndLimit(t *testing.T) {
 }
 
 func TestGetCiProduct(t *testing.T) {
-	response := jsonResponse(http.StatusOK, `{"data":{"type":"ciProducts","id":"prod-1"}}`)
+	response := jsonResponse(http.StatusOK, `{
+		"data": {
+			"type": "ciProducts",
+			"id": "prod-1",
+			"relationships": {
+				"app": {"links": {"related": "https://api.appstoreconnect.apple.com/v1/ciProducts/prod-1/app"}, "data": {"type": "apps", "id": "app-1"}},
+				"bundleId": {"data": {"type": "bundleIds", "id": "bundle-id-1"}},
+				"workflows": {"links": {"related": "https://api.appstoreconnect.apple.com/v1/ciProducts/prod-1/workflows"}},
+				"primaryRepositories": {"data": [{"type": "scmRepositories", "id": "repo-1"}]},
+				"additionalRepositories": {"links": {"related": "https://api.appstoreconnect.apple.com/v1/ciProducts/prod-1/additionalRepositories"}},
+				"buildRuns": {"links": {"related": "https://api.appstoreconnect.apple.com/v1/ciProducts/prod-1/buildRuns"}}
+			}
+		}
+	}`)
 	client := newTestClient(t, func(req *http.Request) {
 		if req.Method != http.MethodGet {
 			t.Fatalf("expected GET, got %s", req.Method)
@@ -5054,8 +5861,28 @@ func TestGetCiProduct(t *testing.T) {
 		assertAuthorized(t, req)
 	}, response)
 
-	if _, err := client.GetCiProduct(context.Background(), "prod-1"); err != nil {
+	got, err := client.GetCiProduct(context.Background(), "prod-1")
+	if err != nil {
 		t.Fatalf("GetCiProduct() error: %v", err)
+	}
+	relationships := got.Data.Relationships
+	if relationships == nil || relationships.App == nil || relationships.App.Data == nil || relationships.App.Data.ID != "app-1" || relationships.App.Links == nil || relationships.App.Links.Related == "" {
+		t.Fatalf("unexpected app relationship: %#v", relationships)
+	}
+	if relationships.BundleID == nil || relationships.BundleID.Data.ID != "bundle-id-1" {
+		t.Fatalf("unexpected bundle ID relationship: %#v", relationships)
+	}
+	if relationships.Workflows == nil || relationships.Workflows.Links == nil || relationships.Workflows.Links.Related == "" {
+		t.Fatalf("unexpected workflows relationship: %#v", relationships)
+	}
+	if relationships.PrimaryRepositories == nil || len(relationships.PrimaryRepositories.Data) != 1 {
+		t.Fatalf("unexpected primary repositories relationship: %#v", relationships)
+	}
+	if relationships.AdditionalRepositories == nil || relationships.AdditionalRepositories.Links == nil || relationships.AdditionalRepositories.Links.Related == "" {
+		t.Fatalf("unexpected additional repositories relationship: %#v", relationships)
+	}
+	if relationships.BuildRuns == nil || relationships.BuildRuns.Links == nil || relationships.BuildRuns.Links.Related == "" {
+		t.Fatalf("unexpected build runs relationship: %#v", relationships)
 	}
 }
 
@@ -5157,7 +5984,47 @@ func TestDeleteCiProduct(t *testing.T) {
 }
 
 func TestGetCiWorkflow(t *testing.T) {
-	response := jsonResponse(http.StatusOK, `{"data":{"type":"ciWorkflows","id":"wf-1"}}`)
+	response := jsonResponse(http.StatusOK, `{
+		"data": {
+			"type": "ciWorkflows",
+			"id": "wf-1",
+			"attributes": {
+				"branchStartCondition": {
+					"filesAndFoldersRule": {
+						"mode": "START_IF_ANY_FILE_MATCHES",
+						"matchers": [{"directory": "Sources", "fileExtension": "swift", "fileName": "App.swift"}]
+					}
+				},
+				"manualPullRequestStartCondition": {
+					"source": {"patterns": [{"pattern": "feature/", "isPrefix": true}]},
+					"destination": {"patterns": [{"pattern": "main", "isPrefix": false}]}
+				},
+				"actions": [{
+					"name": "Archive - iOS",
+					"actionType": "ARCHIVE",
+					"destination": "ANY_IOS_DEVICE",
+					"buildDistributionAudience": "APP_STORE_ELIGIBLE",
+					"scheme": "Example",
+					"platform": "IOS",
+					"isRequiredToPass": true
+				}]
+			},
+			"relationships": {
+				"repository": {
+					"links": {
+						"self": "https://api.appstoreconnect.apple.com/v1/ciWorkflows/wf-1/relationships/repository",
+						"related": "https://api.appstoreconnect.apple.com/v1/ciWorkflows/wf-1/repository"
+					}
+				},
+				"buildRuns": {
+					"links": {
+						"self": "https://api.appstoreconnect.apple.com/v1/ciWorkflows/wf-1/relationships/buildRuns",
+						"related": "https://api.appstoreconnect.apple.com/v1/ciWorkflows/wf-1/buildRuns"
+					}
+				}
+			}
+		}
+	}`)
 	client := newTestClient(t, func(req *http.Request) {
 		if req.Method != http.MethodGet {
 			t.Fatalf("expected GET, got %s", req.Method)
@@ -5168,8 +6035,37 @@ func TestGetCiWorkflow(t *testing.T) {
 		assertAuthorized(t, req)
 	}, response)
 
-	if _, err := client.GetCiWorkflow(context.Background(), "wf-1"); err != nil {
+	got, err := client.GetCiWorkflow(context.Background(), "wf-1")
+	if err != nil {
 		t.Fatalf("GetCiWorkflow() error: %v", err)
+	}
+	if len(got.Data.Attributes.Actions) != 1 || got.Data.Attributes.Actions[0].Scheme != "Example" {
+		t.Fatalf("unexpected actions: %#v", got.Data.Attributes.Actions)
+	}
+	matchers := got.Data.Attributes.BranchStartCondition.FilesAndFoldersRule.Matchers
+	if len(matchers) != 1 || matchers[0].Directory != "Sources" || matchers[0].FileExtension != "swift" || matchers[0].FileName != "App.swift" {
+		t.Fatalf("unexpected file matchers: %#v", matchers)
+	}
+	manualPullRequest := got.Data.Attributes.ManualPullRequestStartCondition
+	if manualPullRequest == nil || manualPullRequest.Destination == nil || len(manualPullRequest.Destination.Patterns) != 1 || manualPullRequest.Destination.Patterns[0].Pattern != "main" {
+		t.Fatalf("unexpected manual pull request condition: %#v", manualPullRequest)
+	}
+	if got.Data.Relationships == nil || got.Data.Relationships.Repository == nil {
+		t.Fatal("expected repository relationship")
+	}
+	if got.Data.Relationships.Repository.Links.Related != "https://api.appstoreconnect.apple.com/v1/ciWorkflows/wf-1/repository" {
+		t.Fatalf("unexpected repository links: %#v", got.Data.Relationships.Repository.Links)
+	}
+	if got.Data.Relationships.BuildRuns == nil || got.Data.Relationships.BuildRuns.Links.Related == "" {
+		t.Fatalf("unexpected build runs relationship: %#v", got.Data.Relationships.BuildRuns)
+	}
+
+	encoded, err := json.Marshal(got)
+	if err != nil {
+		t.Fatalf("json.Marshal() error: %v", err)
+	}
+	if strings.Contains(string(encoded), `"data":{"type":"","id":""}`) {
+		t.Fatalf("workflow response invented empty relationship data: %s", encoded)
 	}
 }
 
@@ -5190,10 +6086,39 @@ func TestCreateCiWorkflow(t *testing.T) {
 		if !ok || data["type"] != "ciWorkflows" {
 			t.Fatalf("expected data.type=ciWorkflows")
 		}
+		attributes, ok := data["attributes"].(map[string]any)
+		if !ok || attributes["name"] != "CI" || attributes["description"] != "Build and test" || attributes["containerFilePath"] != "App.xcodeproj" || attributes["isEnabled"] != true || attributes["clean"] != true {
+			t.Fatalf("unexpected workflow attributes: %#v", data["attributes"])
+		}
+		if actions, ok := attributes["actions"].([]any); !ok || len(actions) != 0 {
+			t.Fatalf("unexpected workflow actions: %#v", attributes["actions"])
+		}
+		relationships, ok := data["relationships"].(map[string]any)
+		if !ok || len(relationships) != 4 {
+			t.Fatalf("unexpected workflow relationships: %#v", data["relationships"])
+		}
 		assertAuthorized(t, req)
 	}, response)
 
-	body := json.RawMessage(`{"data":{"type":"ciWorkflows"}}`)
+	body := json.RawMessage(`{
+		"data": {
+			"type": "ciWorkflows",
+			"attributes": {
+				"name": "CI",
+				"description": "Build and test",
+				"containerFilePath": "App.xcodeproj",
+				"isEnabled": true,
+				"clean": true,
+				"actions": []
+			},
+			"relationships": {
+				"product": {"data": {"type": "ciProducts", "id": "prod-1"}},
+				"repository": {"data": {"type": "scmRepositories", "id": "repo-1"}},
+				"xcodeVersion": {"data": {"type": "ciXcodeVersions", "id": "xcode-1"}},
+				"macOsVersion": {"data": {"type": "ciMacOsVersions", "id": "macos-1"}}
+			}
+		}
+	}`)
 	if _, err := client.CreateCiWorkflow(context.Background(), body); err != nil {
 		t.Fatalf("CreateCiWorkflow() error: %v", err)
 	}
@@ -5331,7 +6256,7 @@ func TestGetScmRepository(t *testing.T) {
 		assertAuthorized(t, req)
 	}, response)
 
-	if _, err := client.GetScmRepository(context.Background(), "repo-1"); err != nil {
+	if _, err := client.GetScmRepository(context.Background(), "  repo-1  "); err != nil {
 		t.Fatalf("GetScmRepository() error: %v", err)
 	}
 }
@@ -5446,7 +6371,7 @@ func TestGetScmGitReferences_WithLimit(t *testing.T) {
 		assertAuthorized(t, req)
 	}, response)
 
-	if _, err := client.GetScmGitReferences(context.Background(), "repo-1", WithScmGitReferencesLimit(100)); err != nil {
+	if _, err := client.GetScmGitReferences(context.Background(), "  repo-1  ", WithScmGitReferencesLimit(100)); err != nil {
 		t.Fatalf("GetScmGitReferences() error: %v", err)
 	}
 }
@@ -5494,7 +6419,22 @@ func TestGetCiBuildRuns_WithSort(t *testing.T) {
 }
 
 func TestGetCiBuildRun(t *testing.T) {
-	response := jsonResponse(http.StatusOK, `{"data":{"type":"ciBuildRuns","id":"run-1","attributes":{"number":1}}}`)
+	response := jsonResponse(http.StatusOK, `{
+		"data": {
+			"type": "ciBuildRuns",
+			"id": "run-1",
+			"attributes": {"number": 1},
+			"relationships": {
+				"builds": {"data": [{"type": "builds", "id": "build-1"}]},
+				"workflow": {"data": {"type": "ciWorkflows", "id": "wf-1"}},
+				"product": {"data": {"type": "ciProducts", "id": "prod-1"}},
+				"sourceBranchOrTag": {"data": {"type": "scmGitReferences", "id": "source-ref-1"}},
+				"destinationBranch": {"data": {"type": "scmGitReferences", "id": "destination-ref-1"}},
+				"actions": {"links": {"related": "https://api.appstoreconnect.apple.com/v1/ciBuildRuns/run-1/actions"}},
+				"pullRequest": {"data": {"type": "scmPullRequests", "id": "pr-1"}}
+			}
+		}
+	}`)
 	client := newTestClient(t, func(req *http.Request) {
 		if req.Method != http.MethodGet {
 			t.Fatalf("expected GET, got %s", req.Method)
@@ -5505,8 +6445,22 @@ func TestGetCiBuildRun(t *testing.T) {
 		assertAuthorized(t, req)
 	}, response)
 
-	if _, err := client.GetCiBuildRun(context.Background(), "run-1"); err != nil {
+	got, err := client.GetCiBuildRun(context.Background(), "run-1")
+	if err != nil {
 		t.Fatalf("GetCiBuildRun() error: %v", err)
+	}
+	relationships := got.Data.Relationships
+	if relationships == nil || relationships.Builds == nil || len(relationships.Builds.Data) != 1 {
+		t.Fatalf("unexpected builds relationship: %#v", relationships)
+	}
+	if relationships.Workflow == nil || relationships.Workflow.Data.ID != "wf-1" || relationships.Product == nil || relationships.Product.Data.ID != "prod-1" {
+		t.Fatalf("unexpected workflow/product relationships: %#v", relationships)
+	}
+	if relationships.SourceBranchOrTag == nil || relationships.SourceBranchOrTag.Data.ID != "source-ref-1" || relationships.DestinationBranch == nil || relationships.DestinationBranch.Data.ID != "destination-ref-1" {
+		t.Fatalf("unexpected source/destination relationships: %#v", relationships)
+	}
+	if relationships.Actions == nil || relationships.Actions.Links == nil || relationships.Actions.Links.Related == "" || relationships.PullRequest == nil || relationships.PullRequest.Data.ID != "pr-1" {
+		t.Fatalf("unexpected actions/pull request relationships: %#v", relationships)
 	}
 }
 
@@ -5728,7 +6682,19 @@ func TestCreateCiBuildRun_WithSourceBuildRunOnly(t *testing.T) {
 }
 
 func TestGetCiBuildAction(t *testing.T) {
-	response := jsonResponse(http.StatusOK, `{"data":{"type":"ciBuildActions","id":"action-1"}}`)
+	response := jsonResponse(http.StatusOK, `{
+		"data": {
+			"type": "ciBuildActions",
+			"id": "action-1",
+			"attributes": {"name": "Archive", "isRequiredToPass": false},
+			"relationships": {
+				"buildRun": {"links": {"related": "https://api.appstoreconnect.apple.com/v1/ciBuildActions/action-1/buildRun"}, "data": {"type": "ciBuildRuns", "id": "run-1"}},
+				"artifacts": {"links": {"related": "https://api.appstoreconnect.apple.com/v1/ciBuildActions/action-1/artifacts"}},
+				"issues": {"links": {"related": "https://api.appstoreconnect.apple.com/v1/ciBuildActions/action-1/issues"}},
+				"testResults": {"links": {"related": "https://api.appstoreconnect.apple.com/v1/ciBuildActions/action-1/testResults"}}
+			}
+		}
+	}`)
 	client := newTestClient(t, func(req *http.Request) {
 		if req.Method != http.MethodGet {
 			t.Fatalf("expected GET, got %s", req.Method)
@@ -5739,8 +6705,26 @@ func TestGetCiBuildAction(t *testing.T) {
 		assertAuthorized(t, req)
 	}, response)
 
-	if _, err := client.GetCiBuildAction(context.Background(), "action-1"); err != nil {
+	got, err := client.GetCiBuildAction(context.Background(), "action-1")
+	if err != nil {
 		t.Fatalf("GetCiBuildAction() error: %v", err)
+	}
+	if got.Data.Attributes.IsRequiredToPass == nil || *got.Data.Attributes.IsRequiredToPass {
+		t.Fatalf("expected explicit false isRequiredToPass, got %#v", got.Data.Attributes.IsRequiredToPass)
+	}
+	relationships := got.Data.Relationships
+	if relationships == nil || relationships.BuildRun == nil || relationships.BuildRun.Data == nil || relationships.BuildRun.Data.ID != "run-1" || relationships.BuildRun.Links == nil || relationships.BuildRun.Links.Related == "" {
+		t.Fatalf("unexpected build run relationship: %#v", relationships)
+	}
+	if relationships.Artifacts == nil || relationships.Artifacts.Links == nil || relationships.Artifacts.Links.Related == "" || relationships.Issues == nil || relationships.Issues.Links == nil || relationships.Issues.Links.Related == "" || relationships.TestResults == nil || relationships.TestResults.Links == nil || relationships.TestResults.Links.Related == "" {
+		t.Fatalf("unexpected action resource relationships: %#v", relationships)
+	}
+	encoded, err := json.Marshal(got)
+	if err != nil {
+		t.Fatalf("json.Marshal() error: %v", err)
+	}
+	if !strings.Contains(string(encoded), `"isRequiredToPass":false`) {
+		t.Fatalf("action response lost explicit false isRequiredToPass: %s", encoded)
 	}
 }
 
@@ -6109,6 +7093,46 @@ func TestResolveCiWorkflowByName_NoMatch(t *testing.T) {
 	}
 }
 
+func TestResolveCiWorkflowByName_FollowsPagination(t *testing.T) {
+	next := "https://api.appstoreconnect.apple.com/v1/ciProducts/prod-1/workflows?cursor=abc"
+	client := newTestClient(
+		t, func(req *http.Request) {
+			assertAuthorized(t, req)
+		},
+		jsonResponse(http.StatusOK, `{"data":[{"type":"ciWorkflows","id":"wf-1","attributes":{"name":"Deploy"}}],"links":{"next":"`+next+`"}}`),
+		jsonResponse(http.StatusOK, `{"data":[{"type":"ciWorkflows","id":"wf-2","attributes":{"name":"CI Build"}}]}`),
+	)
+
+	workflow, err := client.ResolveCiWorkflowByName(context.Background(), "prod-1", "ci build")
+	if err != nil {
+		t.Fatalf("ResolveCiWorkflowByName() error: %v", err)
+	}
+	if workflow.ID != "wf-2" {
+		t.Fatalf("expected workflow ID wf-2, got %q", workflow.ID)
+	}
+}
+
+func TestResolveCiWorkflowByName_RejectsRepeatedNextURL(t *testing.T) {
+	next := "https://api.appstoreconnect.apple.com/v1/ciProducts/prod-1/workflows?cursor=repeat"
+	requests := 0
+	client := newTestClient(
+		t, func(req *http.Request) {
+			requests++
+			assertAuthorized(t, req)
+		},
+		jsonResponse(http.StatusOK, `{"data":[{"type":"ciWorkflows","id":"wf-1","attributes":{"name":"Deploy"}}],"links":{"next":"`+next+`"}}`),
+		jsonResponse(http.StatusOK, `{"data":[{"type":"ciWorkflows","id":"wf-2","attributes":{"name":"Release"}}],"links":{"next":"`+next+`"}}`),
+	)
+
+	_, err := client.ResolveCiWorkflowByName(context.Background(), "prod-1", "ci build")
+	if !errors.Is(err, ErrRepeatedPaginationURL) {
+		t.Fatalf("expected ErrRepeatedPaginationURL, got %v", err)
+	}
+	if requests != 2 {
+		t.Fatalf("expected repeated next URL to stop after two requests, got %d", requests)
+	}
+}
+
 func TestResolveGitReferenceByName_CanonicalMatch(t *testing.T) {
 	response := jsonResponse(http.StatusOK, `{"data":[{"type":"scmGitReferences","id":"ref-1","attributes":{"name":"main","canonicalName":"refs/heads/main","isDeleted":false}}]}`)
 	client := newTestClient(t, func(req *http.Request) {
@@ -6168,6 +7192,411 @@ func TestGetBundleIDs_WithIdentifierFilter(t *testing.T) {
 
 	if _, err := client.GetBundleIDs(context.Background(), WithBundleIDsFilterIdentifier("com.example.app")); err != nil {
 		t.Fatalf("GetBundleIDs() error: %v", err)
+	}
+}
+
+func TestGetBundleIDs_SplitsLongIdentifierFilter(t *testing.T) {
+	identifiers := make([]string, 0, 1500)
+	for range 1500 {
+		identifiers = append(identifiers, "a")
+	}
+	rawIdentifierFilter := strings.Join(identifiers, ",")
+	if len(rawIdentifierFilter) > bundleIDsIdentifierFilterMaxLength {
+		t.Fatalf("test setup expected raw filter length <= %d, got %d", bundleIDsIdentifierFilterMaxLength, len(rawIdentifierFilter))
+	}
+
+	requests := 0
+	client := newTestServerClient(t, func(w http.ResponseWriter, req *http.Request) {
+		requests++
+		if req.Method != http.MethodGet {
+			t.Fatalf("expected GET, got %s", req.Method)
+		}
+		if req.URL.Path != "/v1/bundleIds" {
+			t.Fatalf("expected path /v1/bundleIds, got %s", req.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if requests == 1 && req.URL.Query().Get("include") != "profiles" {
+			t.Fatalf("expected include=profiles on the first split request, got %q", req.URL.Query().Get("include"))
+		}
+		if requests == 2 {
+			if req.URL.Query().Get("cursor") != "chunk-one-next" {
+				t.Fatalf("expected next page cursor, got query %q", req.URL.RawQuery)
+			}
+			assertAuthorized(t, req)
+			_, _ = io.WriteString(w, `{"data":[{"type":"bundleIds","id":"bid-2","attributes":{"identifier":"com.example.one.more"}}],"included":[{"type":"profiles","id":"profile-1","attributes":{"name":"First"}},{"type":"profiles","id":"profile-2","attributes":{"name":"Second"}}]}`)
+			return
+		}
+		filter := req.URL.Query().Get("filter[identifier]")
+		if filter == "" {
+			t.Fatal("expected filter[identifier]")
+		}
+		if len(req.URL.RequestURI()) > bundleIDsIdentifierFilterMaxLength {
+			t.Fatalf("expected encoded request URI to be chunked below %d chars, got %d", bundleIDsIdentifierFilterMaxLength, len(req.URL.RequestURI()))
+		}
+		assertAuthorized(t, req)
+		if requests == 3 {
+			_, _ = io.WriteString(w, `{"data":[{"type":"bundleIds","id":"bid-3","attributes":{"identifier":"com.example.two"}}],"included":[{"type":"profiles","id":"profile-2","attributes":{"name":"Second"}},{"type":"apps","id":"app-1","attributes":{"name":"Example"}}]}`)
+			return
+		}
+		_, _ = io.WriteString(w, `{"data":[{"type":"bundleIds","id":"bid-1","attributes":{"identifier":"com.example.one"}}],"included":[{"type":"profiles","id":"profile-1","attributes":{"name":"First"}}],"links":{"next":"https://api.appstoreconnect.apple.com/v1/bundleIds?cursor=chunk-one-next"}}`)
+	})
+
+	resp, err := client.GetBundleIDs(context.Background(), WithBundleIDsFilterIdentifier(rawIdentifierFilter), WithBundleIDsInclude([]string{"profiles"}))
+	if err != nil {
+		t.Fatalf("GetBundleIDs() error: %v", err)
+	}
+	if requests != 3 {
+		t.Fatalf("expected split requests to paginate each chunk, got %d", requests)
+	}
+	if len(resp.Data) != 3 {
+		t.Fatalf("expected aggregated bundle IDs from split requests, got %d", len(resp.Data))
+	}
+	var included []Resource[json.RawMessage]
+	if err := json.Unmarshal(resp.Included, &included); err != nil {
+		t.Fatalf("decode aggregated included resources: %v", err)
+	}
+	if len(included) != 3 {
+		t.Fatalf("expected three unique included resources, got %d", len(included))
+	}
+	wantIncluded := []struct {
+		typeName string
+		id       string
+	}{
+		{typeName: "profiles", id: "profile-1"},
+		{typeName: "profiles", id: "profile-2"},
+		{typeName: "apps", id: "app-1"},
+	}
+	for i, want := range wantIncluded {
+		if included[i].Type != ResourceType(want.typeName) || included[i].ID != want.id {
+			t.Fatalf("included[%d] = %s/%s, want %s/%s", i, included[i].Type, included[i].ID, want.typeName, want.id)
+		}
+	}
+}
+
+func TestGetBundleIDs_SplitIdentifierFilterPreservesEmptyDataArray(t *testing.T) {
+	identifiers := make([]string, 0, 1500)
+	for range 1500 {
+		identifiers = append(identifiers, "a")
+	}
+
+	client := newTestServerClient(t, func(w http.ResponseWriter, req *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"data":[]}`)
+	})
+
+	resp, err := client.GetBundleIDs(context.Background(), WithBundleIDsFilterIdentifier(strings.Join(identifiers, ",")))
+	if err != nil {
+		t.Fatalf("GetBundleIDs() error: %v", err)
+	}
+	encoded, err := json.Marshal(resp)
+	if err != nil {
+		t.Fatalf("marshal response: %v", err)
+	}
+	if !strings.Contains(string(encoded), `"data":[]`) {
+		t.Fatalf("encoded response = %s, want an empty data array", encoded)
+	}
+}
+
+func TestGetBundleIDs_RejectsExplicitSplitPaginationDisabled(t *testing.T) {
+	identifiers := make([]string, 0, 1500)
+	for range 1500 {
+		identifiers = append(identifiers, "a")
+	}
+	requests := 0
+	client := newTestClient(t, func(req *http.Request) {
+		requests++
+		t.Fatalf("split pagination rejection should happen before HTTP: %s", req.URL.String())
+	}, jsonResponse(http.StatusOK, `{"data":[]}`))
+
+	_, err := client.GetBundleIDs(
+		context.Background(),
+		WithBundleIDsFilterIdentifier(strings.Join(identifiers, ",")),
+		WithBundleIDsSplitPagination(false),
+	)
+	if err == nil || !strings.Contains(err.Error(), "requires --paginate") {
+		t.Fatalf("GetBundleIDs() error = %v, want pagination requirement", err)
+	}
+	if requests != 0 {
+		t.Fatalf("request count = %d, want no HTTP request", requests)
+	}
+}
+
+func TestGetBundleIDs_SplitIdentifierFilterAccountsForModerateQueryOverhead(t *testing.T) {
+	identifiers := make([]string, 0, 400)
+	for i := 0; i < 400; i++ {
+		identifiers = append(identifiers, fmt.Sprintf("com.example.%012d", i))
+	}
+	rawIdentifierFilter := strings.Join(identifiers, ",")
+	names := []string{"Example One", "Example Two", "Example Three", "Example Four", "Example Five"}
+	fields := []string{"name", "identifier", "platform"}
+	profileFields := []string{"name", "expirationDate"}
+	capabilityFields := []string{"capabilityType", "settings"}
+	appFields := []string{"name", "bundleId"}
+	include := []string{"profiles", "bundleIdCapabilities", "app"}
+
+	baseChunks, err := splitBundleIDsIdentifierFilter(&bundleIDsQuery{identifier: rawIdentifierFilter})
+	if err != nil {
+		t.Fatalf("split baseline identifier filter: %v", err)
+	}
+	query := &bundleIDsQuery{
+		identifier:                 rawIdentifierFilter,
+		names:                      names,
+		fields:                     fields,
+		profilesFields:             profileFields,
+		bundleIDCapabilitiesFields: capabilityFields,
+		appFields:                  appFields,
+		include:                    include,
+		profilesLimit:              50,
+		bundleIDCapabilitiesLimit:  50,
+	}
+	overheadChunks, err := splitBundleIDsIdentifierFilter(query)
+	if err != nil {
+		t.Fatalf("split identifier filter with query overhead: %v", err)
+	}
+	if len(overheadChunks) <= len(baseChunks) {
+		t.Fatalf("moderate query overhead produced %d chunks, baseline produced %d; want smaller chunks", len(overheadChunks), len(baseChunks))
+	}
+
+	idByIdentifier := make(map[string]string, len(identifiers))
+	for index, identifier := range identifiers {
+		idByIdentifier[identifier] = fmt.Sprintf("bundle-%03d", index)
+	}
+	covered := make(map[string]struct{}, len(identifiers))
+	requests := 0
+	client := newTestServerClient(t, func(w http.ResponseWriter, req *http.Request) {
+		requests++
+		w.Header().Set("Content-Type", "application/json")
+		if len(req.URL.RequestURI()) > bundleIDsIdentifierFilterMaxLength {
+			t.Fatalf("request %d URI length = %d, want <= %d: %s", requests, len(req.URL.RequestURI()), bundleIDsIdentifierFilterMaxLength, req.URL.RequestURI())
+		}
+		values := req.URL.Query()
+		if values.Get("filter[name]") != strings.Join(names, ",") || values.Get("fields[bundleIds]") != strings.Join(fields, ",") || values.Get("fields[profiles]") != strings.Join(profileFields, ",") || values.Get("fields[bundleIdCapabilities]") != strings.Join(capabilityFields, ",") || values.Get("fields[apps]") != strings.Join(appFields, ",") || values.Get("include") != strings.Join(include, ",") {
+			t.Fatalf("request %d lost query overhead: %s", requests, req.URL.RequestURI())
+		}
+		for _, identifier := range strings.Split(values.Get("filter[identifier]"), ",") {
+			if identifier == "" {
+				t.Fatal("split request missing identifier")
+			}
+			if _, ok := idByIdentifier[identifier]; !ok {
+				t.Fatalf("split request contained unexpected identifier %q", identifier)
+			}
+			if _, ok := covered[identifier]; ok {
+				t.Fatalf("identifier %q appeared in multiple chunks", identifier)
+			}
+			covered[identifier] = struct{}{}
+		}
+		resources := make([]string, 0)
+		for _, identifier := range strings.Split(values.Get("filter[identifier]"), ",") {
+			resources = append(resources, fmt.Sprintf(`{"type":"bundleIds","id":"%s","attributes":{"identifier":"%s"}}`, idByIdentifier[identifier], identifier))
+		}
+		_, _ = io.WriteString(w, `{"data":[`+strings.Join(resources, ",")+`]}`)
+	})
+
+	resp, err := client.GetBundleIDs(
+		context.Background(),
+		WithBundleIDsFilterIdentifier(rawIdentifierFilter),
+		WithBundleIDsFilterNames(names),
+		WithBundleIDsFields(fields),
+		WithBundleIDsProfilesFields(profileFields),
+		WithBundleIDsCapabilitiesFields(capabilityFields),
+		WithBundleIDsAppFields(appFields),
+		WithBundleIDsInclude(include),
+		WithBundleIDsProfilesLimit(50),
+		WithBundleIDsCapabilitiesLimit(50),
+	)
+	if err != nil {
+		t.Fatalf("GetBundleIDs() error: %v", err)
+	}
+	if requests != len(overheadChunks) || len(resp.Data) != len(identifiers) || len(covered) != len(identifiers) {
+		t.Fatalf("split coverage = requests %d/%d, data %d/%d, identifiers %d/%d; want every identifier covered once", requests, len(overheadChunks), len(resp.Data), len(identifiers), len(covered), len(identifiers))
+	}
+}
+
+func TestGetBundleIDs_SplitIdentifierFilterRejectsRepeatedNextURL(t *testing.T) {
+	identifiers := make([]string, 0, 1500)
+	for range 1500 {
+		identifiers = append(identifiers, "a")
+	}
+	nextURL := "https://api.appstoreconnect.apple.com/v1/bundleIds?cursor=repeat"
+
+	requests := 0
+	client := newTestServerClient(t, func(w http.ResponseWriter, req *http.Request) {
+		requests++
+		assertAuthorized(t, req)
+		w.Header().Set("Content-Type", "application/json")
+		if requests == 1 {
+			_, _ = io.WriteString(w, `{"data":[{"type":"bundleIds","id":"bid-1","attributes":{"identifier":"com.example.one"}}],"links":{"next":"`+nextURL+`"}}`)
+			return
+		}
+		_, _ = io.WriteString(w, `{"data":[{"type":"bundleIds","id":"bid-2","attributes":{"identifier":"com.example.two"}}],"links":{"next":"`+nextURL+`"}}`)
+	})
+
+	_, err := client.GetBundleIDs(context.Background(), WithBundleIDsFilterIdentifier(strings.Join(identifiers, ",")))
+	if !errors.Is(err, ErrRepeatedPaginationURL) {
+		t.Fatalf("expected ErrRepeatedPaginationURL, got %v", err)
+	}
+	if requests != 2 {
+		t.Fatalf("expected repeated next URL to stop after two requests, got %d", requests)
+	}
+}
+
+func TestGetBundleIDs_SortsAfterSplitIdentifierFilter(t *testing.T) {
+	identifiers := make([]string, 0, 250)
+	for i := 0; i < 250; i++ {
+		identifiers = append(identifiers, fmt.Sprintf("com.example.%012d", i))
+	}
+	rawIdentifierFilter := strings.Join(identifiers, ",")
+
+	const firstPage = `{"data":[
+		{"type":"bundleIds","id":"bundle-z","attributes":{"name":"Zulu","identifier":"com.example.z","platform":"MAC_OS","seedId":"seed-z"}},
+		{"type":"bundleIds","id":"bundle-a","attributes":{"name":"Alpha","identifier":"com.example.a","platform":"IOS","seedId":"seed-a"}}
+	]}`
+	const secondPage = `{"data":[
+		{"type":"bundleIds","id":"bundle-m","attributes":{"name":"Bravo","identifier":"com.example.m","platform":"IOS","seedId":"seed-m"}},
+		{"type":"bundleIds","id":"bundle-b","attributes":{"name":"Beta","identifier":"com.example.b","platform":"MAC_OS","seedId":"seed-b"}}
+	]}`
+	tests := []struct {
+		name string
+		sort string
+		want []string
+	}{
+		{name: "descending identifier", sort: "-identifier", want: []string{"bundle-z", "bundle-m", "bundle-b", "bundle-a"}},
+		{name: "multi-key platform then descending name", sort: "platform,-name", want: []string{"bundle-m", "bundle-a", "bundle-z", "bundle-b"}},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			requests := 0
+			client := newTestServerClient(t, func(w http.ResponseWriter, req *http.Request) {
+				requests++
+				if req.URL.Query().Get("sort") != test.sort {
+					t.Fatalf("request %d sort = %q, want %q", requests, req.URL.Query().Get("sort"), test.sort)
+				}
+				if req.URL.Query().Get("filter[identifier]") == "" {
+					t.Fatalf("request %d missing filter[identifier]", requests)
+				}
+				assertAuthorized(t, req)
+				w.Header().Set("Content-Type", "application/json")
+				if requests == 1 {
+					_, _ = io.WriteString(w, firstPage)
+					return
+				}
+				_, _ = io.WriteString(w, secondPage)
+			})
+
+			resp, err := client.GetBundleIDs(
+				context.Background(),
+				WithBundleIDsFilterIdentifier(rawIdentifierFilter),
+				WithBundleIDsSort(test.sort),
+			)
+			if err != nil {
+				t.Fatalf("GetBundleIDs() error: %v", err)
+			}
+			if requests != 2 {
+				t.Fatalf("expected two split requests, got %d", requests)
+			}
+			if got := bundleIDResourceIDs(resp.Data); !slices.Equal(got, test.want) {
+				t.Fatalf("bundle ID order = %v, want %v", got, test.want)
+			}
+		})
+	}
+}
+
+func TestGetBundleIDs_DeduplicatesSplitIdentifierFilterData(t *testing.T) {
+	identifiers := make([]string, 0, 250)
+	for i := 0; i < 250; i++ {
+		identifiers = append(identifiers, fmt.Sprintf("com.example.%012d", i))
+	}
+	rawIdentifierFilter := strings.Join(identifiers, ",")
+
+	requests := 0
+	client := newTestServerClient(t, func(w http.ResponseWriter, req *http.Request) {
+		requests++
+		assertAuthorized(t, req)
+		if req.URL.Query().Get("filter[identifier]") == "" {
+			t.Fatal("expected split identifier filter")
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if requests == 1 {
+			_, _ = io.WriteString(w, `{"data":[
+			{"type":"bundleIds","id":"bundle-z","attributes":{"name":"Zulu","identifier":"com.example.z","platform":"MAC_OS"}},
+			{"type":"bundleIds","id":"bundle-a","attributes":{"name":"Original","identifier":"com.example.a","platform":"IOS"}}
+		]}`)
+			return
+		}
+		_, _ = io.WriteString(w, `{"data":[
+			{"type":"bundleIds","id":"bundle-a","attributes":{"name":"Duplicate","identifier":"com.example.a","platform":"IOS"}},
+			{"type":"bundleIds","id":"bundle-m","attributes":{"name":"Bravo","identifier":"com.example.m","platform":"IOS"}}
+		]}`)
+	})
+
+	resp, err := client.GetBundleIDs(
+		context.Background(),
+		WithBundleIDsFilterIdentifier(rawIdentifierFilter),
+		WithBundleIDsSort("name"),
+	)
+	if err != nil {
+		t.Fatalf("GetBundleIDs() error: %v", err)
+	}
+	if got := bundleIDResourceIDs(resp.Data); !slices.Equal(got, []string{"bundle-m", "bundle-a", "bundle-z"}) {
+		t.Fatalf("bundle ID order = %v, want stable deduplicated order", got)
+	}
+	if len(resp.Data) != 3 || resp.Data[1].Attributes.Name != "Original" {
+		t.Fatalf("deduplicated data = %+v, want first-seen bundle-a resource", resp.Data)
+	}
+}
+
+func TestGetBundleIDs_RejectsSplitWhenFixedQueryExceedsURLLimit(t *testing.T) {
+	identifiers := []string{"com.example.a", "com.example.b"}
+	names := make([]string, 0, 300)
+	for i := 0; i < 300; i++ {
+		names = append(names, fmt.Sprintf("name-%03d-%s", i, strings.Repeat("x", 12)))
+	}
+	client := newTestClient(
+		t, func(req *http.Request) {
+			t.Fatalf("fixed query overhead should be rejected before HTTP: %s", req.URL.String())
+		},
+		jsonResponse(http.StatusOK, `{"data":[]}`),
+	)
+
+	_, err := client.GetBundleIDs(
+		context.Background(),
+		WithBundleIDsFilterIdentifier(strings.Join(identifiers, ",")),
+		WithBundleIDsFilterNames(names),
+	)
+	if err == nil || !strings.Contains(err.Error(), "cannot split bundleIds identifier filter") || !strings.Contains(err.Error(), "3900") {
+		t.Fatalf("GetBundleIDs() error = %v, want clear URL-capacity error", err)
+	}
+}
+
+func bundleIDResourceIDs(resources []Resource[BundleIDAttributes]) []string {
+	ids := make([]string, 0, len(resources))
+	for _, resource := range resources {
+		ids = append(ids, resource.ID)
+	}
+	return ids
+}
+
+func TestGetBundleIDs_RejectsSplitSortWhenSparseFieldsOmitSortField(t *testing.T) {
+	identifiers := make([]string, 0, 250)
+	for i := 0; i < 250; i++ {
+		identifiers = append(identifiers, fmt.Sprintf("com.example.%012d", i))
+	}
+	client := newTestClient(
+		t, func(req *http.Request) {
+			t.Fatalf("sparse split sort should be rejected before HTTP: %s", req.URL.String())
+		},
+		jsonResponse(http.StatusOK, `{"data":[]}`),
+	)
+
+	_, err := client.GetBundleIDs(
+		context.Background(),
+		WithBundleIDsFilterIdentifier(strings.Join(identifiers, ",")),
+		WithBundleIDsSort("platform,-name"),
+		WithBundleIDsFields([]string{"name", "identifier"}),
+	)
+	if err == nil || !strings.Contains(err.Error(), `fields[bundleIds] omits "platform"`) {
+		t.Fatalf("GetBundleIDs() error = %v, want sparse sort validation error", err)
 	}
 }
 
@@ -6329,7 +7758,7 @@ func TestGetBundleID_SendsRequest(t *testing.T) {
 }
 
 func TestCreateBundleID_SendsRequest(t *testing.T) {
-	response := jsonResponse(http.StatusCreated, `{"data":{"type":"bundleIds","id":"b1","attributes":{"name":"Demo","identifier":"com.example.demo","platform":"IOS"}}}`)
+	response := jsonResponse(http.StatusCreated, `{"data":{"type":"bundleIds","id":"b1","attributes":{"name":"Demo","identifier":"com.example.demo","platform":"UNIVERSAL"}}}`)
 	client := newTestClient(t, func(req *http.Request) {
 		if req.Method != http.MethodPost {
 			t.Fatalf("expected POST, got %s", req.Method)
@@ -6351,8 +7780,8 @@ func TestCreateBundleID_SendsRequest(t *testing.T) {
 		if payload.Data.Attributes.Identifier != "com.example.demo" {
 			t.Fatalf("expected identifier com.example.demo, got %q", payload.Data.Attributes.Identifier)
 		}
-		if payload.Data.Attributes.Platform != PlatformIOS {
-			t.Fatalf("expected platform IOS, got %q", payload.Data.Attributes.Platform)
+		if payload.Data.Attributes.Platform != BundleIDPlatformUniversal {
+			t.Fatalf("expected platform UNIVERSAL, got %q", payload.Data.Attributes.Platform)
 		}
 		assertAuthorized(t, req)
 	}, response)
@@ -6360,7 +7789,7 @@ func TestCreateBundleID_SendsRequest(t *testing.T) {
 	attrs := BundleIDCreateAttributes{
 		Name:       "Demo",
 		Identifier: "com.example.demo",
-		Platform:   PlatformIOS,
+		Platform:   BundleIDPlatformUniversal,
 	}
 	if _, err := client.CreateBundleID(context.Background(), attrs); err != nil {
 		t.Fatalf("CreateBundleID() error: %v", err)
@@ -6716,6 +8145,13 @@ func TestCreateBundleIDCapability_SendsRequest(t *testing.T) {
 		if payload.Data.Attributes.CapabilityType != "ICLOUD" {
 			t.Fatalf("expected capability ICLOUD, got %q", payload.Data.Attributes.CapabilityType)
 		}
+		if len(payload.Data.Attributes.Settings) != 1 || payload.Data.Attributes.Settings[0].Key != "ICLOUD_VERSION" {
+			t.Fatalf("expected ICLOUD_VERSION setting, got %+v", payload.Data.Attributes.Settings)
+		}
+		options := payload.Data.Attributes.Settings[0].Options
+		if len(options) != 1 || options[0].Key != "XCODE_6" || options[0].Enabled == nil || !*options[0].Enabled {
+			t.Fatalf("expected enabled XCODE_6 option, got %+v", options)
+		}
 		if payload.Data.Relationships == nil || payload.Data.Relationships.BundleID == nil {
 			t.Fatalf("expected bundleId relationship")
 		}
@@ -6732,7 +8168,7 @@ func TestCreateBundleIDCapability_SendsRequest(t *testing.T) {
 			{
 				Key: "ICLOUD_VERSION",
 				Options: []CapabilityOption{
-					{Key: "XCODE_13", Enabled: &enabled},
+					{Key: "XCODE_6", Enabled: &enabled},
 				},
 			},
 		},
@@ -6760,7 +8196,7 @@ func TestDeleteBundleIDCapability_SendsRequest(t *testing.T) {
 }
 
 func TestUpdateBundleIDCapability_UsesPatchPath(t *testing.T) {
-	response := jsonResponse(http.StatusOK, `{"data":{"type":"bundleIdCapabilities","id":"cap1","attributes":{"capabilityType":"ICLOUD","settings":[{"key":"ICLOUD_VERSION","options":[{"key":"XCODE_13","enabled":true}]}]}}}`)
+	response := jsonResponse(http.StatusOK, `{"data":{"type":"bundleIdCapabilities","id":"cap1","attributes":{"capabilityType":"ICLOUD","settings":[{"key":"ICLOUD_VERSION","options":[{"key":"XCODE_6","enabled":true}]}]}}}`)
 	client := newTestClient(t, func(req *http.Request) {
 		if req.Method != http.MethodPatch {
 			t.Fatalf("expected PATCH, got %s", req.Method)
@@ -6794,8 +8230,8 @@ func TestUpdateBundleIDCapability_UsesPatchPath(t *testing.T) {
 		if len(payload.Data.Attributes.Settings[0].Options) != 1 {
 			t.Fatalf("expected 1 option, got %d", len(payload.Data.Attributes.Settings[0].Options))
 		}
-		if payload.Data.Attributes.Settings[0].Options[0].Key != "XCODE_13" {
-			t.Fatalf("expected option key XCODE_13, got %q", payload.Data.Attributes.Settings[0].Options[0].Key)
+		if payload.Data.Attributes.Settings[0].Options[0].Key != "XCODE_6" {
+			t.Fatalf("expected option key XCODE_6, got %q", payload.Data.Attributes.Settings[0].Options[0].Key)
 		}
 		if payload.Data.Attributes.Settings[0].Options[0].Enabled == nil || !*payload.Data.Attributes.Settings[0].Options[0].Enabled {
 			t.Fatalf("expected option enabled true")
@@ -6809,7 +8245,7 @@ func TestUpdateBundleIDCapability_UsesPatchPath(t *testing.T) {
 			{
 				Key: "ICLOUD_VERSION",
 				Options: []CapabilityOption{
-					{Key: "XCODE_13", Enabled: &enabled},
+					{Key: "XCODE_6", Enabled: &enabled},
 				},
 			},
 		},
@@ -6896,6 +8332,9 @@ func TestCreateCertificate_SendsRequest(t *testing.T) {
 		if err != nil {
 			t.Fatalf("read body error: %v", err)
 		}
+		if strings.Contains(string(body), `"relationships"`) {
+			t.Fatalf("expected relationships member to be omitted, got %s", body)
+		}
 		var payload CertificateCreateRequest
 		if err := json.Unmarshal(body, &payload); err != nil {
 			t.Fatalf("decode body error: %v", err)
@@ -6909,10 +8348,97 @@ func TestCreateCertificate_SendsRequest(t *testing.T) {
 		if payload.Data.Attributes.CSRContent != "CSR_CONTENT" {
 			t.Fatalf("expected csr content, got %q", payload.Data.Attributes.CSRContent)
 		}
+		if payload.Data.Relationships != nil {
+			t.Fatalf("expected relationships to be omitted, got %#v", payload.Data.Relationships)
+		}
 		assertAuthorized(t, req)
 	}, response)
 
 	if _, err := client.CreateCertificate(context.Background(), "CSR_CONTENT", "IOS_DISTRIBUTION"); err != nil {
+		t.Fatalf("CreateCertificate() error: %v", err)
+	}
+}
+
+func TestCreateCertificate_WithPassTypeIDRelationship(t *testing.T) {
+	response := jsonResponse(http.StatusCreated, `{"data":{"type":"certificates","id":"c1","attributes":{"name":"Pass Cert","certificateType":"PASS_TYPE_ID"}}}`)
+	client := newTestClient(t, func(req *http.Request) {
+		if req.Method != http.MethodPost {
+			t.Fatalf("expected POST, got %s", req.Method)
+		}
+		if req.URL.Path != "/v1/certificates" {
+			t.Fatalf("expected path /v1/certificates, got %s", req.URL.Path)
+		}
+		body, err := io.ReadAll(req.Body)
+		if err != nil {
+			t.Fatalf("read body error: %v", err)
+		}
+		var payload CertificateCreateRequest
+		if err := json.Unmarshal(body, &payload); err != nil {
+			t.Fatalf("decode body error: %v", err)
+		}
+		if payload.Data.Relationships == nil || payload.Data.Relationships.PassTypeID == nil {
+			t.Fatal("expected passTypeId relationship")
+		}
+		if got := payload.Data.Relationships.PassTypeID.Data.Type; got != ResourceTypePassTypeIds {
+			t.Fatalf("expected relationship type passTypeIds, got %q", got)
+		}
+		if got := payload.Data.Relationships.PassTypeID.Data.ID; got != "pass-123" {
+			t.Fatalf("expected relationship ID pass-123, got %q", got)
+		}
+		assertAuthorized(t, req)
+	}, response)
+
+	if _, err := client.CreateCertificate(
+		context.Background(),
+		"CSR_CONTENT",
+		"PASS_TYPE_ID",
+		WithCertificatePassTypeID(" pass-123 "),
+	); err != nil {
+		t.Fatalf("CreateCertificate() error: %v", err)
+	}
+}
+
+func TestCreateCertificate_WithMerchantIDRelationship(t *testing.T) {
+	response := jsonResponse(http.StatusCreated, `{"data":{"type":"certificates","id":"c1","attributes":{"name":"Merchant Cert","certificateType":"APPLE_PAY_MERCHANT_IDENTITY"}}}`)
+	client := newTestClient(t, func(req *http.Request) {
+		if req.Method != http.MethodPost {
+			t.Fatalf("expected POST, got %s", req.Method)
+		}
+		if req.URL.Path != "/v1/certificates" {
+			t.Fatalf("expected path /v1/certificates, got %s", req.URL.Path)
+		}
+		body, err := io.ReadAll(req.Body)
+		if err != nil {
+			t.Fatalf("read body error: %v", err)
+		}
+		var payload CertificateCreateRequest
+		if err := json.Unmarshal(body, &payload); err != nil {
+			t.Fatalf("decode body error: %v", err)
+		}
+		if payload.Data.Attributes.CertificateType != "APPLE_PAY_MERCHANT_IDENTITY" {
+			t.Fatalf("expected certificate type APPLE_PAY_MERCHANT_IDENTITY, got %q", payload.Data.Attributes.CertificateType)
+		}
+		if payload.Data.Relationships == nil || payload.Data.Relationships.MerchantID == nil {
+			t.Fatal("expected merchantId relationship")
+		}
+		if got := payload.Data.Relationships.MerchantID.Data.Type; got != ResourceTypeMerchantIds {
+			t.Fatalf("expected relationship type merchantIds, got %q", got)
+		}
+		if got := payload.Data.Relationships.MerchantID.Data.ID; got != "merchant-123" {
+			t.Fatalf("expected relationship ID merchant-123, got %q", got)
+		}
+		if payload.Data.Relationships.PassTypeID != nil {
+			t.Fatalf("expected passTypeId to be omitted, got %#v", payload.Data.Relationships.PassTypeID)
+		}
+		assertAuthorized(t, req)
+	}, response)
+
+	if _, err := client.CreateCertificate(
+		context.Background(),
+		"CSR_CONTENT",
+		"APPLE_PAY_MERCHANT_IDENTITY",
+		WithCertificateMerchantID(" merchant-123 "),
+	); err != nil {
 		t.Fatalf("CreateCertificate() error: %v", err)
 	}
 }
@@ -7047,7 +8573,7 @@ func TestGetDevice_SendsRequest(t *testing.T) {
 }
 
 func TestRegisterDevice_SendsRequest(t *testing.T) {
-	response := jsonResponse(http.StatusCreated, `{"data":{"type":"devices","id":"d1","attributes":{"name":"Device","udid":"UDID","platform":"IOS","status":"ENABLED"}}}`)
+	response := jsonResponse(http.StatusCreated, `{"data":{"type":"devices","id":"d1","attributes":{"name":"Device","udid":"UDID","platform":"UNIVERSAL","status":"ENABLED"}}}`)
 	client := newTestClient(t, func(req *http.Request) {
 		if req.Method != http.MethodPost {
 			t.Fatalf("expected POST, got %s", req.Method)
@@ -7069,8 +8595,8 @@ func TestRegisterDevice_SendsRequest(t *testing.T) {
 		if payload.Data.Attributes.UDID != "UDID" {
 			t.Fatalf("expected udid UDID, got %q", payload.Data.Attributes.UDID)
 		}
-		if payload.Data.Attributes.Platform != DevicePlatformIOS {
-			t.Fatalf("expected platform IOS, got %q", payload.Data.Attributes.Platform)
+		if payload.Data.Attributes.Platform != DevicePlatformUniversal {
+			t.Fatalf("expected platform UNIVERSAL, got %q", payload.Data.Attributes.Platform)
 		}
 		assertAuthorized(t, req)
 	}, response)
@@ -7078,7 +8604,7 @@ func TestRegisterDevice_SendsRequest(t *testing.T) {
 	attrs := DeviceCreateAttributes{
 		Name:     "Device",
 		UDID:     "UDID",
-		Platform: DevicePlatformIOS,
+		Platform: DevicePlatformUniversal,
 	}
 	if _, err := client.RegisterDevice(context.Background(), attrs); err != nil {
 		t.Fatalf("RegisterDevice() error: %v", err)
@@ -7098,6 +8624,9 @@ func TestGetProfiles_WithFilter(t *testing.T) {
 		if values.Get("filter[profileType]") != "IOS_APP_DEVELOPMENT,IOS_APP_STORE" {
 			t.Fatalf("expected filter[profileType] to be set, got %q", values.Get("filter[profileType]"))
 		}
+		if values.Get("filter[profileState]") != "ACTIVE,INVALID" {
+			t.Fatalf("expected filter[profileState] to be set, got %q", values.Get("filter[profileState]"))
+		}
 		if values.Get("limit") != "5" {
 			t.Fatalf("expected limit=5, got %q", values.Get("limit"))
 		}
@@ -7107,6 +8636,7 @@ func TestGetProfiles_WithFilter(t *testing.T) {
 	if _, err := client.GetProfiles(
 		context.Background(),
 		WithProfilesTypes([]string{"IOS_APP_DEVELOPMENT", "IOS_APP_STORE"}),
+		WithProfilesStates([]string{"ACTIVE", "INVALID"}),
 		WithProfilesLimit(5),
 	); err != nil {
 		t.Fatalf("GetProfiles() error: %v", err)
@@ -7823,7 +9353,7 @@ func TestSetSubscriptionInitialPrice(t *testing.T) {
 	}
 }
 
-func TestSetSubscriptionInitialPrice_RetriesUnexpectedServerError(t *testing.T) {
+func TestSetSubscriptionInitialPrice_DoesNotReplayUnexpectedServerError(t *testing.T) {
 	t.Setenv("ASC_MAX_RETRIES", "2")
 	t.Setenv("ASC_BASE_DELAY", "1ms")
 	t.Setenv("ASC_MAX_DELAY", "2ms")
@@ -7848,10 +9378,7 @@ func TestSetSubscriptionInitialPrice_RetriesUnexpectedServerError(t *testing.T) 
 				}
 				assertAuthorized(t, req)
 
-				if attempts < 3 {
-					return jsonResponse(http.StatusGatewayTimeout, `{"errors":[{"status":"504","code":"UNEXPECTED_ERROR","title":"timeout","detail":"timed out"}]}`), nil
-				}
-				return jsonResponse(http.StatusOK, `{"data":{"type":"subscriptions","id":"sub-1","attributes":{"name":"Monthly","productId":"com.example.sub.monthly"}}}`), nil
+				return jsonResponse(http.StatusGatewayTimeout, `{"errors":[{"status":"504","code":"UNEXPECTED_ERROR","title":"timeout","detail":"timed out"}]}`), nil
 			}),
 		},
 		keyID:      "KEY123",
@@ -7860,11 +9387,14 @@ func TestSetSubscriptionInitialPrice_RetriesUnexpectedServerError(t *testing.T) 
 	}
 
 	_, err = client.SetSubscriptionInitialPrice(context.Background(), "sub-1", "price-point-1", "USA", SubscriptionPriceCreateAttributes{})
-	if err != nil {
-		t.Fatalf("SetSubscriptionInitialPrice() error: %v", err)
+	if err == nil {
+		t.Fatal("expected error")
 	}
-	if attempts != 3 {
-		t.Fatalf("expected 3 attempts (2 retries + success), got %d", attempts)
+	if !IsRetryable(err) {
+		t.Fatalf("expected retryable error, got %v", err)
+	}
+	if attempts != 1 {
+		t.Fatalf("expected 1 attempt, got %d", attempts)
 	}
 }
 
@@ -7944,7 +9474,27 @@ func TestCreateSubscriptionPrice(t *testing.T) {
 	}
 }
 
-func TestCreateSubscriptionPrice_RetriesUnexpectedServerError(t *testing.T) {
+func TestCreateSubscriptionPriceWithPlanType(t *testing.T) {
+	response := jsonResponse(http.StatusCreated, `{"data":{"type":"subscriptionPrices","id":"price-1","attributes":{"planType":"MONTHLY"}}}`)
+	client := newTestClient(t, func(req *http.Request) {
+		var payload SubscriptionPriceCreateRequest
+		if err := json.NewDecoder(req.Body).Decode(&payload); err != nil {
+			t.Fatalf("failed to decode request: %v", err)
+		}
+		if payload.Data.Attributes == nil || payload.Data.Attributes.PlanType != SubscriptionPlanTypeMonthly {
+			t.Fatalf("expected planType MONTHLY, got %#v", payload.Data.Attributes)
+		}
+		assertAuthorized(t, req)
+	}, response)
+
+	if _, err := client.CreateSubscriptionPrice(context.Background(), "sub-1", "price-point-1", "NOR", SubscriptionPriceCreateAttributes{
+		PlanType: SubscriptionPlanTypeMonthly,
+	}); err != nil {
+		t.Fatalf("CreateSubscriptionPrice() error: %v", err)
+	}
+}
+
+func TestCreateSubscriptionPrice_DoesNotReplayRequestTimeout(t *testing.T) {
 	t.Setenv("ASC_MAX_RETRIES", "2")
 	t.Setenv("ASC_BASE_DELAY", "1ms")
 	t.Setenv("ASC_MAX_DELAY", "2ms")
@@ -7969,10 +9519,7 @@ func TestCreateSubscriptionPrice_RetriesUnexpectedServerError(t *testing.T) {
 				}
 				assertAuthorized(t, req)
 
-				if attempts < 3 {
-					return jsonResponse(http.StatusInternalServerError, `{"errors":[{"status":"500","code":"UNEXPECTED_ERROR","title":"An unexpected error occurred.","detail":"An unexpected error occurred on the server side."}]}`), nil
-				}
-				return jsonResponse(http.StatusCreated, `{"data":{"type":"subscriptionPrices","id":"price-1","attributes":{"startDate":"2026-01-01","preserved":true}}}`), nil
+				return jsonResponse(http.StatusRequestTimeout, `{"errors":[{"status":"408","code":"REQUEST_TIMEOUT","title":"Request timeout","detail":"The request may have completed."}]}`), nil
 			}),
 		},
 		keyID:      "KEY123",
@@ -7981,11 +9528,14 @@ func TestCreateSubscriptionPrice_RetriesUnexpectedServerError(t *testing.T) {
 	}
 
 	_, err = client.CreateSubscriptionPrice(context.Background(), "sub-1", "price-point-1", "USA", SubscriptionPriceCreateAttributes{})
-	if err != nil {
-		t.Fatalf("CreateSubscriptionPrice() error: %v", err)
+	if err == nil {
+		t.Fatal("expected error")
 	}
-	if attempts != 3 {
-		t.Fatalf("expected 3 attempts (2 retries + success), got %d", attempts)
+	if !IsRetryable(err) {
+		t.Fatalf("expected retryable error, got %v", err)
+	}
+	if attempts != 1 {
+		t.Fatalf("expected 1 attempt, got %d", attempts)
 	}
 }
 
@@ -8064,7 +9614,7 @@ func TestCreateSubscriptionAvailability(t *testing.T) {
 	}
 }
 
-func TestCreateSubscriptionAvailability_RetriesUnexpectedServerError(t *testing.T) {
+func TestCreateSubscriptionAvailability_DoesNotReplayUnexpectedServerError(t *testing.T) {
 	t.Setenv("ASC_MAX_RETRIES", "2")
 	t.Setenv("ASC_BASE_DELAY", "1ms")
 	t.Setenv("ASC_MAX_DELAY", "2ms")
@@ -8089,10 +9639,7 @@ func TestCreateSubscriptionAvailability_RetriesUnexpectedServerError(t *testing.
 				}
 				assertAuthorized(t, req)
 
-				if attempts < 3 {
-					return jsonResponse(http.StatusInternalServerError, `{"errors":[{"status":"500","code":"UNEXPECTED_ERROR","title":"unexpected","detail":"retry me"}]}`), nil
-				}
-				return jsonResponse(http.StatusCreated, `{"data":{"type":"subscriptionAvailabilities","id":"avail-1","attributes":{"availableInNewTerritories":true}}}`), nil
+				return jsonResponse(http.StatusInternalServerError, `{"errors":[{"status":"500","code":"UNEXPECTED_ERROR","title":"unexpected","detail":"retry me"}]}`), nil
 			}),
 		},
 		keyID:      "KEY123",
@@ -8101,11 +9648,14 @@ func TestCreateSubscriptionAvailability_RetriesUnexpectedServerError(t *testing.
 	}
 
 	_, err = client.CreateSubscriptionAvailability(context.Background(), "sub-1", []string{"USA", "CAN"}, SubscriptionAvailabilityAttributes{AvailableInNewTerritories: true})
-	if err != nil {
-		t.Fatalf("CreateSubscriptionAvailability() error: %v", err)
+	if err == nil {
+		t.Fatal("expected error")
 	}
-	if attempts != 3 {
-		t.Fatalf("expected 3 attempts (2 retries + success), got %d", attempts)
+	if !IsRetryable(err) {
+		t.Fatalf("expected retryable error, got %v", err)
+	}
+	if attempts != 1 {
+		t.Fatalf("expected 1 attempt, got %d", attempts)
 	}
 }
 
@@ -8214,6 +9764,29 @@ func TestClientLimitsConcurrentMutatingRequests(t *testing.T) {
 	}
 }
 
+// fixedDeadlineContext reports a deadline without arming a timer, so a test can
+// check deadline arithmetic without racing the wall clock. It never expires on
+// its own. read is closed the first time a caller asks for the deadline.
+type fixedDeadlineContext struct {
+	context.Context
+	deadline time.Time
+	read     chan struct{}
+	readOnce sync.Once
+}
+
+func newFixedDeadlineContext(deadline time.Time) *fixedDeadlineContext {
+	return &fixedDeadlineContext{
+		Context:  context.Background(),
+		deadline: deadline,
+		read:     make(chan struct{}),
+	}
+}
+
+func (c *fixedDeadlineContext) Deadline() (time.Time, bool) {
+	c.readOnce.Do(func() { close(c.read) })
+	return c.deadline, true
+}
+
 func TestClientRenewsMutatingRequestTimeoutAfterLimiterWait(t *testing.T) {
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
@@ -8224,7 +9797,6 @@ func TestClientRenewsMutatingRequestTimeoutAfterLimiterWait(t *testing.T) {
 	started := make(chan struct{}, 2)
 	var requests atomic.Int32
 	derivedDeadlineCh := make(chan time.Time, 1)
-	parentDeadlineCh := make(chan time.Time, 1)
 
 	client := &Client{
 		httpClient: &http.Client{
@@ -8236,10 +9808,8 @@ func TestClientRenewsMutatingRequestTimeoutAfterLimiterWait(t *testing.T) {
 				if attempt == 1 {
 					<-release
 				} else {
-					deadline, ok := req.Context().Deadline()
-					if !ok {
-						t.Fatal("expected queued mutating request to have a timeout")
-					}
+					// A zero time reports a missing deadline to the test goroutine.
+					deadline, _ := req.Context().Deadline()
 					derivedDeadlineCh <- deadline
 				}
 
@@ -8259,26 +9829,21 @@ func TestClientRenewsMutatingRequestTimeoutAfterLimiterWait(t *testing.T) {
 	}()
 	<-started
 
+	// The queued request's deadline is fixed data rather than a timer, so a
+	// stalled host cannot expire it while the request waits for the slot.
+	parent := newFixedDeadlineContext(time.Now().Add(time.Minute))
 	go func() {
-		requestCtx, cancel := context.WithTimeout(context.Background(), 80*time.Millisecond)
-		defer cancel()
-		deadline, ok := requestCtx.Deadline()
-		if !ok {
-			errCh <- fmt.Errorf("expected parent mutating request context to have a deadline")
-			return
-		}
-		parentDeadlineCh <- deadline
-
-		_, err := client.CreateSubscriptionAvailability(requestCtx, "sub-2", []string{"CAN"}, SubscriptionAvailabilityAttributes{})
+		_, err := client.CreateSubscriptionAvailability(parent, "sub-2", []string{"CAN"}, SubscriptionAvailabilityAttributes{})
 		errCh <- err
 	}()
 
+	// The client sizes the queued request's budget from the parent deadline
+	// before it waits for the slot the first request still holds.
 	select {
-	case <-started:
-		t.Fatal("expected second mutating request to wait for limiter")
-	case <-time.After(20 * time.Millisecond):
+	case <-parent.read:
+	case <-time.After(30 * time.Second):
+		t.Fatal("queued mutating request never read its parent deadline")
 	}
-
 	close(release)
 
 	for i := 0; i < 2; i++ {
@@ -8287,12 +9852,14 @@ func TestClientRenewsMutatingRequestTimeoutAfterLimiterWait(t *testing.T) {
 		}
 	}
 
-	parentDeadline := <-parentDeadlineCh
 	derivedDeadline := <-derivedDeadlineCh
-	if !derivedDeadline.After(parentDeadline) {
+	if derivedDeadline.IsZero() {
+		t.Fatal("expected queued mutating request to have a timeout")
+	}
+	if !derivedDeadline.After(parent.deadline) {
 		t.Fatalf(
 			"expected queued request to receive a refreshed timeout deadline after %s, got %s",
-			parentDeadline.Format(time.RFC3339Nano),
+			parent.deadline.Format(time.RFC3339Nano),
 			derivedDeadline.Format(time.RFC3339Nano),
 		)
 	}
@@ -8456,13 +10023,21 @@ func TestGetUsers_WithFiltersAndLimit(t *testing.T) {
 		if values.Get("filter[username]") != "user@example.com" {
 			t.Fatalf("expected filter[username]=user@example.com, got %q", values.Get("filter[username]"))
 		}
+		if values.Get("filter[roles]") != "DEVELOPER,APP_MANAGER" {
+			t.Fatalf("expected filter[roles]=DEVELOPER,APP_MANAGER, got %q", values.Get("filter[roles]"))
+		}
 		if values.Get("limit") != "5" {
 			t.Fatalf("expected limit=5, got %q", values.Get("limit"))
 		}
 		assertAuthorized(t, req)
 	}, response)
 
-	if _, err := client.GetUsers(context.Background(), WithUsersEmail("user@example.com"), WithUsersLimit(5)); err != nil {
+	if _, err := client.GetUsers(
+		context.Background(),
+		WithUsersEmail("user@example.com"),
+		WithUsersRoles([]string{"developer", " app_manager "}),
+		WithUsersLimit(5),
+	); err != nil {
 		t.Fatalf("GetUsers() error: %v", err)
 	}
 }
@@ -8476,8 +10051,12 @@ func TestUpdateUser_SendsRequest(t *testing.T) {
 		if req.URL.Path != "/v1/users/user-1" {
 			t.Fatalf("expected path /v1/users/user-1, got %s", req.URL.Path)
 		}
+		body, err := io.ReadAll(req.Body)
+		if err != nil {
+			t.Fatalf("failed to read request: %v", err)
+		}
 		var payload UserUpdateRequest
-		if err := json.NewDecoder(req.Body).Decode(&payload); err != nil {
+		if err := json.Unmarshal(body, &payload); err != nil {
 			t.Fatalf("failed to decode request: %v", err)
 		}
 		if payload.Data.Type != ResourceTypeUsers {
@@ -8495,6 +10074,19 @@ func TestUpdateUser_SendsRequest(t *testing.T) {
 		if payload.Data.Attributes.AllAppsVisible == nil || *payload.Data.Attributes.AllAppsVisible {
 			t.Fatalf("expected allAppsVisible=false, got %+v", payload.Data.Attributes.AllAppsVisible)
 		}
+		if payload.Data.Relationships == nil || payload.Data.Relationships.VisibleApps == nil {
+			t.Fatal("expected visibleApps relationships")
+		}
+		visibleApps := payload.Data.Relationships.VisibleApps.Data
+		if len(visibleApps) != 2 {
+			t.Fatalf("expected 2 visibleApps relationships, got %d", len(visibleApps))
+		}
+		if visibleApps[0].Type != ResourceTypeApps || visibleApps[0].ID != "app-2" {
+			t.Fatalf("unexpected first visibleApps relationship: %+v", visibleApps[0])
+		}
+		if visibleApps[1].Type != ResourceTypeApps || visibleApps[1].ID != "app-1" {
+			t.Fatalf("unexpected second visibleApps relationship: %+v", visibleApps[1])
+		}
 		assertAuthorized(t, req)
 	}, response)
 
@@ -8502,7 +10094,59 @@ func TestUpdateUser_SendsRequest(t *testing.T) {
 	if _, err := client.UpdateUser(context.Background(), "user-1", UserUpdateAttributes{
 		Roles:          []string{"ADMIN"},
 		AllAppsVisible: &allAppsVisible,
-	}); err != nil {
+	}, []string{" app-2 ", "app-1"}); err != nil {
+		t.Fatalf("UpdateUser() error: %v", err)
+	}
+}
+
+func TestUpdateUser_OmitsVisibleAppsWhenEmpty(t *testing.T) {
+	response := jsonResponse(http.StatusOK, `{"data":{"type":"users","id":"user-1","attributes":{"username":"user@example.com","roles":["ADMIN"],"allAppsVisible":true,"provisioningAllowed":false}}}`)
+	client := newTestClient(t, func(req *http.Request) {
+		if req.Method != http.MethodPatch {
+			t.Fatalf("expected PATCH, got %s", req.Method)
+		}
+		if req.URL.Path != "/v1/users/user-1" {
+			t.Fatalf("expected path /v1/users/user-1, got %s", req.URL.Path)
+		}
+		body, err := io.ReadAll(req.Body)
+		if err != nil {
+			t.Fatalf("failed to read request: %v", err)
+		}
+		var payload UserUpdateRequest
+		if err := json.Unmarshal(body, &payload); err != nil {
+			t.Fatalf("failed to decode request: %v", err)
+		}
+		if payload.Data.Attributes == nil {
+			t.Fatal("expected attributes to be set")
+		}
+		if payload.Data.Attributes.AllAppsVisible != nil {
+			t.Fatalf("expected allAppsVisible to be omitted, got %+v", payload.Data.Attributes.AllAppsVisible)
+		}
+		if payload.Data.Relationships != nil {
+			t.Fatalf("expected relationships to be omitted, got %+v", payload.Data.Relationships)
+		}
+		var envelope struct {
+			Data map[string]json.RawMessage `json:"data"`
+		}
+		if err := json.Unmarshal(body, &envelope); err != nil {
+			t.Fatalf("failed to decode request envelope: %v", err)
+		}
+		if _, ok := envelope.Data["relationships"]; ok {
+			t.Fatalf("expected relationships key to be omitted, got %s", body)
+		}
+		var attributes map[string]json.RawMessage
+		if err := json.Unmarshal(envelope.Data["attributes"], &attributes); err != nil {
+			t.Fatalf("failed to decode request attributes: %v", err)
+		}
+		if _, ok := attributes["allAppsVisible"]; ok {
+			t.Fatalf("expected allAppsVisible key to be omitted, got %s", body)
+		}
+		assertAuthorized(t, req)
+	}, response)
+
+	if _, err := client.UpdateUser(context.Background(), "user-1", UserUpdateAttributes{
+		Roles: []string{"ADMIN"},
+	}, []string{" ", ""}); err != nil {
 		t.Fatalf("UpdateUser() error: %v", err)
 	}
 }
@@ -8683,30 +10327,6 @@ func TestRemoveUserVisibleApps_SendsRequest(t *testing.T) {
 	}
 }
 
-func TestSetUserVisibleApps_SendsRequest(t *testing.T) {
-	response := jsonResponse(http.StatusNoContent, ``)
-	client := newTestClient(t, func(req *http.Request) {
-		if req.Method != http.MethodPatch {
-			t.Fatalf("expected PATCH, got %s", req.Method)
-		}
-		if req.URL.Path != "/v1/users/user-1/relationships/visibleApps" {
-			t.Fatalf("expected path /v1/users/user-1/relationships/visibleApps, got %s", req.URL.Path)
-		}
-		var payload RelationshipRequest
-		if err := json.NewDecoder(req.Body).Decode(&payload); err != nil {
-			t.Fatalf("failed to decode request: %v", err)
-		}
-		if len(payload.Data) != 2 {
-			t.Fatalf("expected 2 relationships, got %d", len(payload.Data))
-		}
-		assertAuthorized(t, req)
-	}, response)
-
-	if err := client.SetUserVisibleApps(context.Background(), "user-1", []string{"app-1", "app-2"}); err != nil {
-		t.Fatalf("SetUserVisibleApps() error: %v", err)
-	}
-}
-
 func TestGetBetaAppReviewDetails_WithAppFilter(t *testing.T) {
 	response := jsonResponse(http.StatusOK, `{"data":[{"type":"betaAppReviewDetails","id":"detail-1","attributes":{"contactEmail":"dev@example.com"}}]}`)
 	client := newTestClient(t, func(req *http.Request) {
@@ -8782,7 +10402,15 @@ func TestUpdateBetaAppReviewDetail_SendsRequest(t *testing.T) {
 }
 
 func TestGetBetaAppReviewSubmissions_WithBuildFilter(t *testing.T) {
-	response := jsonResponse(http.StatusOK, `{"data":[{"type":"betaAppReviewSubmissions","id":"submission-1","attributes":{"betaReviewState":"IN_REVIEW"}}]}`)
+	response := jsonResponse(http.StatusOK, `{
+		"data":[{
+			"type":"betaAppReviewSubmissions",
+			"id":"submission-1",
+			"attributes":{"betaReviewState":"IN_REVIEW"},
+			"relationships":{"build":{"data":{"type":"builds","id":"build-1"}}}
+		}],
+		"included":[{"type":"builds","id":"build-1","attributes":{"version":"42"}}]
+	}`)
 	client := newTestClient(t, func(req *http.Request) {
 		if req.Method != http.MethodGet {
 			t.Fatalf("expected GET, got %s", req.Method)
@@ -8794,11 +10422,38 @@ func TestGetBetaAppReviewSubmissions_WithBuildFilter(t *testing.T) {
 		if values.Get("filter[build]") != "build-1" {
 			t.Fatalf("expected filter[build]=build-1, got %q", values.Get("filter[build]"))
 		}
+		if values.Get("include") != "build" {
+			t.Fatalf("expected include=build, got %q", values.Get("include"))
+		}
 		assertAuthorized(t, req)
 	}, response)
 
-	if _, err := client.GetBetaAppReviewSubmissions(context.Background(), WithBetaAppReviewSubmissionsBuildIDs([]string{"build-1"})); err != nil {
+	submissions, err := client.GetBetaAppReviewSubmissions(
+		context.Background(),
+		WithBetaAppReviewSubmissionsBuildIDs([]string{"build-1"}),
+		WithBetaAppReviewSubmissionsIncludeBuild(),
+	)
+	if err != nil {
 		t.Fatalf("GetBetaAppReviewSubmissions() error: %v", err)
+	}
+	if len(submissions.Data) != 1 {
+		t.Fatalf("expected one submission, got %d", len(submissions.Data))
+	}
+	var relationships struct {
+		Build Relationship `json:"build"`
+	}
+	if err := json.Unmarshal(submissions.Data[0].Relationships, &relationships); err != nil {
+		t.Fatalf("decode build relationship: %v", err)
+	}
+	if relationships.Build.Data.Type != ResourceTypeBuilds || relationships.Build.Data.ID != "build-1" {
+		t.Fatalf("expected build-1 relationship, got %+v", relationships.Build.Data)
+	}
+	var included []Resource[BuildAttributes]
+	if err := json.Unmarshal(submissions.Included, &included); err != nil {
+		t.Fatalf("decode included build: %v", err)
+	}
+	if len(included) != 1 || included[0].ID != "build-1" || included[0].Attributes.Version != "42" {
+		t.Fatalf("expected included build-1 version 42, got %+v", included)
 	}
 }
 
@@ -8849,29 +10504,8 @@ func TestGetBetaAppReviewSubmission(t *testing.T) {
 	}
 }
 
-func TestGetBuildBetaDetails_WithBuildFilter(t *testing.T) {
-	response := jsonResponse(http.StatusOK, `{"data":[{"type":"buildBetaDetails","id":"detail-1","attributes":{"autoNotifyEnabled":true}}]}`)
-	client := newTestClient(t, func(req *http.Request) {
-		if req.Method != http.MethodGet {
-			t.Fatalf("expected GET, got %s", req.Method)
-		}
-		if req.URL.Path != "/v1/buildBetaDetails" {
-			t.Fatalf("expected path /v1/buildBetaDetails, got %s", req.URL.Path)
-		}
-		values := req.URL.Query()
-		if values.Get("filter[build]") != "build-1" {
-			t.Fatalf("expected filter[build]=build-1, got %q", values.Get("filter[build]"))
-		}
-		assertAuthorized(t, req)
-	}, response)
-
-	if _, err := client.GetBuildBetaDetails(context.Background(), WithBuildBetaDetailsBuildIDs([]string{"build-1"})); err != nil {
-		t.Fatalf("GetBuildBetaDetails() error: %v", err)
-	}
-}
-
 func TestGetBuildBetaDetail(t *testing.T) {
-	response := jsonResponse(http.StatusOK, `{"data":{"type":"buildBetaDetails","id":"detail-1","attributes":{"autoNotifyEnabled":true}}}`)
+	response := jsonResponse(http.StatusOK, `{"data":{"type":"buildBetaDetails","id":"detail-1","attributes":{"autoNotifyEnabled":true,"internalBuildState":"PROCESSING","externalBuildState":"READY_FOR_TESTING"}}}`)
 	client := newTestClient(t, func(req *http.Request) {
 		if req.Method != http.MethodGet {
 			t.Fatalf("expected GET, got %s", req.Method)
@@ -8882,8 +10516,15 @@ func TestGetBuildBetaDetail(t *testing.T) {
 		assertAuthorized(t, req)
 	}, response)
 
-	if _, err := client.GetBuildBetaDetail(context.Background(), "detail-1"); err != nil {
+	detail, err := client.GetBuildBetaDetail(context.Background(), "detail-1")
+	if err != nil {
 		t.Fatalf("GetBuildBetaDetail() error: %v", err)
+	}
+	if detail.Data.Attributes.InternalBuildState != "PROCESSING" {
+		t.Fatalf("expected internalBuildState to remain available in responses, got %q", detail.Data.Attributes.InternalBuildState)
+	}
+	if detail.Data.Attributes.ExternalBuildState != "READY_FOR_TESTING" {
+		t.Fatalf("expected externalBuildState to remain available in responses, got %q", detail.Data.Attributes.ExternalBuildState)
 	}
 }
 
@@ -9053,7 +10694,7 @@ func TestGetBetaGroupPublicLinkUsages(t *testing.T) {
 }
 
 func TestGetBetaGroupTesterUsages(t *testing.T) {
-	response := jsonResponse(http.StatusOK, `{"data":[{"type":"betaGroupMetrics","id":"metric-1","attributes":{"testerCount":12}}]}`)
+	response := jsonResponse(http.StatusOK, `{"data":[{"type":"appsBetaTesterUsages","dataPoints":[{"start":"2026-08-01T00:00:00Z","end":"2026-08-02T00:00:00Z","values":{"sessionCount":12,"crashCount":1,"feedbackCount":2}}],"dimensions":{"betaTesters":{"data":{"type":"betaTesters","id":"tester-1"}}}}],"links":{"self":"https://api.example.test/metrics"}}`)
 	client := newTestClient(t, func(req *http.Request) {
 		if req.Method != http.MethodGet {
 			t.Fatalf("expected GET, got %s", req.Method)
@@ -9067,8 +10708,22 @@ func TestGetBetaGroupTesterUsages(t *testing.T) {
 		assertAuthorized(t, req)
 	}, response)
 
-	if _, err := client.GetBetaGroupTesterUsages(context.Background(), "group-1"); err != nil {
+	metrics, err := client.GetBetaGroupTesterUsages(context.Background(), "group-1")
+	if err != nil {
 		t.Fatalf("GetBetaGroupTesterUsages() error: %v", err)
+	}
+	if len(metrics.Data) != 1 || len(metrics.Data[0].DataPoints) != 1 || metrics.Data[0].Dimensions == nil || metrics.Data[0].Dimensions.BetaTesters == nil || metrics.Data[0].Dimensions.BetaTesters.Data == nil || metrics.Data[0].Dimensions.BetaTesters.Data.ID != "tester-1" {
+		t.Fatalf("unexpected decoded metrics: %+v", metrics)
+	}
+}
+
+func TestBetaGroupTesterUsageDimensionDataAcceptsSchemaString(t *testing.T) {
+	var response BetaGroupTesterUsagesResponse
+	if err := json.Unmarshal([]byte(`{"data":[{"dimensions":{"betaTesters":{"data":"tester-1"}}}],"links":{}}`), &response); err != nil {
+		t.Fatalf("unexpected schema-shaped response error: %v", err)
+	}
+	if response.Data[0].Dimensions.BetaTesters.Data.ID != "tester-1" {
+		t.Fatalf("unexpected tester ID: %+v", response.Data[0].Dimensions.BetaTesters.Data)
 	}
 }
 
@@ -9094,7 +10749,8 @@ func TestGetDevices_WithFilters(t *testing.T) {
 		assertAuthorized(t, req)
 	}, response)
 
-	if _, err := client.GetDevices(context.Background(),
+	if _, err := client.GetDevices(
+		context.Background(),
 		WithDevicesFilterUDIDs([]string{"UDID1", "UDID2"}),
 		WithDevicesFilterPlatforms([]string{"ios"}),
 		WithDevicesFilterStatuses([]string{"enabled"}),
@@ -9140,7 +10796,8 @@ func TestGetDevices_WithFiltersAndLimit(t *testing.T) {
 		assertAuthorized(t, req)
 	}, response)
 
-	if _, err := client.GetDevices(context.Background(),
+	if _, err := client.GetDevices(
+		context.Background(),
 		WithDevicesNames([]string{"My iPhone"}),
 		WithDevicesPlatform("IOS"),
 		WithDevicesStatus("ENABLED"),
@@ -9707,7 +11364,8 @@ func TestGetAppEncryptionDeclarationsForApp(t *testing.T) {
 		assertAuthorized(t, req)
 	}, response)
 
-	if _, err := client.GetAppEncryptionDeclarations(context.Background(), "app-1",
+	if _, err := client.GetAppEncryptionDeclarations(
+		context.Background(), "app-1",
 		WithAppEncryptionDeclarationsBuildIDs([]string{"build-1", "build-2"}),
 		WithAppEncryptionDeclarationsFields([]string{"appDescription", "exempt"}),
 		WithAppEncryptionDeclarationsDocumentFields([]string{"fileName", "fileSize"}),
@@ -9744,7 +11402,8 @@ func TestGetAppEncryptionDeclaration(t *testing.T) {
 		assertAuthorized(t, req)
 	}, response)
 
-	if _, err := client.GetAppEncryptionDeclaration(context.Background(), "decl-1",
+	if _, err := client.GetAppEncryptionDeclaration(
+		context.Background(), "decl-1",
 		WithAppEncryptionDeclarationsFields([]string{"appDescription", "exempt"}),
 		WithAppEncryptionDeclarationsDocumentFields([]string{"fileName", "fileSize"}),
 		WithAppEncryptionDeclarationsInclude([]string{"appEncryptionDeclarationDocument"}),
@@ -9856,7 +11515,8 @@ func TestGetAppEncryptionDeclarationsForAppResource(t *testing.T) {
 		assertAuthorized(t, req)
 	}, response)
 
-	if _, err := client.GetAppEncryptionDeclarationsForApp(context.Background(), "app-1",
+	if _, err := client.GetAppEncryptionDeclarationsForApp(
+		context.Background(), "app-1",
 		WithAppEncryptionDeclarationsBuildIDs([]string{"build-1", "build-2"}),
 		WithAppEncryptionDeclarationsFields([]string{"appDescription", "exempt"}),
 		WithAppEncryptionDeclarationsDocumentFields([]string{"fileName", "fileSize"}),
@@ -10255,7 +11915,8 @@ func TestGetAndroidToIosAppMappingDetails(t *testing.T) {
 		assertAuthorized(t, req)
 	}, response)
 
-	_, err := client.GetAndroidToIosAppMappingDetails(context.Background(), "app-1",
+	_, err := client.GetAndroidToIosAppMappingDetails(
+		context.Background(), "app-1",
 		WithAndroidToIosAppMappingDetailsFields([]string{"packageName"}),
 		WithAndroidToIosAppMappingDetailsLimit(20),
 	)
@@ -10283,7 +11944,8 @@ func TestGetAndroidToIosAppMappingDetail(t *testing.T) {
 		assertAuthorized(t, req)
 	}, response)
 
-	_, err := client.GetAndroidToIosAppMappingDetail(context.Background(), "map-1",
+	_, err := client.GetAndroidToIosAppMappingDetail(
+		context.Background(), "map-1",
 		WithAndroidToIosAppMappingDetailsFields([]string{"packageName"}),
 		WithAndroidToIosAppMappingDetailsLimit(20),
 	)
@@ -10448,6 +12110,25 @@ func TestCreateWinBackOffer_SendsRequest(t *testing.T) {
 		if len(payload.Data.Relationships.Prices.Data) != 1 {
 			t.Fatalf("expected 1 price relationship, got %d", len(payload.Data.Relationships.Prices.Data))
 		}
+		if payload.Data.Relationships.Prices.Data[0].ID != "${price-1}" {
+			t.Fatalf("expected temporary price id ${price-1}, got %q", payload.Data.Relationships.Prices.Data[0].ID)
+		}
+		if len(payload.Included) != 1 {
+			t.Fatalf("expected 1 included price, got %d", len(payload.Included))
+		}
+		included := payload.Included[0]
+		if included.Type != ResourceTypeWinBackOfferPrices || included.ID != "${price-1}" {
+			t.Fatalf("unexpected included item: %+v", included)
+		}
+		if included.Relationships == nil {
+			t.Fatal("expected included price relationships")
+		}
+		if included.Relationships.Territory.Data.Type != ResourceTypeTerritories || included.Relationships.Territory.Data.ID != "USA" {
+			t.Fatalf("unexpected included territory relationship: %+v", included.Relationships.Territory.Data)
+		}
+		if included.Relationships.SubscriptionPricePoint.Data.Type != ResourceTypeSubscriptionPricePoints || included.Relationships.SubscriptionPricePoint.Data.ID != "price-point-1" {
+			t.Fatalf("unexpected included subscriptionPricePoint relationship: %+v", included.Relationships.SubscriptionPricePoint.Data)
+		}
 		assertAuthorized(t, req)
 	}, response)
 
@@ -10472,8 +12153,22 @@ func TestCreateWinBackOffer_SendsRequest(t *testing.T) {
 					Data: ResourceData{Type: ResourceTypeSubscriptions, ID: "sub-1"},
 				},
 				Prices: RelationshipList{Data: []ResourceData{
-					{Type: ResourceTypeWinBackOfferPrices, ID: "price-1"},
+					{Type: ResourceTypeWinBackOfferPrices, ID: "${price-1}"},
 				}},
+			},
+		},
+		Included: []WinBackOfferPriceInlineCreate{
+			{
+				Type: ResourceTypeWinBackOfferPrices,
+				ID:   "${price-1}",
+				Relationships: &WinBackOfferPriceRelationships{
+					Territory: Relationship{
+						Data: ResourceData{Type: ResourceTypeTerritories, ID: "USA"},
+					},
+					SubscriptionPricePoint: &Relationship{
+						Data: ResourceData{Type: ResourceTypeSubscriptionPricePoints, ID: "price-point-1"},
+					},
+				},
 			},
 		},
 	}
@@ -10858,7 +12553,7 @@ func TestListBetaBuildLocalizationsGlobal_WithBuildFilter(t *testing.T) {
 }
 
 func TestListReviewSubmissionsGlobal_UsesV1ReviewSubmissionsPath(t *testing.T) {
-	response := jsonResponse(http.StatusOK, `{"data":[{"type":"reviewSubmissions","id":"rs-1","attributes":{"platform":"IOS","state":"READY_FOR_REVIEW"}}]}`)
+	response := jsonResponse(http.StatusOK, `{"data":[{"type":"reviewSubmissions","id":"rs-1","attributes":{"platform":"IOS","state":"READY_FOR_REVIEW"}}],"links":{"self":"https://api.appstoreconnect.apple.com/v1/reviewSubmissions"}}`)
 	client := newTestClient(t, func(req *http.Request) {
 		if req.Method != http.MethodGet {
 			t.Fatalf("expected GET, got %s", req.Method)
@@ -10886,7 +12581,7 @@ func TestListReviewSubmissionsGlobal_UsesV1ReviewSubmissionsPath(t *testing.T) {
 }
 
 func TestListReviewSubmissionsGlobal_WithFilters(t *testing.T) {
-	response := jsonResponse(http.StatusOK, `{"data":[]}`)
+	response := jsonResponse(http.StatusOK, `{"data":[],"links":{"self":"https://api.appstoreconnect.apple.com/v1/reviewSubmissions"}}`)
 	client := newTestClient(t, func(req *http.Request) {
 		if req.URL.Path != "/v1/reviewSubmissions" {
 			t.Fatalf("expected path /v1/reviewSubmissions, got %s", req.URL.Path)
@@ -11054,6 +12749,82 @@ func TestNewRequest_AcceptsSafePath(t *testing.T) {
 		}
 		if req == nil {
 			t.Errorf("newRequest(%q) returned nil request", path)
+		}
+	}
+}
+
+func TestGetCiWorkflowRawPreservesUnknownFields(t *testing.T) {
+	body := `{"data":{"type":"ciWorkflows","id":"wf-1","attributes":{"name":"Deploy","clean":false,"isEnabled":false,"unknownFutureField":{"nested":true}}}}`
+	response := jsonResponse(http.StatusOK, body)
+	client := newTestClient(t, func(req *http.Request) {
+		if req.Method != http.MethodGet {
+			t.Fatalf("expected GET, got %s", req.Method)
+		}
+		if req.URL.Path != "/v1/ciWorkflows/wf-1" {
+			t.Fatalf("expected path /v1/ciWorkflows/wf-1, got %s", req.URL.Path)
+		}
+		if include := req.URL.Query().Get("include"); include != "product,repository" {
+			t.Fatalf("expected include=product,repository, got %q", include)
+		}
+		assertAuthorized(t, req)
+	}, response)
+
+	got, err := client.GetCiWorkflowRaw(context.Background(), "wf-1", "product", "repository")
+	if err != nil {
+		t.Fatalf("GetCiWorkflowRaw() error: %v", err)
+	}
+
+	var decoded struct {
+		Data struct {
+			Attributes map[string]json.RawMessage `json:"attributes"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(got, &decoded); err != nil {
+		t.Fatalf("decode raw workflow: %v", err)
+	}
+	for _, key := range []string{"clean", "isEnabled", "unknownFutureField"} {
+		if _, ok := decoded.Data.Attributes[key]; !ok {
+			t.Fatalf("expected attribute %q to survive the raw read, got %v", key, decoded.Data.Attributes)
+		}
+	}
+}
+
+func TestCreateCiWorkflowRawPreservesDisabledState(t *testing.T) {
+	body := `{"data":{"type":"ciWorkflows","id":"wf-copy","attributes":{"name":"Nightly","isEnabled":false,"unknownFutureField":true}}}`
+	response := jsonResponse(http.StatusCreated, body)
+	client := newTestClient(t, func(req *http.Request) {
+		if req.Method != http.MethodPost {
+			t.Fatalf("expected POST, got %s", req.Method)
+		}
+		if req.URL.Path != "/v1/ciWorkflows" {
+			t.Fatalf("expected path /v1/ciWorkflows, got %s", req.URL.Path)
+		}
+		assertAuthorized(t, req)
+	}, response)
+
+	got, err := client.CreateCiWorkflowRaw(context.Background(), json.RawMessage(`{"data":{"type":"ciWorkflows"}}`))
+	if err != nil {
+		t.Fatalf("CreateCiWorkflowRaw() error: %v", err)
+	}
+
+	var decoded struct {
+		Data struct {
+			Attributes map[string]json.RawMessage `json:"attributes"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(got, &decoded); err != nil {
+		t.Fatalf("decode raw create response: %v", err)
+	}
+	var enabled *bool
+	if err := json.Unmarshal(decoded.Data.Attributes["isEnabled"], &enabled); err != nil {
+		t.Fatalf("decode isEnabled: %v", err)
+	}
+	if enabled == nil || *enabled {
+		t.Fatalf("expected isEnabled=false, got %s", decoded.Data.Attributes["isEnabled"])
+	}
+	for _, key := range []string{"isEnabled", "unknownFutureField"} {
+		if _, ok := decoded.Data.Attributes[key]; !ok {
+			t.Fatalf("expected attribute %q to survive the raw create response, got %v", key, decoded.Data.Attributes)
 		}
 	}
 }

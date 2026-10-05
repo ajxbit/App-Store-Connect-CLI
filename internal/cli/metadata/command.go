@@ -25,8 +25,9 @@ Phase 1 scope:
 
 Keyword workflow:
   - ` + "`asc metadata keywords ...`" + ` manages the canonical version-localization ` + "`keywords`" + ` field
-  - raw App Store Connect ` + "`searchKeywords`" + ` relationship APIs remain under
-    ` + "`asc apps search-keywords ...`" + ` and ` + "`asc localizations search-keywords ...`" + `
+  - ` + "`asc apps search-keywords list`" + ` reads app-level ` + "`searchKeywords`" + `
+  - ` + "`asc apps search-keywords set`" + ` updates the supported version-localization ` + "`keywords`" + ` attribute
+  - version-localization linkage operations remain under ` + "`asc localizations search-keywords ...`" + `
 
 Not yet included in this group:
   - categories, review information, age ratings, screenshots
@@ -34,14 +35,22 @@ Not yet included in this group:
 Note: copyright is managed via "asc versions create --copyright" or "asc versions update --copyright".
 
 Examples:
+  asc metadata init --dir "./metadata" --version "1.2.3" --locale "en-US"
   asc metadata pull --app "APP_ID" --version "1.2.3" --dir "./metadata"
   asc metadata pull --app "APP_ID" --version "1.2.3" --platform IOS --dir "./metadata"
+  asc metadata plan --app "APP_ID" --version "1.2.3" --dir "./metadata"
+  asc metadata approve --review-dir ".asc/metadata/review" --all
+  asc metadata apply --app "APP_ID" --version "1.2.3" --dir "./metadata" --review-dir ".asc/metadata/review" --confirm
   asc metadata keywords import --dir "./metadata" --version "1.2.3" --locale "en-US" --input "./keywords.csv"`,
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
 		Subcommands: []*ffcli.Command{
+			MetadataInitCommand(),
 			MetadataPullCommand(),
+			MetadataPlanCommand(),
+			MetadataApproveCommand(),
 			MetadataApplyCommand(),
+			MetadataStatusCommand(),
 			MetadataKeywordsCommand(),
 			MetadataPushCommand(),
 			MetadataValidateCommand(),

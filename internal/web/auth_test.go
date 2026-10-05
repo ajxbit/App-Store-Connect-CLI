@@ -12,22 +12,76 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"math/big"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
+
+	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/asc"
 )
 
 type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
 	return f(req)
+}
+
+func TestAuthStatusErrorsExposeHTTPStatus(t *testing.T) {
+	tests := []struct {
+		name string
+		err  interface{ HTTPStatusCode() int }
+	}{
+		{name: "session info", err: &sessionInfoStatusError{Status: http.StatusUnauthorized}},
+		{name: "two-factor verification", err: &twoFAVerificationFailedError{Status: http.StatusForbidden}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.err.HTTPStatusCode(); got < 400 || got > 599 {
+				t.Fatalf("HTTPStatusCode() = %d, want an HTTP error status", got)
+			}
+		})
+	}
+}
+
+func TestInvalidCredentialsClassificationScansUnboundedRawCodes(t *testing.T) {
+	codes := make([]map[string]string, 12)
+	for i := 0; i < 11; i++ {
+		codes[i] = map[string]string{"code": fmt.Sprintf("NOISE-%02d", i)}
+	}
+	codes[11] = map[string]string{"code": "-20101"}
+	body, err := json.Marshal(map[string]any{"serviceErrors": codes})
+	if err != nil {
+		t.Fatalf("marshal response body: %v", err)
+	}
+
+	if !isInvalidAppleAccountCredentialsSigninComplete(http.StatusUnauthorized, body) {
+		t.Fatal("invalid-credentials classifier did not inspect the raw code beyond the display cap")
+	}
+}
+
+func TestNewClientPreservesProviderIdentity(t *testing.T) {
+	client := NewClient(&AuthSession{
+		Client:           &http.Client{},
+		PublicProviderID: " TEAM123 ",
+		ProviderName:     " Example Team ",
+	})
+
+	if client.publicProviderID != "TEAM123" {
+		t.Fatalf("publicProviderID = %q", client.publicProviderID)
+	}
+	if client.providerName != "Example Team" {
+		t.Fatalf("providerName = %q", client.providerName)
+	}
 }
 
 func TestLogWebAuthHTTPRedactsSensitiveQueryValues(t *testing.T) {
@@ -85,6 +139,138 @@ func TestLogWebAuthHTTPRedactsSensitiveQueryValues(t *testing.T) {
 	}
 	if !strings.Contains(output, "%5BREDACTED%5D") {
 		t.Fatalf("expected redacted marker in debug output, got %q", output)
+	}
+}
+
+type diagnosticCaptureHandler struct {
+	values map[string]string
+}
+
+func (h *diagnosticCaptureHandler) Enabled(context.Context, slog.Level) bool { return true }
+
+func (h *diagnosticCaptureHandler) Handle(_ context.Context, record slog.Record) error {
+	record.Attrs(func(attr slog.Attr) bool {
+		h.values[attr.Key] = fmt.Sprint(attr.Value.Any())
+		return true
+	})
+	return nil
+}
+
+func (h *diagnosticCaptureHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
+
+func (h *diagnosticCaptureHandler) WithGroup(string) slog.Handler { return h }
+
+func TestLogWebAuthHTTPBoundsAndSanitizesProviderDiagnostics(t *testing.T) {
+	origLogger := webDebugLogger
+	origDebugEnabled := webDebugEnabledFn
+	t.Cleanup(func() {
+		webDebugLogger = origLogger
+		webDebugEnabledFn = origDebugEnabled
+	})
+
+	handler := &diagnosticCaptureHandler{values: make(map[string]string)}
+	webDebugLogger = slog.New(handler)
+	webDebugEnabledFn = func() bool { return true }
+
+	codes := make([]map[string]string, 12)
+	for i := range codes {
+		codes[i] = map[string]string{
+			"code": fmt.Sprintf("CODE-%02d-%s", i, strings.Repeat("x", 300)),
+		}
+	}
+	codes[0]["code"] = "CODE-00-bad\x1b[2J\n" + strings.Repeat("x", 300)
+	body, err := json.Marshal(map[string]any{"errors": codes})
+	if err != nil {
+		t.Fatalf("marshal response body: %v", err)
+	}
+	requestID := "request\x1b[31m\n" + strings.Repeat("é", 200) + string([]byte{0xff})
+	correlationKey := "correlation\u202e" + strings.Repeat("c", 400)
+	resp := &http.Response{
+		StatusCode: http.StatusUnprocessableEntity,
+		Header: http.Header{
+			"X-Apple-Request-Uuid":           []string{requestID},
+			"X-Apple-Jingle-Correlation-Key": []string{correlationKey},
+		},
+	}
+
+	logWebAuthHTTP("signin_complete", nil, resp, body, nil)
+
+	for _, key := range []string{"request_id", "correlation_key", "codes"} {
+		value := handler.values[key]
+		if !utf8.ValidString(value) {
+			t.Fatalf("%s is not valid UTF-8: %q", key, value)
+		}
+		if asc.HasInterpretedTerminalSequence(value) {
+			t.Fatalf("%s retained interpreted terminal characters: %q", key, value)
+		}
+	}
+	for _, key := range []string{"request_id", "correlation_key"} {
+		if value := handler.values[key]; len(value) > 256 || !strings.HasSuffix(value, "...") {
+			t.Fatalf("%s projection is not bounded to 256 bytes: len=%d value=%q", key, len(value), value)
+		}
+	}
+	codeValue := handler.values["codes"]
+	if strings.Contains(codeValue, "CODE-10-") || strings.Contains(codeValue, "CODE-11-") || !strings.Contains(codeValue, "... and 2 more") {
+		t.Fatalf("codes projection is not count-bounded: %q", codeValue)
+	}
+}
+
+func TestSanitizeWebAuthURLForLogRedactsTransactionTaxJobID(t *testing.T) {
+	const jobID = "txn-tax-job-secret-9f3c"
+	rawURL := "https://appstoreconnect.apple.com/WebObjects/iTunesConnect.woa/ra/paymentConsolidation/providers/123/sapVendorNumbers/456/reports/" + jobID + "/status?year=2026&regionCurrencyIds=13%2C88&signature=secret"
+
+	got := sanitizeWebAuthURLForLog(rawURL)
+	for _, secret := range []string{jobID, "/providers/123/", "/sapVendorNumbers/456/", "13%2C88", "13,88", "secret"} {
+		if strings.Contains(got, secret) {
+			t.Fatalf("sanitized URL leaked Transaction Tax value %q: %q", secret, got)
+		}
+	}
+	if !strings.Contains(got, "reports/%5BREDACTED%5D/status") {
+		t.Fatalf("sanitized URL did not redact Transaction Tax job path: %q", got)
+	}
+	if !strings.Contains(got, "providers/%5BREDACTED%5D") || !strings.Contains(got, "sapVendorNumbers/%5BREDACTED%5D") {
+		t.Fatalf("sanitized URL did not redact provider and SAP vendor path values: %q", got)
+	}
+	if !strings.Contains(got, "regionCurrencyIds=%5BREDACTED%5D") {
+		t.Fatalf("sanitized URL did not redact region currency IDs: %q", got)
+	}
+}
+
+func TestLogWebAuthHTTPRedactsTransactionTaxTransportError(t *testing.T) {
+	origLogger := webDebugLogger
+	origDebugEnabled := webDebugEnabledFn
+	t.Cleanup(func() {
+		webDebugLogger = origLogger
+		webDebugEnabledFn = origDebugEnabled
+	})
+
+	var logs bytes.Buffer
+	webDebugLogger = slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{
+		Level: slog.LevelInfo,
+		ReplaceAttr: func(_ []string, attr slog.Attr) slog.Attr {
+			if attr.Key == slog.TimeKey {
+				return slog.Attr{}
+			}
+			return attr
+		},
+	}))
+	webDebugEnabledFn = func() bool { return true }
+
+	const jobID = "txn-tax-job-secret-9f3c"
+	pollURL := "https://appstoreconnect.apple.com" + transactionTaxFinancePath + "/providers/123/sapVendorNumbers/456/reports/" + jobID + "/status"
+	req, err := http.NewRequest(http.MethodGet, pollURL, nil)
+	if err != nil {
+		t.Fatalf("build request: %v", err)
+	}
+	resp := &http.Response{StatusCode: http.StatusBadGateway, Header: make(http.Header)}
+	logWebAuthHTTP("iris_request", req, resp, nil, &url.Error{Op: "Get", URL: pollURL, Err: errors.New("poll transport secret")})
+
+	output := logs.String()
+	if strings.Contains(output, jobID) || strings.Contains(output, "poll transport secret") || strings.Contains(output, "/providers/123/") || strings.Contains(output, "/sapVendorNumbers/456/") {
+		t.Fatalf("Transaction Tax transport error leaked into debug output: %q", output)
+	}
+	if !strings.Contains(output, "stage=iris_request") || !strings.Contains(output, "status=502") || !strings.Contains(output, "transaction tax request failed") {
+		t.Fatalf("expected safe stage/status/error diagnostics, got %q", output)
 	}
 }
 
@@ -421,12 +607,16 @@ func TestSubmitTwoFactorCodeUsesPreparedPhoneFlow(t *testing.T) {
 						PhoneNumber struct {
 							ID int `json:"id"`
 						} `json:"phoneNumber"`
+						Mode string `json:"mode"`
 					}
 					if err := json.NewDecoder(req.Body).Decode(&payload); err != nil {
 						t.Fatalf("decode phone delivery payload: %v", err)
 					}
 					if payload.PhoneNumber.ID != 7 {
 						t.Fatalf("expected delivery phone id 7, got %d", payload.PhoneNumber.ID)
+					}
+					if payload.Mode != "voice" {
+						t.Fatalf("expected delivery mode voice, got %q", payload.Mode)
 					}
 					return &http.Response{
 						StatusCode: http.StatusNoContent,
@@ -452,8 +642,8 @@ func TestSubmitTwoFactorCodeUsesPreparedPhoneFlow(t *testing.T) {
 					if payload.SecurityCode.Code != "123456" {
 						t.Fatalf("expected 2fa code 123456, got %q", payload.SecurityCode.Code)
 					}
-					if payload.Mode != "sms" {
-						t.Fatalf("expected sms mode, got %q", payload.Mode)
+					if payload.Mode != "voice" {
+						t.Fatalf("expected voice mode, got %q", payload.Mode)
 					}
 					return &http.Response{
 						StatusCode: http.StatusOK,
@@ -486,7 +676,7 @@ func TestSubmitTwoFactorCodeUsesPreparedPhoneFlow(t *testing.T) {
 		SCNT:                 "scnt-token",
 		twoFactorMethod:      twoFactorMethodPhone,
 		twoFactorPhoneID:     7,
-		twoFactorPhoneMode:   "sms",
+		twoFactorPhoneMode:   "voice",
 		twoFactorDestination: "+1 (•••) •••-••66",
 	}
 
@@ -712,6 +902,161 @@ func TestSubmitTwoFactorCodeRequestsPhoneDeliveryBeforeVerification(t *testing.T
 
 	if err := SubmitTwoFactorCode(context.Background(), session, "123456"); err != nil {
 		t.Fatalf("SubmitTwoFactorCode returned error: %v", err)
+	}
+}
+
+func TestSelectProviderByPublicProviderID(t *testing.T) {
+	requests := 0
+	session := &AuthSession{
+		Client: &http.Client{
+			Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				requests++
+				switch requests {
+				case 1:
+					if req.Method != http.MethodGet || req.URL.String() != olympusSessionURL {
+						t.Fatalf("unexpected initial request %s %s", req.Method, req.URL.String())
+					}
+					return &http.Response{
+						StatusCode: http.StatusOK,
+						Header:     make(http.Header),
+						Body: io.NopCloser(strings.NewReader(`{
+							"provider": {"providerId": 111, "publicProviderId": "TEAM111", "name": "Old Team"},
+							"availableProviders": [
+								{"providerId": 111, "publicProviderId": "TEAM111", "name": "Old Team"},
+								{"providerId": 222, "publicProviderId": "TEAM222", "name": "New Team"}
+							],
+							"user": {"emailAddress": "user@example.com"}
+						}`)),
+					}, nil
+				case 2:
+					if req.Method != http.MethodPost || req.URL.String() != olympusSessionURL {
+						t.Fatalf("unexpected provider selection request %s %s", req.Method, req.URL.String())
+					}
+					if got := req.Header.Get("X-Requested-With"); got != "olympus-ui" {
+						t.Fatalf("expected X-Requested-With olympus-ui, got %q", got)
+					}
+					var payload struct {
+						Provider struct {
+							ProviderID int64 `json:"providerId"`
+						} `json:"provider"`
+					}
+					if err := json.NewDecoder(req.Body).Decode(&payload); err != nil {
+						t.Fatalf("decode provider selection payload: %v", err)
+					}
+					if payload.Provider.ProviderID != 222 {
+						t.Fatalf("expected providerId 222, got %d", payload.Provider.ProviderID)
+					}
+					return &http.Response{
+						StatusCode: http.StatusOK,
+						Header:     make(http.Header),
+						Body:       io.NopCloser(strings.NewReader(`{}`)),
+					}, nil
+				case 3:
+					if req.Method != http.MethodGet || req.URL.String() != olympusSessionURL {
+						t.Fatalf("unexpected refresh request %s %s", req.Method, req.URL.String())
+					}
+					return &http.Response{
+						StatusCode: http.StatusOK,
+						Header:     make(http.Header),
+						Body: io.NopCloser(strings.NewReader(`{
+							"provider": {"providerId": 222, "publicProviderId": "TEAM222", "name": "New Team"},
+							"user": {"emailAddress": "user@example.com"}
+						}`)),
+					}, nil
+				default:
+					t.Fatalf("unexpected extra request %d: %s %s", requests, req.Method, req.URL.String())
+					return nil, nil
+				}
+			}),
+		},
+	}
+
+	err := SelectProvider(context.Background(), session, ProviderSelection{PublicProviderID: "team222"})
+	if err != nil {
+		t.Fatalf("SelectProvider returned error: %v", err)
+	}
+	if session.ProviderID != 222 {
+		t.Fatalf("expected provider id 222, got %d", session.ProviderID)
+	}
+	if session.PublicProviderID != "TEAM222" {
+		t.Fatalf("expected public provider id TEAM222, got %q", session.PublicProviderID)
+	}
+	if session.TeamID != "222" {
+		t.Fatalf("expected team id 222, got %q", session.TeamID)
+	}
+	if session.UserEmail != "user@example.com" {
+		t.Fatalf("expected user email user@example.com, got %q", session.UserEmail)
+	}
+	if requests != 3 {
+		t.Fatalf("expected 3 requests, got %d", requests)
+	}
+}
+
+func TestSelectProviderRejectsUnknownPublicProviderID(t *testing.T) {
+	session := &AuthSession{
+		Client: &http.Client{
+			Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				if req.Method != http.MethodGet || req.URL.String() != olympusSessionURL {
+					t.Fatalf("unexpected request %s %s", req.Method, req.URL.String())
+				}
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     make(http.Header),
+					Body: io.NopCloser(strings.NewReader(`{
+						"provider": {"providerId": 111, "publicProviderId": "TEAM111", "name": "Old Team"},
+						"availableProviders": [
+							{"providerId": 111, "publicProviderId": "TEAM111", "name": "Old Team"}
+						],
+						"user": {"emailAddress": "user@example.com"}
+					}`)),
+				}, nil
+			}),
+		},
+	}
+
+	err := SelectProvider(context.Background(), session, ProviderSelection{PublicProviderID: "TEAM404"})
+	if err == nil {
+		t.Fatal("expected unknown provider error")
+	}
+	if !strings.Contains(err.Error(), "TEAM404") || !strings.Contains(err.Error(), "TEAM111") {
+		t.Fatalf("expected error to include requested and available providers, got %v", err)
+	}
+}
+
+func TestSelectProviderRejectsMismatchedProviderIDs(t *testing.T) {
+	requests := 0
+	session := &AuthSession{
+		Client: &http.Client{
+			Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				requests++
+				if req.Method != http.MethodGet || req.URL.String() != olympusSessionURL {
+					t.Fatalf("unexpected request %s %s", req.Method, req.URL.String())
+				}
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     make(http.Header),
+					Body: io.NopCloser(strings.NewReader(`{
+						"provider": {"providerId": 111, "publicProviderId": "TEAM111", "name": "Old Team"},
+						"availableProviders": [
+							{"providerId": 111, "publicProviderId": "TEAM111", "name": "Old Team"},
+							{"providerId": 222, "publicProviderId": "TEAM222", "name": "New Team"}
+						],
+						"user": {"emailAddress": "user@example.com"}
+					}`)),
+				}, nil
+			}),
+		},
+	}
+
+	err := SelectProvider(context.Background(), session, ProviderSelection{ProviderID: 999, PublicProviderID: "TEAM222"})
+	if err == nil {
+		t.Fatal("expected provider mismatch error")
+	}
+	if !strings.Contains(err.Error(), "TEAM222") || !strings.Contains(err.Error(), "999") || !strings.Contains(err.Error(), "222") {
+		t.Fatalf("expected error to include mismatched provider ids, got %v", err)
+	}
+	if requests != 1 {
+		t.Fatalf("expected mismatch to stop before provider selection POST, got %d requests", requests)
 	}
 }
 
@@ -1007,4 +1352,199 @@ func generateSelfSignedCertPEM(t *testing.T) ([]byte, *x509.Certificate) {
 		Bytes: der,
 	}
 	return pem.EncodeToMemory(block), cert
+}
+
+// A stale cached cookie jar makes the post-2FA App Store Connect session
+// bootstrap fail with 401 even though Apple already accepted the 2FA code.
+// The error must identify that as a finalization failure carrying the status.
+func TestSubmitTwoFactorCodeReportsStaleSessionBootstrapAfterAcceptedCode(t *testing.T) {
+	var trustedDeviceCalls, trustCalls, sessionCalls int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/appleauth/auth/verify/trusteddevice/securitycode":
+			trustedDeviceCalls++
+			w.WriteHeader(http.StatusNoContent)
+		case "/appleauth/auth/2sv/trust":
+			trustCalls++
+			w.WriteHeader(http.StatusNoContent)
+		case "/olympus/v1/session":
+			sessionCalls++
+			w.WriteHeader(http.StatusUnauthorized)
+		default:
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(server.Close)
+
+	session := &AuthSession{
+		Client:           newTestServerRoutedClient(t, server),
+		ServiceKey:       "service-key",
+		AppleIDSessionID: "session-id",
+		SCNT:             "scnt-token",
+		twoFactorMethod:  twoFactorMethodTrustedDevice,
+	}
+
+	err := SubmitTwoFactorCode(context.Background(), session, "123456")
+	if err == nil {
+		t.Fatal("expected stale session bootstrap error")
+	}
+	if trustedDeviceCalls != 1 || trustCalls != 1 || sessionCalls != 1 {
+		t.Fatalf("expected one call per 2fa stage, got trusted-device=%d trust=%d session=%d", trustedDeviceCalls, trustCalls, sessionCalls)
+	}
+
+	var finalizeErr *TwoFactorFinalizationError
+	if !errors.As(err, &finalizeErr) {
+		t.Fatalf("expected *TwoFactorFinalizationError, got %T: %v", err, err)
+	}
+	if finalizeErr.Status != http.StatusUnauthorized {
+		t.Fatalf("expected status 401, got %d", finalizeErr.Status)
+	}
+	if finalizeErr.HTTPStatusCode() != http.StatusUnauthorized {
+		t.Fatalf("expected HTTPStatusCode 401, got %d", finalizeErr.HTTPStatusCode())
+	}
+	if !IsStaleSessionAfterTwoFactor(err) {
+		t.Fatal("expected a stale-session finalization failure to be retryable with a fresh login")
+	}
+	if got := err.Error(); !strings.Contains(got, "401") {
+		t.Fatalf("expected finalization error to report the HTTP status, got %q", got)
+	}
+	if got := err.Error(); strings.Contains(got, "verification") {
+		t.Fatalf("expected finalization error to avoid verification wording, got %q", got)
+	}
+}
+
+func TestIsStaleSessionAfterTwoFactorIgnoresUnrelatedFailures(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{name: "nil", err: nil, want: false},
+		{name: "unauthorized", err: &TwoFactorFinalizationError{Status: http.StatusUnauthorized}, want: true},
+		{name: "forbidden", err: &TwoFactorFinalizationError{Status: http.StatusForbidden}, want: true},
+		{name: "server error", err: &TwoFactorFinalizationError{Status: http.StatusInternalServerError}, want: false},
+		{name: "wrapped", err: fmt.Errorf("wrapped: %w", &TwoFactorFinalizationError{Status: http.StatusUnauthorized}), want: true},
+		{name: "rejected code", err: &twoFAVerificationFailedError{Kind: "trusted-device", Status: http.StatusBadRequest}, want: false},
+		{name: "bare session info", err: &sessionInfoStatusError{Status: http.StatusUnauthorized}, want: false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := IsStaleSessionAfterTwoFactor(tc.err); got != tc.want {
+				t.Fatalf("IsStaleSessionAfterTwoFactor(%v) = %v, want %v", tc.err, got, tc.want)
+			}
+		})
+	}
+}
+
+// newTestServerRoutedClient routes Apple's hardcoded auth hosts at a local
+// httptest server while preserving request paths, headers, and bodies.
+func newTestServerRoutedClient(t *testing.T, server *httptest.Server) *http.Client {
+	t.Helper()
+	serverURL, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatalf("parse test server url: %v", err)
+	}
+	transport := server.Client().Transport
+	return &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		routed := req.Clone(req.Context())
+		routed.URL.Scheme = serverURL.Scheme
+		routed.URL.Host = serverURL.Host
+		routed.Host = ""
+		return transport.RoundTrip(routed)
+	})}
+}
+
+// Apple already consumed the submitted code before the trust step runs, so a
+// 401 from /2sv/trust means the reused cookie jar is stale, not that the code
+// was wrong. It must classify like the session-bootstrap failure so callers
+// discard the proven-stale jar and retry fresh.
+func TestSubmitTwoFactorCodeReportsStaleTrustFailureAfterAcceptedCode(t *testing.T) {
+	var trustedDeviceCalls, trustCalls, sessionCalls int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/appleauth/auth/verify/trusteddevice/securitycode":
+			trustedDeviceCalls++
+			w.WriteHeader(http.StatusNoContent)
+		case "/appleauth/auth/2sv/trust":
+			trustCalls++
+			w.WriteHeader(http.StatusUnauthorized)
+		case "/olympus/v1/session":
+			sessionCalls++
+			w.WriteHeader(http.StatusOK)
+		default:
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(server.Close)
+
+	session := &AuthSession{
+		Client:           newTestServerRoutedClient(t, server),
+		ServiceKey:       "service-key",
+		AppleIDSessionID: "session-id",
+		SCNT:             "scnt-token",
+		twoFactorMethod:  twoFactorMethodTrustedDevice,
+	}
+
+	err := SubmitTwoFactorCode(context.Background(), session, "123456")
+	if err == nil {
+		t.Fatal("expected the trust failure to be reported")
+	}
+	if trustedDeviceCalls != 1 || trustCalls != 1 || sessionCalls != 0 {
+		t.Fatalf("expected the flow to stop at the trust step, got trusted-device=%d trust=%d session=%d", trustedDeviceCalls, trustCalls, sessionCalls)
+	}
+
+	var finalizeErr *TwoFactorFinalizationError
+	if !errors.As(err, &finalizeErr) {
+		t.Fatalf("expected *TwoFactorFinalizationError, got %T: %v", err, err)
+	}
+	if finalizeErr.Status != http.StatusUnauthorized {
+		t.Fatalf("expected status 401, got %d", finalizeErr.Status)
+	}
+	if !IsStaleSessionAfterTwoFactor(err) {
+		t.Fatal("expected a 401 from the trust step to be retryable with a fresh login")
+	}
+	if got := err.Error(); !strings.Contains(got, "401") {
+		t.Fatalf("expected the error to report the HTTP status, got %q", got)
+	}
+	if got := err.Error(); strings.Contains(got, "verification") {
+		t.Fatalf("expected the error to avoid verification wording, got %q", got)
+	}
+}
+
+// A trust step that fails for a reason unrelated to authorization must not be
+// treated as a stale cached session: retrying fresh burns another 2FA code.
+func TestSubmitTwoFactorCodeKeepsNonAuthorizationTrustFailuresUnretryable(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/appleauth/auth/verify/trusteddevice/securitycode":
+			w.WriteHeader(http.StatusNoContent)
+		case "/appleauth/auth/2sv/trust":
+			w.WriteHeader(http.StatusInternalServerError)
+		default:
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(server.Close)
+
+	session := &AuthSession{
+		Client:           newTestServerRoutedClient(t, server),
+		ServiceKey:       "service-key",
+		AppleIDSessionID: "session-id",
+		SCNT:             "scnt-token",
+		twoFactorMethod:  twoFactorMethodTrustedDevice,
+	}
+
+	err := SubmitTwoFactorCode(context.Background(), session, "123456")
+	if err == nil {
+		t.Fatal("expected the trust failure to be reported")
+	}
+	if IsStaleSessionAfterTwoFactor(err) {
+		t.Fatalf("expected a 500 from the trust step to stay unretryable, got %v", err)
+	}
+	if got := err.Error(); !strings.Contains(got, "500") {
+		t.Fatalf("expected the error to report the HTTP status, got %q", got)
+	}
 }

@@ -1,47 +1,24 @@
 package shared
 
 import (
-	"crypto/rand"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
-	"strings"
+
+	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/secureopen"
 )
 
 func createTempFileNoFollowWithPerm(dir string, pattern string, perm os.FileMode) (*os.File, error) {
-	// Mirror os.CreateTemp pattern semantics: replace the last "*" with random text,
-	// or append random text if no "*" is present.
-	prefix := pattern
-	suffix := ""
-	if idx := strings.LastIndex(pattern, "*"); idx != -1 {
-		prefix = pattern[:idx]
-		suffix = pattern[idx+1:]
-	}
-
-	const maxAttempts = 10_000
-	var randBytes [12]byte
-	for i := 0; i < maxAttempts; i++ {
-		if _, err := rand.Read(randBytes[:]); err != nil {
-			return nil, err
-		}
-		name := prefix + hex.EncodeToString(randBytes[:]) + suffix
-		f, err := OpenNewFileNoFollow(filepath.Join(dir, name), perm)
-		if err == nil {
-			return f, nil
-		}
-		if errors.Is(err, os.ErrExist) {
-			continue
-		}
-		return nil, err
-	}
-
-	return nil, fmt.Errorf("failed to create temporary file in %q", dir)
+	return secureopen.CreateTempNoFollow(dir, pattern, perm)
 }
 
 func writeFileNoSymlinkOverwrite(path string, perm os.FileMode, tempPattern string, backupPattern string, write func(*os.File) (int64, error)) (int64, error) {
+	return writeFileNoSymlinkOverwriteWithPreparationAndCreator(path, perm, tempPattern, backupPattern, nil, nil, write)
+}
+
+func writeFileNoSymlinkOverwriteWithPreparationAndCreator(path string, perm os.FileMode, tempPattern string, backupPattern string, prepare func(*os.File) error, create func(*os.Root, string, os.FileMode) (*os.File, error), write func(*os.File) (int64, error)) (int64, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return 0, err
 	}
@@ -60,16 +37,37 @@ func writeFileNoSymlinkOverwrite(path string, perm os.FileMode, tempPattern stri
 		return 0, err
 	}
 
-	tempFile, err := createTempFileNoFollowWithPerm(filepath.Dir(path), tempPattern, perm)
-	if err != nil {
-		return 0, err
+	var tempFile *os.File
+	var tempPath string
+	var tempRoot *os.Root
+	var tempName string
+	var err error
+	if create == nil {
+		tempFile, err = createTempFileNoFollowWithPerm(filepath.Dir(path), tempPattern, perm)
+		if err != nil {
+			return 0, err
+		}
+		tempPath = tempFile.Name()
+	} else {
+		tempRoot, err = os.OpenRoot(filepath.Dir(path))
+		if err != nil {
+			return 0, err
+		}
+		defer tempRoot.Close()
+		tempFile, tempName, err = secureopen.CreateTempNoFollowInRootWithCreator(tempRoot, ".", tempPattern, perm, create)
+		if err != nil {
+			return 0, err
+		}
+		tempPath = filepath.Join(tempRoot.Name(), tempName)
 	}
 	defer tempFile.Close()
-
-	tempPath := tempFile.Name()
 	success := false
 	defer func() {
 		if !success {
+			if tempRoot != nil {
+				_ = tempRoot.Remove(tempName)
+				return
+			}
 			_ = os.Remove(tempPath)
 		}
 	}()
@@ -77,6 +75,11 @@ func writeFileNoSymlinkOverwrite(path string, perm os.FileMode, tempPattern stri
 	// Ensure final file permissions match caller intent rather than process umask.
 	if err := tempFile.Chmod(perm); err != nil {
 		return 0, err
+	}
+	if prepare != nil {
+		if err := prepare(tempFile); err != nil {
+			return 0, err
+		}
 	}
 
 	written, err := write(tempFile)

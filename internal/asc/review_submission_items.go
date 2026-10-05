@@ -11,18 +11,20 @@ import (
 type ReviewSubmissionItemType string
 
 const (
-	ReviewSubmissionItemTypeAppStoreVersion                    ReviewSubmissionItemType = "appStoreVersions"
-	ReviewSubmissionItemTypeAppCustomProductPageVersion        ReviewSubmissionItemType = "appCustomProductPageVersions"
-	ReviewSubmissionItemTypeAppCustomProductPage               ReviewSubmissionItemType = "appCustomProductPages"
-	ReviewSubmissionItemTypeAppEvent                           ReviewSubmissionItemType = "appEvents"
-	ReviewSubmissionItemTypeAppStoreVersionExperiment          ReviewSubmissionItemType = "appStoreVersionExperiments"
-	ReviewSubmissionItemTypeAppStoreVersionExperimentTreatment ReviewSubmissionItemType = "appStoreVersionExperimentTreatments"
-	ReviewSubmissionItemTypeBackgroundAssetVersion             ReviewSubmissionItemType = "backgroundAssetVersions"
-	ReviewSubmissionItemTypeGameCenterAchievementVersion       ReviewSubmissionItemType = "gameCenterAchievementVersions"
-	ReviewSubmissionItemTypeGameCenterActivityVersion          ReviewSubmissionItemType = "gameCenterActivityVersions"
-	ReviewSubmissionItemTypeGameCenterChallengeVersion         ReviewSubmissionItemType = "gameCenterChallengeVersions"
-	ReviewSubmissionItemTypeGameCenterLeaderboardSetVersion    ReviewSubmissionItemType = "gameCenterLeaderboardSetVersions"
-	ReviewSubmissionItemTypeGameCenterLeaderboardVersion       ReviewSubmissionItemType = "gameCenterLeaderboardVersions"
+	ReviewSubmissionItemTypeAppStoreVersion                 ReviewSubmissionItemType = "appStoreVersions"
+	ReviewSubmissionItemTypeAppCustomProductPageVersion     ReviewSubmissionItemType = "appCustomProductPageVersions"
+	ReviewSubmissionItemTypeAppEvent                        ReviewSubmissionItemType = "appEvents"
+	ReviewSubmissionItemTypeAppStoreVersionExperiment       ReviewSubmissionItemType = "appStoreVersionExperiments"
+	ReviewSubmissionItemTypeAppStoreVersionExperimentV2     ReviewSubmissionItemType = "appStoreVersionExperimentsV2"
+	ReviewSubmissionItemTypeBackgroundAssetVersion          ReviewSubmissionItemType = "backgroundAssetVersions"
+	ReviewSubmissionItemTypeGameCenterAchievementVersion    ReviewSubmissionItemType = "gameCenterAchievementVersions"
+	ReviewSubmissionItemTypeGameCenterActivityVersion       ReviewSubmissionItemType = "gameCenterActivityVersions"
+	ReviewSubmissionItemTypeGameCenterChallengeVersion      ReviewSubmissionItemType = "gameCenterChallengeVersions"
+	ReviewSubmissionItemTypeGameCenterLeaderboardSetVersion ReviewSubmissionItemType = "gameCenterLeaderboardSetVersions"
+	ReviewSubmissionItemTypeGameCenterLeaderboardVersion    ReviewSubmissionItemType = "gameCenterLeaderboardVersions"
+	ReviewSubmissionItemTypeInAppPurchaseVersion            ReviewSubmissionItemType = "inAppPurchaseVersions"
+	ReviewSubmissionItemTypeSubscriptionVersion             ReviewSubmissionItemType = "subscriptionVersions"
+	ReviewSubmissionItemTypeSubscriptionGroupVersion        ReviewSubmissionItemType = "subscriptionGroupVersions"
 )
 
 // ReviewSubmissionItemAttributes describes review submission item attributes.
@@ -32,20 +34,20 @@ type ReviewSubmissionItemAttributes struct {
 
 // ReviewSubmissionItemRelationships describes review submission item relationships.
 type ReviewSubmissionItemRelationships struct {
-	ReviewSubmission                   *Relationship `json:"reviewSubmission,omitempty"`
-	AppStoreVersion                    *Relationship `json:"appStoreVersion,omitempty"`
-	AppCustomProductPageVersion        *Relationship `json:"appCustomProductPageVersion,omitempty"`
-	AppCustomProductPage               *Relationship `json:"appCustomProductPage,omitempty"`
-	AppEvent                           *Relationship `json:"appEvent,omitempty"`
-	AppStoreVersionExperiment          *Relationship `json:"appStoreVersionExperiment,omitempty"`
-	AppStoreVersionExperimentV2        *Relationship `json:"appStoreVersionExperimentV2,omitempty"`
-	AppStoreVersionExperimentTreatment *Relationship `json:"appStoreVersionExperimentTreatment,omitempty"`
-	BackgroundAssetVersion             *Relationship `json:"backgroundAssetVersion,omitempty"`
-	GameCenterAchievementVersion       *Relationship `json:"gameCenterAchievementVersion,omitempty"`
-	GameCenterActivityVersion          *Relationship `json:"gameCenterActivityVersion,omitempty"`
-	GameCenterChallengeVersion         *Relationship `json:"gameCenterChallengeVersion,omitempty"`
-	GameCenterLeaderboardSetVersion    *Relationship `json:"gameCenterLeaderboardSetVersion,omitempty"`
-	GameCenterLeaderboardVersion       *Relationship `json:"gameCenterLeaderboardVersion,omitempty"`
+	AppStoreVersion                 *Relationship `json:"appStoreVersion,omitempty"`
+	AppCustomProductPageVersion     *Relationship `json:"appCustomProductPageVersion,omitempty"`
+	AppEvent                        *Relationship `json:"appEvent,omitempty"`
+	AppStoreVersionExperiment       *Relationship `json:"appStoreVersionExperiment,omitempty"`
+	AppStoreVersionExperimentV2     *Relationship `json:"appStoreVersionExperimentV2,omitempty"`
+	BackgroundAssetVersion          *Relationship `json:"backgroundAssetVersion,omitempty"`
+	GameCenterAchievementVersion    *Relationship `json:"gameCenterAchievementVersion,omitempty"`
+	GameCenterActivityVersion       *Relationship `json:"gameCenterActivityVersion,omitempty"`
+	GameCenterChallengeVersion      *Relationship `json:"gameCenterChallengeVersion,omitempty"`
+	GameCenterLeaderboardSetVersion *Relationship `json:"gameCenterLeaderboardSetVersion,omitempty"`
+	GameCenterLeaderboardVersion    *Relationship `json:"gameCenterLeaderboardVersion,omitempty"`
+	InAppPurchaseVersion            *Relationship `json:"inAppPurchaseVersion,omitempty"`
+	SubscriptionVersion             *Relationship `json:"subscriptionVersion,omitempty"`
+	SubscriptionGroupVersion        *Relationship `json:"subscriptionGroupVersion,omitempty"`
 }
 
 // ReviewSubmissionItemResource represents a review submission item resource.
@@ -54,12 +56,15 @@ type ReviewSubmissionItemResource struct {
 	ID            string                             `json:"id"`
 	Attributes    ReviewSubmissionItemAttributes     `json:"attributes"`
 	Relationships *ReviewSubmissionItemRelationships `json:"relationships,omitempty"`
+	Links         json.RawMessage                    `json:"links,omitempty"`
 }
 
 // ReviewSubmissionItemsResponse is the response from review submission items list endpoints.
 type ReviewSubmissionItemsResponse struct {
-	Data  []ReviewSubmissionItemResource `json:"data"`
-	Links Links                          `json:"links"`
+	Data     []ReviewSubmissionItemResource `json:"data"`
+	Links    Links                          `json:"links"`
+	Included json.RawMessage                `json:"included,omitempty"`
+	Meta     json.RawMessage                `json:"meta,omitempty"`
 }
 
 // GetLinks returns the links field for pagination.
@@ -72,26 +77,30 @@ func (r *ReviewSubmissionItemsResponse) GetData() any {
 	return r.Data
 }
 
-// ReviewSubmissionItemResponse is the response from review submission item detail endpoints.
+// ReviewSubmissionItemResponse is the response from review submission item mutation endpoints.
 type ReviewSubmissionItemResponse struct {
-	Data  ReviewSubmissionItemResource `json:"data"`
-	Links Links                        `json:"links"`
+	Data     ReviewSubmissionItemResource `json:"data"`
+	Links    Links                        `json:"links"`
+	Included json.RawMessage              `json:"included,omitempty"`
 }
 
 // ReviewSubmissionItemCreateRelationships describes relationships for create requests.
 type ReviewSubmissionItemCreateRelationships struct {
-	ReviewSubmission                   *Relationship `json:"reviewSubmission"`
-	AppStoreVersion                    *Relationship `json:"appStoreVersion,omitempty"`
-	AppCustomProductPageVersion        *Relationship `json:"appCustomProductPageVersion,omitempty"`
-	AppEvent                           *Relationship `json:"appEvent,omitempty"`
-	AppStoreVersionExperiment          *Relationship `json:"appStoreVersionExperiment,omitempty"`
-	AppStoreVersionExperimentTreatment *Relationship `json:"appStoreVersionExperimentTreatment,omitempty"`
-	BackgroundAssetVersion             *Relationship `json:"backgroundAssetVersion,omitempty"`
-	GameCenterAchievementVersion       *Relationship `json:"gameCenterAchievementVersion,omitempty"`
-	GameCenterActivityVersion          *Relationship `json:"gameCenterActivityVersion,omitempty"`
-	GameCenterChallengeVersion         *Relationship `json:"gameCenterChallengeVersion,omitempty"`
-	GameCenterLeaderboardSetVersion    *Relationship `json:"gameCenterLeaderboardSetVersion,omitempty"`
-	GameCenterLeaderboardVersion       *Relationship `json:"gameCenterLeaderboardVersion,omitempty"`
+	ReviewSubmission                *Relationship `json:"reviewSubmission"`
+	AppStoreVersion                 *Relationship `json:"appStoreVersion,omitempty"`
+	AppCustomProductPageVersion     *Relationship `json:"appCustomProductPageVersion,omitempty"`
+	AppEvent                        *Relationship `json:"appEvent,omitempty"`
+	AppStoreVersionExperiment       *Relationship `json:"appStoreVersionExperiment,omitempty"`
+	AppStoreVersionExperimentV2     *Relationship `json:"appStoreVersionExperimentV2,omitempty"`
+	BackgroundAssetVersion          *Relationship `json:"backgroundAssetVersion,omitempty"`
+	GameCenterAchievementVersion    *Relationship `json:"gameCenterAchievementVersion,omitempty"`
+	GameCenterActivityVersion       *Relationship `json:"gameCenterActivityVersion,omitempty"`
+	GameCenterChallengeVersion      *Relationship `json:"gameCenterChallengeVersion,omitempty"`
+	GameCenterLeaderboardSetVersion *Relationship `json:"gameCenterLeaderboardSetVersion,omitempty"`
+	GameCenterLeaderboardVersion    *Relationship `json:"gameCenterLeaderboardVersion,omitempty"`
+	InAppPurchaseVersion            *Relationship `json:"inAppPurchaseVersion,omitempty"`
+	SubscriptionVersion             *Relationship `json:"subscriptionVersion,omitempty"`
+	SubscriptionGroupVersion        *Relationship `json:"subscriptionGroupVersion,omitempty"`
 }
 
 // ReviewSubmissionItemCreateData is the data portion of a review submission item create request.
@@ -107,11 +116,28 @@ type ReviewSubmissionItemCreateRequest struct {
 
 type reviewSubmissionItemTypeSpec struct {
 	canonical         ReviewSubmissionItemType
-	aliases           []string
 	applyRelationship func(*ReviewSubmissionItemCreateRelationships, string)
 }
 
 var reviewSubmissionItemTypeSpecs = []reviewSubmissionItemTypeSpec{
+	{
+		canonical: ReviewSubmissionItemTypeInAppPurchaseVersion,
+		applyRelationship: func(relationships *ReviewSubmissionItemCreateRelationships, itemID string) {
+			relationships.InAppPurchaseVersion = reviewSubmissionItemRelationship(ResourceTypeInAppPurchaseVersions, itemID)
+		},
+	},
+	{
+		canonical: ReviewSubmissionItemTypeSubscriptionVersion,
+		applyRelationship: func(relationships *ReviewSubmissionItemCreateRelationships, itemID string) {
+			relationships.SubscriptionVersion = reviewSubmissionItemRelationship(ResourceTypeSubscriptionVersions, itemID)
+		},
+	},
+	{
+		canonical: ReviewSubmissionItemTypeSubscriptionGroupVersion,
+		applyRelationship: func(relationships *ReviewSubmissionItemCreateRelationships, itemID string) {
+			relationships.SubscriptionGroupVersion = reviewSubmissionItemRelationship(ResourceTypeSubscriptionGroupVersions, itemID)
+		},
+	},
 	{
 		canonical: ReviewSubmissionItemTypeAppStoreVersion,
 		applyRelationship: func(relationships *ReviewSubmissionItemCreateRelationships, itemID string) {
@@ -120,7 +146,6 @@ var reviewSubmissionItemTypeSpecs = []reviewSubmissionItemTypeSpec{
 	},
 	{
 		canonical: ReviewSubmissionItemTypeAppCustomProductPageVersion,
-		aliases:   []string{string(ReviewSubmissionItemTypeAppCustomProductPage)},
 		applyRelationship: func(relationships *ReviewSubmissionItemCreateRelationships, itemID string) {
 			relationships.AppCustomProductPageVersion = reviewSubmissionItemRelationship(ResourceTypeAppCustomProductPageVersions, itemID)
 		},
@@ -138,9 +163,9 @@ var reviewSubmissionItemTypeSpecs = []reviewSubmissionItemTypeSpec{
 		},
 	},
 	{
-		canonical: ReviewSubmissionItemTypeAppStoreVersionExperimentTreatment,
+		canonical: ReviewSubmissionItemTypeAppStoreVersionExperimentV2,
 		applyRelationship: func(relationships *ReviewSubmissionItemCreateRelationships, itemID string) {
-			relationships.AppStoreVersionExperimentTreatment = reviewSubmissionItemRelationship(ResourceTypeAppStoreVersionExperimentTreatments, itemID)
+			relationships.AppStoreVersionExperimentV2 = reviewSubmissionItemRelationship(ResourceTypeAppStoreVersionExperiments, itemID)
 		},
 	},
 	{
@@ -197,11 +222,6 @@ func ParseReviewSubmissionItemType(value string) (ReviewSubmissionItemType, bool
 		if normalized == string(spec.canonical) {
 			return spec.canonical, true
 		}
-		for _, alias := range spec.aliases {
-			if normalized == alias {
-				return spec.canonical, true
-			}
-		}
 	}
 	return "", false
 }
@@ -230,9 +250,8 @@ func reviewSubmissionItemRelationship(resourceType ResourceType, itemID string) 
 
 // ReviewSubmissionItemUpdateAttributes describes attributes for updating a review submission item.
 type ReviewSubmissionItemUpdateAttributes struct {
-	State    *string `json:"state,omitempty"`
-	Resolved *bool   `json:"resolved,omitempty"`
-	Removed  *bool   `json:"removed,omitempty"`
+	Resolved *NullableBool `json:"resolved,omitempty"`
+	Removed  *NullableBool `json:"removed,omitempty"`
 }
 
 // ReviewSubmissionItemUpdateData is the data portion of a review submission item update request.
@@ -255,6 +274,17 @@ type ReviewSubmissionItemDeleteResult struct {
 
 // GetReviewSubmissionItems retrieves items for a review submission.
 func (c *Client) GetReviewSubmissionItems(ctx context.Context, submissionID string, opts ...ReviewSubmissionItemsOption) (*ReviewSubmissionItemsResponse, error) {
+	return c.getReviewSubmissionItems(ctx, submissionID, false, opts...)
+}
+
+// GetReviewSubmissionItemsStrict retrieves review submission items and
+// validates the complete JSON:API collection envelope before callers use it as
+// mutation preflight evidence.
+func (c *Client) GetReviewSubmissionItemsStrict(ctx context.Context, submissionID string, opts ...ReviewSubmissionItemsOption) (*ReviewSubmissionItemsResponse, error) {
+	return c.getReviewSubmissionItems(ctx, submissionID, true, opts...)
+}
+
+func (c *Client) getReviewSubmissionItems(ctx context.Context, submissionID string, strict bool, opts ...ReviewSubmissionItemsOption) (*ReviewSubmissionItemsResponse, error) {
 	query := &reviewSubmissionItemsQuery{}
 	for _, opt := range opts {
 		opt(query)
@@ -286,26 +316,10 @@ func (c *Client) GetReviewSubmissionItems(ctx context.Context, submissionID stri
 	if err := json.Unmarshal(data, &response); err != nil {
 		return nil, fmt.Errorf("failed to parse review submission items response: %w", err)
 	}
-
-	return &response, nil
-}
-
-// GetReviewSubmissionItem retrieves a review submission item by ID.
-func (c *Client) GetReviewSubmissionItem(ctx context.Context, itemID string) (*ReviewSubmissionItemResponse, error) {
-	itemID = strings.TrimSpace(itemID)
-	if itemID == "" {
-		return nil, fmt.Errorf("itemID is required")
-	}
-
-	path := fmt.Sprintf("/v1/reviewSubmissionItems/%s", itemID)
-	data, err := c.do(ctx, "GET", path, nil)
-	if err != nil {
-		return nil, err
-	}
-
-	var response ReviewSubmissionItemResponse
-	if err := json.Unmarshal(data, &response); err != nil {
-		return nil, fmt.Errorf("failed to parse review submission item response: %w", err)
+	if strict {
+		if err := validateReviewSubmissionCollectionEnvelope(data, "review submission items", reviewSubmissionItemCollectionResourceSpec); err != nil {
+			return nil, err
+		}
 	}
 
 	return &response, nil
@@ -361,6 +375,9 @@ func (c *Client) CreateReviewSubmissionItem(ctx context.Context, submissionID st
 	if err := json.Unmarshal(data, &response); err != nil {
 		return nil, fmt.Errorf("failed to parse review submission item response: %w", err)
 	}
+	if err := rejectReviewSubmissionTopLevelErrorsInDocument(data, "review submission item"); err != nil {
+		return nil, err
+	}
 
 	return &response, nil
 }
@@ -393,6 +410,9 @@ func (c *Client) UpdateReviewSubmissionItem(ctx context.Context, itemID string, 
 	var response ReviewSubmissionItemResponse
 	if err := json.Unmarshal(data, &response); err != nil {
 		return nil, fmt.Errorf("failed to parse review submission item response: %w", err)
+	}
+	if err := rejectReviewSubmissionTopLevelErrorsInDocument(data, "review submission item"); err != nil {
+		return nil, err
 	}
 
 	return &response, nil

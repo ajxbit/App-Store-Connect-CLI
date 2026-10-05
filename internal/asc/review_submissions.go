@@ -42,6 +42,7 @@ type ReviewSubmissionResource struct {
 	ID            string                         `json:"id"`
 	Attributes    ReviewSubmissionAttributes     `json:"attributes"`
 	Relationships *ReviewSubmissionRelationships `json:"relationships,omitempty"`
+	Links         json.RawMessage                `json:"links,omitempty"`
 }
 
 // ReviewSubmissionsResponse is the response from review submissions list endpoints.
@@ -49,6 +50,7 @@ type ReviewSubmissionsResponse struct {
 	Data     []ReviewSubmissionResource `json:"data"`
 	Links    Links                      `json:"links"`
 	Included json.RawMessage            `json:"included,omitempty"`
+	Meta     json.RawMessage            `json:"meta,omitempty"`
 }
 
 // GetLinks returns the links field for pagination.
@@ -66,6 +68,31 @@ type ReviewSubmissionResponse struct {
 	Data     ReviewSubmissionResource `json:"data"`
 	Links    Links                    `json:"links"`
 	Included json.RawMessage          `json:"included,omitempty"`
+}
+
+// ReviewSubmissionCreatePartialError reports that App Store Connect returned
+// a created review-submission ID together with a response validation error.
+// Callers can use Response to preserve or roll back the created resource.
+type ReviewSubmissionCreatePartialError struct {
+	Response *ReviewSubmissionResponse
+	Err      error
+}
+
+func (e *ReviewSubmissionCreatePartialError) Error() string {
+	if e == nil {
+		return "<nil>"
+	}
+	if e.Response == nil {
+		return fmt.Sprintf("review submission create response was invalid: %v", e.Err)
+	}
+	return fmt.Sprintf("review submission %q may have been created, but its response was invalid: %v", strings.TrimSpace(e.Response.Data.ID), e.Err)
+}
+
+func (e *ReviewSubmissionCreatePartialError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Err
 }
 
 // ReviewSubmissionItemsLinkagesResponse is the response from review submission item linkage endpoints.
@@ -95,8 +122,9 @@ type ReviewSubmissionCreateRequest struct {
 
 // ReviewSubmissionUpdateAttributes describes attributes for updating a review submission.
 type ReviewSubmissionUpdateAttributes struct {
-	Submitted *bool `json:"submitted,omitempty"`
-	Canceled  *bool `json:"canceled,omitempty"`
+	Platform  *NullablePlatform `json:"platform,omitempty"`
+	Submitted *NullableBool     `json:"submitted,omitempty"`
+	Canceled  *NullableBool     `json:"canceled,omitempty"`
 }
 
 // ReviewSubmissionUpdateData is the data portion of a review submission update request.
@@ -113,6 +141,17 @@ type ReviewSubmissionUpdateRequest struct {
 
 // GetReviewSubmissions retrieves review submissions for an app.
 func (c *Client) GetReviewSubmissions(ctx context.Context, appID string, opts ...ReviewSubmissionsOption) (*ReviewSubmissionsResponse, error) {
+	return c.getReviewSubmissions(ctx, appID, false, opts...)
+}
+
+// GetReviewSubmissionsStrict retrieves review submissions and validates the
+// complete JSON:API collection envelope before callers use it as mutation
+// preflight evidence.
+func (c *Client) GetReviewSubmissionsStrict(ctx context.Context, appID string, opts ...ReviewSubmissionsOption) (*ReviewSubmissionsResponse, error) {
+	return c.getReviewSubmissions(ctx, appID, true, opts...)
+}
+
+func (c *Client) getReviewSubmissions(ctx context.Context, appID string, strict bool, opts ...ReviewSubmissionsOption) (*ReviewSubmissionsResponse, error) {
 	query := &reviewSubmissionsQuery{}
 	for _, opt := range opts {
 		opt(query)
@@ -143,6 +182,11 @@ func (c *Client) GetReviewSubmissions(ctx context.Context, appID string, opts ..
 	var response ReviewSubmissionsResponse
 	if err := json.Unmarshal(data, &response); err != nil {
 		return nil, fmt.Errorf("failed to parse review submissions response: %w", err)
+	}
+	if strict {
+		if err := validateReviewSubmissionCollectionEnvelope(data, "review submissions", reviewSubmissionCollectionResourceSpec); err != nil {
+			return nil, err
+		}
 	}
 
 	return &response, nil
@@ -175,18 +219,34 @@ func (c *Client) ListReviewSubmissions(ctx context.Context, opts ...ReviewSubmis
 	if err := json.Unmarshal(data, &response); err != nil {
 		return nil, fmt.Errorf("failed to parse review submissions response: %w", err)
 	}
-
 	return &response, nil
 }
 
 // GetReviewSubmission retrieves a review submission by ID.
-func (c *Client) GetReviewSubmission(ctx context.Context, submissionID string) (*ReviewSubmissionResponse, error) {
+func (c *Client) GetReviewSubmission(ctx context.Context, submissionID string, opts ...ReviewSubmissionOption) (*ReviewSubmissionResponse, error) {
+	return c.getReviewSubmission(ctx, submissionID, false, opts...)
+}
+
+// GetReviewSubmissionStrict retrieves a review submission and rejects a mixed
+// data-and-errors document before callers use it as mutation preflight evidence.
+func (c *Client) GetReviewSubmissionStrict(ctx context.Context, submissionID string, opts ...ReviewSubmissionOption) (*ReviewSubmissionResponse, error) {
+	return c.getReviewSubmission(ctx, submissionID, true, opts...)
+}
+
+func (c *Client) getReviewSubmission(ctx context.Context, submissionID string, strict bool, opts ...ReviewSubmissionOption) (*ReviewSubmissionResponse, error) {
 	submissionID = strings.TrimSpace(submissionID)
 	if submissionID == "" {
 		return nil, fmt.Errorf("submissionID is required")
 	}
 
+	query := &reviewSubmissionQuery{}
+	for _, opt := range opts {
+		opt(query)
+	}
 	path := fmt.Sprintf("/v1/reviewSubmissions/%s", submissionID)
+	if queryString := buildReviewSubmissionQuery(query); queryString != "" {
+		path += "?" + queryString
+	}
 	data, err := c.do(ctx, "GET", path, nil)
 	if err != nil {
 		return nil, err
@@ -195,6 +255,11 @@ func (c *Client) GetReviewSubmission(ctx context.Context, submissionID string) (
 	var response ReviewSubmissionResponse
 	if err := json.Unmarshal(data, &response); err != nil {
 		return nil, fmt.Errorf("failed to parse review submission response: %w", err)
+	}
+	if strict {
+		if err := rejectReviewSubmissionTopLevelErrorsInDocument(data, "review submission"); err != nil {
+			return nil, err
+		}
 	}
 
 	return &response, nil
@@ -232,6 +297,9 @@ func (c *Client) GetReviewSubmissionItemsRelationships(ctx context.Context, subm
 	var response ReviewSubmissionItemsLinkagesResponse
 	if err := json.Unmarshal(data, &response); err != nil {
 		return nil, fmt.Errorf("failed to parse review submission items relationships response: %w", err)
+	}
+	if err := rejectReviewSubmissionTopLevelErrorsInDocument(data, "review submission items relationships"); err != nil {
+		return nil, err
 	}
 
 	return &response, nil
@@ -276,6 +344,12 @@ func (c *Client) CreateReviewSubmission(ctx context.Context, appID string, platf
 	if err := json.Unmarshal(data, &response); err != nil {
 		return nil, fmt.Errorf("failed to parse review submission response: %w", err)
 	}
+	if err := rejectReviewSubmissionTopLevelErrorsInDocument(data, "review submission"); err != nil {
+		if response.Data.Type == ResourceTypeReviewSubmissions && strings.TrimSpace(response.Data.ID) != "" {
+			return nil, &ReviewSubmissionCreatePartialError{Response: &response, Err: err}
+		}
+		return nil, err
+	}
 
 	return &response, nil
 }
@@ -309,6 +383,9 @@ func (c *Client) UpdateReviewSubmission(ctx context.Context, submissionID string
 	if err := json.Unmarshal(data, &response); err != nil {
 		return nil, fmt.Errorf("failed to parse review submission response: %w", err)
 	}
+	if err := rejectReviewSubmissionTopLevelErrorsInDocument(data, "review submission"); err != nil {
+		return nil, err
+	}
 
 	return &response, nil
 }
@@ -316,11 +393,11 @@ func (c *Client) UpdateReviewSubmission(ctx context.Context, submissionID string
 // SubmitReviewSubmission submits a review submission by ID.
 func (c *Client) SubmitReviewSubmission(ctx context.Context, submissionID string) (*ReviewSubmissionResponse, error) {
 	submitted := true
-	return c.UpdateReviewSubmission(ctx, submissionID, ReviewSubmissionUpdateAttributes{Submitted: &submitted})
+	return c.UpdateReviewSubmission(ctx, submissionID, ReviewSubmissionUpdateAttributes{Submitted: &NullableBool{Value: &submitted}})
 }
 
 // CancelReviewSubmission cancels a review submission by ID.
 func (c *Client) CancelReviewSubmission(ctx context.Context, submissionID string) (*ReviewSubmissionResponse, error) {
 	canceled := true
-	return c.UpdateReviewSubmission(ctx, submissionID, ReviewSubmissionUpdateAttributes{Canceled: &canceled})
+	return c.UpdateReviewSubmission(ctx, submissionID, ReviewSubmissionUpdateAttributes{Canceled: &NullableBool{Value: &canceled}})
 }

@@ -49,7 +49,7 @@ Examples:
 func ExperimentsListCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("experiments list", flag.ExitOnError)
 
-	versionID := fs.String("version-id", "", "App Store version ID (v1 experiments)")
+	versionID := shared.BindResourceIDFlag(fs, "version-id", "appStoreVersions", "App Store version ID (v1 experiments)")
 	appID := fs.String("app", "", "App Store Connect app ID (v2 experiments)")
 	state := fs.String("state", "", "Filter by state(s), comma-separated")
 	limit := fs.Int("limit", 0, "Maximum results per page (1-200)")
@@ -73,10 +73,10 @@ Examples:
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
 			if *limit != 0 && (*limit < 1 || *limit > productPagesMaxLimit) {
-				return fmt.Errorf("experiments list: --limit must be between 1 and %d", productPagesMaxLimit)
+				return shared.UsageErrorf("experiments list: --limit must be between 1 and %d", productPagesMaxLimit)
 			}
 			if err := shared.ValidateNextURL(*next); err != nil {
-				return fmt.Errorf("experiments list: %w", err)
+				return shared.UsageErrorf("experiments list: %v", err)
 			}
 
 			stateValues, err := normalizeExperimentStates(shared.SplitCSVUpper(*state))
@@ -89,7 +89,7 @@ Examples:
 				resolvedAppID := shared.ResolveAppID(*appID)
 				if resolvedAppID == "" {
 					fmt.Fprintln(os.Stderr, "Error: --app is required (or set ASC_APP_ID)")
-					return flag.ErrHelp
+					return shared.MissingRequiredUsageError("--app")
 				}
 
 				client, err := shared.GetASCClient()
@@ -134,7 +134,7 @@ Examples:
 			trimmedVersionID := strings.TrimSpace(*versionID)
 			if trimmedVersionID == "" {
 				fmt.Fprintln(os.Stderr, "Error: --version-id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--version-id")
 			}
 
 			client, err := shared.GetASCClient()
@@ -178,35 +178,35 @@ Examples:
 	}
 }
 
-// ExperimentsGetCommand returns the experiments get subcommand.
+// ExperimentsGetCommand returns the experiments view subcommand.
 func ExperimentsGetCommand() *ffcli.Command {
-	fs := flag.NewFlagSet("experiments get", flag.ExitOnError)
+	fs := flag.NewFlagSet("experiments view", flag.ExitOnError)
 
-	experimentID := fs.String("experiment-id", "", "Experiment ID")
+	experimentID := shared.BindResourceIDFlag(fs, "experiment-id", "appStoreVersionExperiments", "Experiment ID")
 	output := shared.BindOutputFlags(fs)
 	v2 := fs.Bool("v2", false, "Use v2 experiments endpoint")
 
 	return &ffcli.Command{
-		Name:       "get",
-		ShortUsage: "asc product-pages experiments get --experiment-id \"EXPERIMENT_ID\" [--v2]",
-		ShortHelp:  "Get an experiment by ID.",
-		LongHelp: `Get an experiment by ID.
+		Name:       "view",
+		ShortUsage: "asc product-pages experiments view --experiment-id \"EXPERIMENT_ID\" [--v2]",
+		ShortHelp:  "View an experiment by ID.",
+		LongHelp: `View an experiment by ID.
 
 Examples:
-  asc product-pages experiments get --experiment-id "EXPERIMENT_ID"
-  asc product-pages experiments get --experiment-id "EXPERIMENT_ID" --v2`,
+  asc product-pages experiments view --experiment-id "EXPERIMENT_ID"
+  asc product-pages experiments view --experiment-id "EXPERIMENT_ID" --v2`,
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
 			trimmedID := strings.TrimSpace(*experimentID)
 			if trimmedID == "" {
 				fmt.Fprintln(os.Stderr, "Error: --experiment-id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--experiment-id")
 			}
 
 			client, err := shared.GetASCClient()
 			if err != nil {
-				return fmt.Errorf("experiments get: %w", err)
+				return fmt.Errorf("experiments view: %w", err)
 			}
 
 			requestCtx, cancel := shared.ContextWithTimeout(ctx)
@@ -215,14 +215,14 @@ Examples:
 			if *v2 {
 				resp, err := client.GetAppStoreVersionExperimentV2(requestCtx, trimmedID)
 				if err != nil {
-					return fmt.Errorf("experiments get: failed to fetch: %w", err)
+					return fmt.Errorf("experiments view: failed to fetch: %w", err)
 				}
 				return shared.PrintOutput(resp, *output.Output, *output.Pretty)
 			}
 
 			resp, err := client.GetAppStoreVersionExperiment(requestCtx, trimmedID)
 			if err != nil {
-				return fmt.Errorf("experiments get: failed to fetch: %w", err)
+				return fmt.Errorf("experiments view: failed to fetch: %w", err)
 			}
 
 			return shared.PrintOutput(resp, *output.Output, *output.Pretty)
@@ -234,7 +234,7 @@ Examples:
 func ExperimentsCreateCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("experiments create", flag.ExitOnError)
 
-	versionID := fs.String("version-id", "", "App Store version ID (v1 experiments)")
+	versionID := shared.BindResourceIDFlag(fs, "version-id", "appStoreVersions", "App Store version ID (v1 experiments)")
 	appID := fs.String("app", "", "App Store Connect app ID (v2 experiments)")
 	platform := fs.String("platform", "", "Platform: IOS, MAC_OS, TV_OS, VISION_OS (v2 experiments)")
 	name := fs.String("name", "", "Experiment name")
@@ -257,7 +257,7 @@ Examples:
 			nameValue := strings.TrimSpace(*name)
 			if nameValue == "" {
 				fmt.Fprintln(os.Stderr, "Error: --name is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--name")
 			}
 
 			trafficValue, err := parseTrafficProportion(*trafficProportion)
@@ -270,7 +270,7 @@ Examples:
 				resolvedAppID := shared.ResolveAppID(*appID)
 				if resolvedAppID == "" {
 					fmt.Fprintln(os.Stderr, "Error: --app is required (or set ASC_APP_ID)")
-					return flag.ErrHelp
+					return shared.MissingRequiredUsageError("--app")
 				}
 
 				platformValue, err := shared.NormalizePlatform(*platform)
@@ -298,7 +298,7 @@ Examples:
 			trimmedVersionID := strings.TrimSpace(*versionID)
 			if trimmedVersionID == "" {
 				fmt.Fprintln(os.Stderr, "Error: --version-id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--version-id")
 			}
 
 			client, err := shared.GetASCClient()
@@ -323,7 +323,7 @@ Examples:
 func ExperimentsUpdateCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("experiments update", flag.ExitOnError)
 
-	experimentID := fs.String("experiment-id", "", "Experiment ID")
+	experimentID := shared.BindResourceIDFlag(fs, "experiment-id", "appStoreVersionExperiments", "Experiment ID")
 	name := fs.String("name", "", "Update experiment name")
 	trafficProportion := fs.String("traffic-proportion", "", "Update traffic proportion (integer)")
 	var started shared.OptionalBool
@@ -348,7 +348,7 @@ Examples:
 			trimmedID := strings.TrimSpace(*experimentID)
 			if trimmedID == "" {
 				fmt.Fprintln(os.Stderr, "Error: --experiment-id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--experiment-id")
 			}
 
 			attrsName := strings.TrimSpace(*name)
@@ -364,7 +364,7 @@ Examples:
 
 			if attrsName == "" && trafficPtr == nil && !started.IsSet() {
 				fmt.Fprintln(os.Stderr, "Error: --name, --traffic-proportion, or --started is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("")
 			}
 
 			client, err := shared.GetASCClient()
@@ -422,7 +422,7 @@ Examples:
 func ExperimentsDeleteCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("experiments delete", flag.ExitOnError)
 
-	experimentID := fs.String("experiment-id", "", "Experiment ID")
+	experimentID := shared.BindResourceIDFlag(fs, "experiment-id", "appStoreVersionExperiments", "Experiment ID")
 	confirm := fs.Bool("confirm", false, "Confirm deletion")
 	output := shared.BindOutputFlags(fs)
 	v2 := fs.Bool("v2", false, "Use v2 experiments endpoint")
@@ -442,11 +442,11 @@ Examples:
 			trimmedID := strings.TrimSpace(*experimentID)
 			if trimmedID == "" {
 				fmt.Fprintln(os.Stderr, "Error: --experiment-id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--experiment-id")
 			}
 			if !*confirm {
 				fmt.Fprintln(os.Stderr, "Error: --confirm is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--confirm")
 			}
 
 			client, err := shared.GetASCClient()

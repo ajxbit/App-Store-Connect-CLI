@@ -9,36 +9,6 @@ import (
 	"testing"
 )
 
-func TestLocalizationsCommandConstructors(t *testing.T) {
-	top := LocalizationsCommand()
-	if top == nil {
-		t.Fatal("expected localizations command")
-	}
-	if top.Name == "" {
-		t.Fatal("expected command name")
-	}
-	if len(top.Subcommands) == 0 {
-		t.Fatal("expected subcommands")
-	}
-
-	if got := LocalizationsCommand(); got == nil {
-		t.Fatal("expected Command wrapper to return command")
-	}
-
-	if got := LocalizationsPreviewSetsCommand(); got == nil {
-		t.Fatal("expected preview sets command")
-	}
-	if got := LocalizationsSearchKeywordsCommand(); got == nil {
-		t.Fatal("expected search keywords command")
-	}
-	if got := LocalizationsCreateCommand(); got == nil {
-		t.Fatal("expected create command")
-	}
-	if got := LocalizationsSupportedLocalesCommand(); got == nil {
-		t.Fatal("expected supported locales command")
-	}
-}
-
 func TestLocalizationsCreateCommand_MissingFlags(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -127,6 +97,23 @@ func TestLocalizationsUpdateCommand_HelpMentionsCanonicalLocaleForms(t *testing.
 		if !strings.Contains(cmd.LongHelp, want) {
 			t.Fatalf("expected long help to contain %q, got %q", want, cmd.LongHelp)
 		}
+	}
+}
+
+func TestLocalizationsListCommand_IncludeFlagListsSupportedValues(t *testing.T) {
+	cmd := LocalizationsListCommand()
+
+	includeFlag := cmd.FlagSet.Lookup("include")
+	if includeFlag == nil {
+		t.Fatal("expected --include flag on localizations list")
+	}
+	for _, want := range []string{"appStoreVersion", "appScreenshotSets", "appPreviewSets", "searchKeywords"} {
+		if !strings.Contains(includeFlag.Usage, want) {
+			t.Fatalf("expected --include usage to mention %q, got %q", want, includeFlag.Usage)
+		}
+	}
+	if !strings.Contains(cmd.LongHelp, `asc localizations list --version "VERSION_ID" --include "appScreenshotSets,appPreviewSets"`) {
+		t.Fatalf("expected long help to document an --include example, got %q", cmd.LongHelp)
 	}
 }
 

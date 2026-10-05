@@ -25,7 +25,7 @@ func OfferCodeCustomCodesCommand() *ffcli.Command {
 
 Examples:
   asc offer-codes custom-codes list --offer-code-id "OFFER_CODE_ID"
-  asc offer-codes custom-codes get --custom-code-id "CUSTOM_CODE_ID"
+  asc offer-codes custom-codes view --custom-code-id "CUSTOM_CODE_ID"
   asc offer-codes custom-codes create --offer-code-id "OFFER_CODE_ID" --code "SPRING2026" --quantity 10
   asc offer-codes custom-codes update --custom-code-id "CUSTOM_CODE_ID" --active false`,
 		FlagSet:   fs,
@@ -57,6 +57,7 @@ Examples:
   asc offer-codes custom-codes list --offer-code-id "OFFER_CODE_ID" --paginate`,
 		ParentFlag:  "offer-code-id",
 		ParentUsage: "Subscription offer code ID (required)",
+		ParentType:  "subscriptionOfferCodes",
 		LimitMax:    offerCodesMaxLimit,
 		ErrorPrefix: "offer-codes custom-codes list",
 		FetchPage: func(ctx context.Context, client *asc.Client, offerCodeID string, limit int, next string) (asc.PaginatedResponse, error) {
@@ -76,17 +77,18 @@ Examples:
 // OfferCodeCustomCodesGetCommand returns the custom codes get subcommand.
 func OfferCodeCustomCodesGetCommand() *ffcli.Command {
 	return shared.BuildIDGetCommand(shared.IDGetCommandConfig{
-		FlagSetName: "get",
-		Name:        "get",
-		ShortUsage:  "asc offer-codes custom-codes get --custom-code-id ID",
-		ShortHelp:   "Get a custom code by ID.",
-		LongHelp: `Get a custom code by ID.
+		FlagSetName: "view",
+		Name:        "view",
+		ShortUsage:  "asc offer-codes custom-codes view --custom-code-id ID",
+		ShortHelp:   "View a custom code by ID.",
+		LongHelp: `View a custom code by ID.
 
 Examples:
-  asc offer-codes custom-codes get --custom-code-id "CUSTOM_CODE_ID"`,
+  asc offer-codes custom-codes view --custom-code-id "CUSTOM_CODE_ID"`,
 		IDFlag:      "custom-code-id",
 		IDUsage:     "Custom code ID (required)",
-		ErrorPrefix: "offer-codes custom-codes get",
+		IDType:      "subscriptionOfferCodeCustomCodes",
+		ErrorPrefix: "offer-codes custom-codes view",
 		Fetch: func(ctx context.Context, client *asc.Client, id string) (any, error) {
 			return client.GetSubscriptionOfferCodeCustomCode(ctx, id)
 		},
@@ -97,7 +99,7 @@ Examples:
 func OfferCodeCustomCodesCreateCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("create", flag.ExitOnError)
 
-	offerCodeID := fs.String("offer-code-id", "", "Subscription offer code ID (required)")
+	offerCodeID := shared.BindResourceIDFlag(fs, "offer-code-id", "subscriptionOfferCodes", "Subscription offer code ID (required)")
 	code := fs.String("code", "", "Custom code value (required)")
 	quantity := fs.Int("quantity", 0, "Number of codes to create (required)")
 	expirationDate := fs.String("expiration-date", "", "Expiration date (YYYY-MM-DD)")
@@ -118,18 +120,18 @@ Examples:
 			trimmedOfferCodeID := strings.TrimSpace(*offerCodeID)
 			if trimmedOfferCodeID == "" {
 				fmt.Fprintln(os.Stderr, "Error: --offer-code-id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--offer-code-id")
 			}
 
 			trimmedCode := strings.TrimSpace(*code)
 			if trimmedCode == "" {
 				fmt.Fprintln(os.Stderr, "Error: --code is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--code")
 			}
 
 			if *quantity <= 0 {
 				fmt.Fprintln(os.Stderr, "Error: --quantity is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--quantity")
 			}
 
 			var normalizedExpiration *string
@@ -192,6 +194,7 @@ Examples:
   asc offer-codes custom-codes update --custom-code-id "CUSTOM_CODE_ID" --active false`,
 		IDFlag:      "custom-code-id",
 		IDUsage:     "Custom code ID (required)",
+		IDType:      "subscriptionOfferCodeCustomCodes",
 		ErrorPrefix: "offer-codes custom-codes update",
 		Update: func(ctx context.Context, client *asc.Client, id string, active *bool) (any, error) {
 			return client.UpdateSubscriptionOfferCodeCustomCode(ctx, id, asc.SubscriptionOfferCodeCustomCodeUpdateAttributes{Active: active})

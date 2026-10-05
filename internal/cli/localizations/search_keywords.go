@@ -49,7 +49,7 @@ Examples:
 func LocalizationsSearchKeywordsListCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("localizations search-keywords list", flag.ExitOnError)
 
-	localizationID := fs.String("localization-id", "", "App Store version localization ID")
+	localizationID := shared.BindResourceIDFlag(fs, "localization-id", "appStoreVersionLocalizations", "App Store version localization ID")
 	output := shared.BindOutputFlags(fs)
 
 	return &ffcli.Command{
@@ -66,7 +66,7 @@ Examples:
 			trimmedID := strings.TrimSpace(*localizationID)
 			if trimmedID == "" {
 				fmt.Fprintln(os.Stderr, "Error: --localization-id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--localization-id")
 			}
 
 			client, err := shared.GetASCClient()
@@ -91,7 +91,7 @@ Examples:
 func LocalizationsSearchKeywordsAddCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("localizations search-keywords add", flag.ExitOnError)
 
-	localizationID := fs.String("localization-id", "", "App Store version localization ID")
+	localizationID := shared.BindResourceIDFlag(fs, "localization-id", "appStoreVersionLocalizations", "App Store version localization ID")
 	keywords := fs.String("keywords", "", "Keywords (comma-separated)")
 	output := shared.BindOutputFlags(fs)
 
@@ -109,13 +109,13 @@ Examples:
 			trimmedID := strings.TrimSpace(*localizationID)
 			if trimmedID == "" {
 				fmt.Fprintln(os.Stderr, "Error: --localization-id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--localization-id")
 			}
 
 			keywordValues := shared.SplitCSV(*keywords)
 			if len(keywordValues) == 0 {
 				fmt.Fprintln(os.Stderr, "Error: --keywords is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--keywords")
 			}
 
 			client, err := shared.GetASCClient()
@@ -139,7 +139,7 @@ Examples:
 func LocalizationsSearchKeywordsDeleteCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("localizations search-keywords delete", flag.ExitOnError)
 
-	localizationID := fs.String("localization-id", "", "App Store version localization ID")
+	localizationID := shared.BindResourceIDFlag(fs, "localization-id", "appStoreVersionLocalizations", "App Store version localization ID")
 	keywords := fs.String("keywords", "", "Keywords (comma-separated)")
 	confirm := fs.Bool("confirm", false, "Confirm deletion")
 	output := shared.BindOutputFlags(fs)
@@ -158,17 +158,17 @@ Examples:
 			trimmedID := strings.TrimSpace(*localizationID)
 			if trimmedID == "" {
 				fmt.Fprintln(os.Stderr, "Error: --localization-id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--localization-id")
 			}
 			if !*confirm {
 				fmt.Fprintln(os.Stderr, "Error: --confirm is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--confirm")
 			}
 
 			keywordValues := shared.SplitCSV(*keywords)
 			if len(keywordValues) == 0 {
 				fmt.Fprintln(os.Stderr, "Error: --keywords is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--keywords")
 			}
 
 			client, err := shared.GetASCClient()

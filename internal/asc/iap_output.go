@@ -3,6 +3,7 @@ package asc
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 )
 
 // InAppPurchaseDeleteResult represents CLI output for IAP deletions.
@@ -22,6 +23,15 @@ func inAppPurchasesRows(resp *InAppPurchasesV2Response) ([]string, [][]string) {
 			item.Attributes.InAppPurchaseType,
 			item.Attributes.State,
 		})
+	}
+	return headers, rows
+}
+
+func inAppPurchaseVersionsRows(resp *InAppPurchaseVersionsResponse) ([]string, [][]string) {
+	headers := []string{"ID", "Version", "State"}
+	rows := make([][]string, 0, len(resp.Data))
+	for _, item := range resp.Data {
+		rows = append(rows, []string{item.ID, fmt.Sprintf("%d", item.Attributes.Version), item.Attributes.State})
 	}
 	return headers, rows
 }
@@ -61,16 +71,15 @@ func inAppPurchaseDeleteResultRows(result *InAppPurchaseDeleteResult) ([]string,
 	return headers, rows
 }
 
-func inAppPurchaseImagesRows(resp *InAppPurchaseImagesResponse) ([]string, [][]string) {
+func inAppPurchaseImagesV2Rows(resp *InAppPurchaseImagesV2Response) ([]string, [][]string) {
 	headers := []string{"ID", "File Name", "File Size", "State"}
 	rows := make([][]string, 0, len(resp.Data))
 	for _, item := range resp.Data {
-		rows = append(rows, []string{
-			item.ID,
-			item.Attributes.FileName,
-			fmt.Sprintf("%d", item.Attributes.FileSize),
-			item.Attributes.State,
-		})
+		state := ""
+		if item.Attributes.AssetDeliveryState != nil && item.Attributes.AssetDeliveryState.State != nil {
+			state = *item.Attributes.AssetDeliveryState.State
+		}
+		rows = append(rows, []string{item.ID, item.Attributes.FileName, fmt.Sprintf("%d", item.Attributes.FileSize), state})
 	}
 	return headers, rows
 }
@@ -117,9 +126,9 @@ func inAppPurchaseOfferCodePricesRows(resp *InAppPurchaseOfferPricesResponse) ([
 			return nil, nil, err
 		}
 		rows = append(rows, []string{
-			sanitizeTerminal(item.ID),
-			sanitizeTerminal(territoryID),
-			sanitizeTerminal(pricePointID),
+			SanitizeTerminalText(item.ID),
+			SanitizeTerminalText(territoryID),
+			SanitizeTerminalText(pricePointID),
 		})
 	}
 	return headers, rows, nil
@@ -146,11 +155,11 @@ func inAppPurchaseOfferCodeCustomCodesRows(resp *InAppPurchaseOfferCodeCustomCod
 	for _, item := range resp.Data {
 		attrs := item.Attributes
 		rows = append(rows, []string{
-			sanitizeTerminal(item.ID),
-			sanitizeTerminal(attrs.CustomCode),
+			SanitizeTerminalText(item.ID),
+			SanitizeTerminalText(attrs.CustomCode),
 			fmt.Sprintf("%d", attrs.NumberOfCodes),
-			sanitizeTerminal(attrs.ExpirationDate),
-			sanitizeTerminal(attrs.CreatedDate),
+			SanitizeTerminalText(attrs.ExpirationDate),
+			SanitizeTerminalText(attrs.CreatedDate),
 			fmt.Sprintf("%t", attrs.Active),
 		})
 	}
@@ -163,12 +172,12 @@ func inAppPurchaseOfferCodeOneTimeUseCodesRows(resp *InAppPurchaseOfferCodeOneTi
 	for _, item := range resp.Data {
 		attrs := item.Attributes
 		rows = append(rows, []string{
-			sanitizeTerminal(item.ID),
+			SanitizeTerminalText(item.ID),
 			fmt.Sprintf("%d", attrs.NumberOfCodes),
-			sanitizeTerminal(attrs.ExpirationDate),
-			sanitizeTerminal(attrs.CreatedDate),
+			SanitizeTerminalText(attrs.ExpirationDate),
+			SanitizeTerminalText(attrs.CreatedDate),
 			fmt.Sprintf("%t", attrs.Active),
-			sanitizeTerminal(attrs.Environment),
+			SanitizeTerminalText(attrs.Environment),
 		})
 	}
 	return headers, rows
@@ -228,7 +237,14 @@ func inAppPurchaseOfferPriceRelationshipIDs(raw json.RawMessage) (string, string
 	if err := json.Unmarshal(raw, &relationships); err != nil {
 		return "", "", fmt.Errorf("decode in-app purchase offer price relationships: %w", err)
 	}
-	return relationships.Territory.Data.ID, relationships.PricePoint.Data.ID, nil
+	pricePointID := ""
+	if relationships.PricePoint != nil {
+		pricePointID = relationships.PricePoint.Data.ID
+		if strings.TrimSpace(pricePointID) == "" {
+			pricePointID = "FREE"
+		}
+	}
+	return relationships.Territory.Data.ID, pricePointID, nil
 }
 
 func inAppPurchaseReviewScreenshotRows(resp *InAppPurchaseAppStoreReviewScreenshotResponse) ([]string, [][]string) {

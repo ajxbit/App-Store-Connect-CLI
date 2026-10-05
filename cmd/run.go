@@ -1,12 +1,15 @@
 package cmd
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"time"
 
@@ -15,14 +18,27 @@ import (
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/cli/install"
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/cli/shared"
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/cli/shared/errfmt"
+	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/readonly"
+	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/telemetry"
 )
 
-var maybeCheckForSkillUpdates = install.MaybeCheckForSkillUpdates
+const unknownFlagErrorPrefix = "flag provided but not defined:"
+
+var (
+	maybeScheduleSkillsUpdateCheck = install.MaybeScheduleSkillsUpdateCheck
+	emitTelemetry                  = telemetry.EmitWithContext
+)
 
 // Run executes the CLI using the provided args (not including argv[0]) and version string.
 // It returns the intended process exit code.
 func Run(args []string, versionInfo string) int {
 	defer shared.CleanupTempPrivateKeys()
+	// --read-only is per invocation: clear it on return so an embedded or
+	// test caller's next Run starts from the environment alone.
+	defer readonly.SetFlagEnabled(false)
+	// A command may register a structured report for the root runner. Clear
+	// any report left by a direct command test or an interrupted prior run.
+	shared.ConsumeJUnitReport()
 
 	// Fast path for the most common version check invocation. This avoids
 	// building/parsing the entire command tree just to print the version.
@@ -31,32 +47,108 @@ func Run(args []string, versionInfo string) int {
 		return ExitSuccess
 	}
 
-	root := RootCommand(versionInfo)
+	root := rootCommandForArgs(versionInfo, args)
+	// The credential profile is a root-owned selector, so relocate a misplaced
+	// `--profile` before anything else reads the argv. Running it first also
+	// keeps spaced boolean recovery working for the flags that follow it.
+	args = hoistRootProfileFlag(root, args)
+	args = normalizeSpacedBooleanFlags(root, args)
+	analysis := analyzeInvocation(root, args)
 	runCtx, stopSignals := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stopSignals()
 
-	if err := root.Parse(args); err != nil {
-		if errors.Is(err, flag.ErrHelp) {
-			return ExitSuccess
+	// Resolve @env:/@file: flag values before parsing so every value-taking
+	// flag, including typed and repeat-safe values, validates the resolved
+	// text. Structural analyses keep using the original args: the rewrite is
+	// token-for-token, so structural diagnostics and telemetry keep the
+	// original tokens. Typed flag validation may quote an invalid value.
+	//
+	// An explicit help request wins unconditionally: help output depends only
+	// on which command the args select, so the indirect flag tokens are
+	// dropped instead of resolved. `--help` then reads no environment
+	// variable and opens no file, help prints whether or not the value would
+	// have resolved, and no resolved value can reach help output or a parse
+	// diagnostic.
+	helpRequested := requestedHelp(root, args)
+	var parseArgs []string
+	if helpRequested {
+		parseArgs = dropIndirectFlagValues(root, args)
+	} else {
+		resolvedArgs, err := resolveFlagValueIndirection(root, args)
+		if err != nil {
+			recoverCIReportFlags(root, args)
+			fmt.Fprint(os.Stderr, errfmt.FormatStderr(err))
+			commandName := getCommandName(root, args)
+			if reportErr := writeUsageJUnitReport(commandName, err); reportErr != nil {
+				printUsageJUnitReportFailure(commandName, versionInfo, analysis, reportErr)
+				return ExitError
+			}
+			emitImmediateTelemetry(args, root, versionInfo, validationFailureContext(analysis, err))
+			return ExitUsage
 		}
-		fmt.Fprint(os.Stderr, errfmt.FormatStderr(err))
-		return ExitCodeFromError(err)
+		parseArgs = resolvedArgs
+	}
+	parseArgs = markLeadingSearchFlagTerminator(root, parseArgs)
+
+	parseOutput := &parseOutputBuffer{}
+	restoreFlagOutputs := prepareFlagParsing(root, parseArgs, parseOutput)
+	parseErr := root.Parse(parseArgs)
+	restoreFlagOutputs()
+	if parseErr != nil {
+		if errors.Is(parseErr, flag.ErrHelp) {
+			// Explicitly requested help is the command's result, not a
+			// diagnostic: agents pipe and redirect it, so it belongs on stdout
+			// with a success exit code. Help raised by any other parse path is
+			// a usage failure and stays on stderr.
+			if helpRequested {
+				fmt.Fprint(os.Stdout, parseOutput.String())
+				return ExitSuccess
+			}
+			fmt.Fprint(os.Stderr, parseOutput.String())
+			return ExitUsage
+		}
+		recoverCIReportFlags(root, args)
+		if err := shared.ValidateReportFlags(); err != nil {
+			fmt.Fprint(os.Stderr, errfmt.FormatStderr(err))
+			emitImmediateTelemetry(args, root, versionInfo, validationFailureContext(analysis, err))
+			return ExitUsage
+		}
+		badFlagSyntax := parseErr.Error()
+		if firstLine, _, _ := strings.Cut(parseOutput.String(), "\n"); strings.HasPrefix(firstLine, "bad flag syntax:") {
+			badFlagSyntax = firstLine
+		}
+		if analysis.unknownFlag && isUnknownFlagParseFailure(parseErr, parseOutput.String()) {
+			printConciseUnknownFlag(root, analysis, getCommandName(root, args), args)
+		} else if strings.HasPrefix(badFlagSyntax, "bad flag syntax:") {
+			fmt.Fprintf(os.Stderr, "Error: %s\nFor help:\n  asc --help\n", shared.SanitizeTerminal(badFlagSyntax))
+		} else {
+			printParseFailure(parseErr, parseOutput.String(), analysis, parseFailureHelpCommand(root, args, parseOutput.owner))
+		}
+		// Every non-help error returned by command-tree parsing is invalid usage,
+		// including NoExecError cases that do not write flag output.
+		if analysis.unknownFlag && isUnknownFlagParseFailure(parseErr, parseOutput.String()) {
+			commandName := getCommandName(root, args)
+			if err := writeUsageJUnitReport(commandName, unknownFlagError(analysis, commandName)); err != nil {
+				printUsageJUnitReportFailure(commandName, versionInfo, analysis, err)
+				return ExitError
+			}
+		}
+		emitImmediateTelemetry(args, root, versionInfo, parseFailureContext(analysis))
+		return ExitUsage
 	}
 
 	// Validate CI report flags after parsing
 	if err := shared.ValidateReportFlags(); err != nil {
 		fmt.Fprint(os.Stderr, errfmt.FormatStderr(err))
+		emitImmediateTelemetry(args, root, versionInfo, validationFailureContext(analysis, err))
 		return ExitUsage
 	}
 
 	if versionRequested {
-		if err := root.Run(runCtx); err != nil {
-			if errors.Is(err, flag.ErrHelp) {
-				return ExitUsage
-			}
-			fmt.Fprint(os.Stderr, errfmt.FormatStderr(err))
-			return ExitCodeFromError(err)
-		}
+		// A root informational flag must never dispatch a trailing subcommand.
+		// Printing directly also keeps `asc --version true ...` as harmless as
+		// the conventional `asc --version` form.
+		fmt.Fprintln(os.Stdout, versionInfo)
 		return ExitSuccess
 	}
 
@@ -68,43 +160,476 @@ func Run(args []string, versionInfo string) int {
 	}
 
 	commandName := getCommandName(root, args)
+	if invalid, suggested, ok := commonCommandPathRecovery(root, analysis, args); ok {
+		fmt.Fprintf(os.Stderr, "Error: unknown command `%s`\nTry:\n  %s\nFor help:\n  %s --help\n", invalid, suggested, commandName)
+		if err := writeUsageJUnitReport(commandName, commonCommandPathRecoveryError(invalid)); err != nil {
+			printUsageJUnitReportFailure(commandName, versionInfo, analysis, err)
+			return ExitError
+		}
+		emitImmediateTelemetry(args, root, versionInfo, validationFailureContext(analysis, flag.ErrHelp))
+		return ExitUsage
+	}
+	if shouldRenderConciseUnknownChild(root, analysis, commandName) {
+		printConciseUnknownCommand(analysis, commandName)
+		if err := writeUsageJUnitReport(commandName, unknownCommandError(analysis, commandName)); err != nil {
+			printUsageJUnitReportFailure(commandName, versionInfo, analysis, err)
+			return ExitError
+		}
+		emitImmediateTelemetry(args, root, versionInfo, validationFailureContext(analysis, flag.ErrHelp))
+		return ExitUsage
+	}
+	// A flag-only leaf command cannot use a bare operand. Reject it here, before
+	// the command runs, so `asc apps view 123` names the stray token and the
+	// flag it belongs to instead of dropping it silently or reporting only the
+	// missing flag.
+	if operands := strayPositionalOperands(analysis, commandName); len(operands) > 0 {
+		printStrayPositionalOperands(commandName, operands, analysis.command.FlagSet)
+		if err := writeUsageJUnitReport(commandName, strayPositionalError(operands)); err != nil {
+			printUsageJUnitReportFailure(commandName, versionInfo, analysis, err)
+			return ExitError
+		}
+		emitImmediateTelemetry(args, root, versionInfo, validationFailureContext(analysis, flag.ErrHelp))
+		return ExitUsage
+	}
 
+	runUsageOutput := &bytes.Buffer{}
+	restoreRunUsageOutput := redirectCommandFlagOutput(analysis.command, runUsageOutput)
 	start := time.Now()
 	runErr := root.Run(runCtx)
 	elapsed := time.Since(start)
+	restoreRunUsageOutput()
 
 	if shouldCancelRunContextAfterError(runErr) {
 		stopSignals()
 	}
+	renderGroupHelp := shouldRenderGroupHelp(analysis, runErr)
+	if renderGroupHelp {
+		fmt.Fprint(os.Stdout, runUsageOutput.String())
+	} else if runUsageOutput.Len() > 0 {
+		fmt.Fprint(os.Stderr, runUsageOutput.String())
+	}
 
-	if shouldRunSkillsUpdateCheck(commandName, runCtx, runErr) {
-		maybeCheckForSkillUpdates(runCtx)
+	if !renderGroupHelp && shouldRunSkillsUpdateCheck(commandName, runCtx, runErr) {
+		maybeScheduleSkillsUpdateCheck()
 	}
 
 	// Write JUnit report if requested
+	commandJUnitReport := shared.ConsumeJUnitReport()
 	if shared.ReportFormat() == shared.ReportFormatJUnit && shared.ReportFile() != "" {
-		reportErr := writeJUnitReport(commandName, runErr, elapsed)
+		reportRunErr := runErr
+		if renderGroupHelp {
+			reportRunErr = nil
+		}
+		var reportErr error
+		if commandJUnitReport != nil {
+			reportErr = commandJUnitReport.Write(shared.ReportFile())
+		} else {
+			reportErr = writeJUnitReport(commandName, reportRunErr, elapsed)
+		}
 		if reportErr != nil {
 			// Report write failure is a hard error - CI depends on it
 			fmt.Fprintf(os.Stderr, "Error: failed to write JUnit report: %v\n", reportErr)
-			if runErr == nil {
+			if reportRunErr == nil {
+				emitTelemetry(commandName, versionInfo, elapsed, ExitError, telemetry.EventContext{
+					InvocationShape: analysis.shape,
+					ErrorKind:       telemetry.ErrorKindOther,
+					FailureStage:    telemetry.FailureStageExecution,
+				})
 				return ExitError
 			}
 		}
 	}
 
-	if runErr != nil {
-		if _, ok := errors.AsType[shared.ReportedError](runErr); ok {
-			return ExitCodeFromError(runErr)
-		}
-		if errors.Is(runErr, flag.ErrHelp) {
-			return ExitUsage
-		}
-		fmt.Fprint(os.Stderr, errfmt.FormatStderr(runErr))
-		return ExitCodeFromError(runErr)
+	if renderGroupHelp {
+		return ExitSuccess
 	}
 
+	if runErr != nil {
+		if _, ok := errors.AsType[shared.ReportedError](runErr); ok {
+			exitCode := ExitCodeFromError(runErr)
+			emitTelemetry(commandName, versionInfo, elapsed, exitCode, runtimeFailureContext(analysis, runErr, exitCode))
+			return exitCode
+		}
+		if errors.Is(runErr, flag.ErrHelp) {
+			printUnknownSubcommandSuggestion(analysis, commandName)
+			emitTelemetry(commandName, versionInfo, elapsed, ExitUsage, validationFailureContext(analysis, runErr))
+			return ExitUsage
+		}
+		printUnknownSubcommandSuggestion(analysis, commandName)
+		fmt.Fprint(os.Stderr, errfmt.FormatStderr(runErr))
+		exitCode := ExitCodeFromError(runErr)
+		emitTelemetry(commandName, versionInfo, elapsed, exitCode, runtimeFailureContext(analysis, runErr, exitCode))
+		return exitCode
+	}
+
+	emitTelemetry(commandName, versionInfo, elapsed, ExitSuccess, telemetry.EventContext{
+		InvocationShape: analysis.shape,
+	})
 	return ExitSuccess
+}
+
+func recoverCIReportFlags(root *ffcli.Command, args []string) {
+	if root == nil {
+		return
+	}
+	for index := 0; index < len(args); {
+		token := args[index]
+		if token == "" {
+			index++
+			continue
+		}
+		if token == "--" || findDirectSubcommand(root, token) != nil || !strings.HasPrefix(token, "-") || token == "-" {
+			return
+		}
+
+		trimmed := ""
+		switch {
+		case strings.HasPrefix(token, "--") && !strings.HasPrefix(token, "---"):
+			trimmed = token[2:]
+		case strings.HasPrefix(token, "-") && !strings.HasPrefix(token, "--"):
+			trimmed = token[1:]
+		default:
+			index++
+			continue
+		}
+		name, value, hasInlineValue := strings.Cut(trimmed, "=")
+		if name == "report" || name == "report-file" {
+			if !hasInlineValue {
+				if index+1 >= len(args) {
+					return
+				}
+				index++
+				value = args[index]
+			}
+			if name == "report" {
+				shared.SetReportFormat(value)
+			} else {
+				shared.SetReportFile(value)
+			}
+			index++
+			continue
+		}
+
+		if next, consumed := consumeFlagToken(root.FlagSet, token, args, index); consumed {
+			if !hasInlineValue {
+				if item := root.FlagSet.Lookup(name); item != nil && isBoolFlag(item) && next < len(args) {
+					if _, err := strconv.ParseBool(strings.TrimSpace(args[next])); err == nil {
+						next++
+					}
+				}
+			}
+			index = next
+			continue
+		}
+		index++
+		if index < len(args) {
+			next := args[index]
+			if next != "" && !strings.HasPrefix(next, "-") && findDirectSubcommand(root, next) == nil {
+				index++
+			}
+		}
+	}
+}
+
+// normalizeSpacedBooleanFlags preserves the CLI's liberal support for both
+// `--flag=false` and `--flag false`. The standard flag package stops parsing at
+// the value after a bare bool flag, which can otherwise leave later safety
+// flags unparsed and make an explicit false behave as true.
+//
+// Commands with positional payloads retain the standard flag ambiguity for
+// compatibility: in `asc snitch --dry-run false`, for example, v3.2.0 treated
+// `--dry-run` as true and `false` as the report description. Callers of those
+// commands can use `--dry-run=false` when they intend an explicit bool value.
+func normalizeSpacedBooleanFlags(root *ffcli.Command, args []string) []string {
+	command := root
+	commandPath := make([]string, 0, 4)
+	if root != nil && root.Name != "" {
+		commandPath = append(commandPath, root.Name)
+	}
+	normalized := make([]string, 0, len(args))
+	for index := 0; index < len(args); index++ {
+		token := args[index]
+		if token == "--" {
+			normalized = append(normalized, args[index:]...)
+			break
+		}
+		if !strings.HasPrefix(token, "-") || token == "-" {
+			if subcommand := findDirectSubcommand(command, token); subcommand != nil {
+				command = subcommand
+				commandPath = append(commandPath, subcommand.Name)
+				normalized = append(normalized, token)
+				continue
+			}
+			normalized = append(normalized, args[index:]...)
+			break
+		}
+
+		name := strings.TrimLeft(strings.SplitN(token, "=", 2)[0], "-")
+		if command == nil || command.FlagSet == nil || name == "" {
+			normalized = append(normalized, token)
+			continue
+		}
+		item := command.FlagSet.Lookup(name)
+		if item == nil {
+			// Parsing will report the unknown flag. Do not reinterpret anything
+			// after the token that stops standard flag parsing.
+			normalized = append(normalized, args[index:]...)
+			break
+		}
+		if strings.ContainsRune(token, '=') {
+			normalized = append(normalized, token)
+			continue
+		}
+
+		boolFlag, isBool := item.Value.(interface{ IsBoolFlag() bool })
+		if isBool && boolFlag.IsBoolFlag() {
+			if commandAcceptsPositionalPayload(commandPath) {
+				normalized = append(normalized, token)
+				continue
+			}
+			if index+1 < len(args) {
+				next := strings.TrimSpace(args[index+1])
+				if value, err := strconv.ParseBool(next); err == nil {
+					normalized = append(normalized, token+"="+strconv.FormatBool(value))
+					index++
+					continue
+				}
+				if len(command.Subcommands) == 0 && !strings.HasPrefix(next, "-") {
+					normalized = append(normalized, token+"="+next)
+					index++
+					continue
+				}
+			}
+			normalized = append(normalized, token)
+			continue
+		}
+
+		// A non-bool flag consumes its following value even when that value
+		// looks like another flag. Never normalize inside the value.
+		normalized = append(normalized, token)
+		if index+1 < len(args) {
+			index++
+			normalized = append(normalized, args[index])
+		}
+	}
+	return normalized
+}
+
+// commandAcceptsPositionalPayload lists the commands whose positional strings
+// are part of their public contract. A positional value can legitimately be the
+// word "true" or "false", so consuming it as a spaced boolean would break the
+// standard flag behavior these commands exposed before spaced bool recovery.
+func commandAcceptsPositionalPayload(commandPath []string) bool {
+	switch strings.Join(commandPath, " ") {
+	case "asc docs show",
+		"asc api",
+		"asc schema",
+		"asc search",
+		"asc snitch",
+		"asc workflow run":
+		return true
+	default:
+		return false
+	}
+}
+
+// requestedHelp reports whether the invocation explicitly asked for help with
+// any -h or -help spelling accepted by the standard flag package. That package
+// raises flag.ErrHelp for an undefined help token, so the token itself is the
+// only reliable signal that the operator asked for the help page instead of
+// tripping over a usage failure.
+func requestedHelp(root *ffcli.Command, args []string) bool {
+	command := root
+	for i := 0; i < len(args); {
+		token := args[i]
+		if token == "" {
+			i++
+			continue
+		}
+		// Everything after the terminator is positional and never parsed as a
+		// help request.
+		if token == "--" {
+			return false
+		}
+		if subcommand := findDirectSubcommand(command, token); subcommand != nil {
+			command = subcommand
+			i++
+			continue
+		}
+		if isHelpToken(token) {
+			return true
+		}
+		next, consumed := consumeFlagToken(command.FlagSet, token, args, i)
+		if !consumed {
+			return false
+		}
+		i = next
+	}
+	return false
+}
+
+// markLeadingSearchFlagTerminator preserves a terminator that the search flag
+// set would otherwise remove before Exec. A terminator after the first query
+// token is already retained because flag parsing stops at that positional.
+func markLeadingSearchFlagTerminator(root *ffcli.Command, args []string) []string {
+	rootSearch := findDirectSubcommand(root, "search")
+	command := root
+	for i := 0; command != nil && i < len(args); {
+		token := args[i]
+		if token == "--" {
+			if command != rootSearch {
+				return args
+			}
+			marked := append([]string(nil), args...)
+			marked[i] = shared.FlagTerminatorSentinel
+			return marked
+		}
+		if token == "" {
+			return args
+		}
+		if subcommand := findDirectSubcommand(command, token); subcommand != nil {
+			command = subcommand
+			i++
+			continue
+		}
+		next, consumed := consumeFlagToken(command.FlagSet, token, args, i)
+		if !consumed {
+			return args
+		}
+		i = next
+	}
+	return args
+}
+
+func printParseFailure(parseErr error, parseOutput string, analysis invocationAnalysis, commandName string) {
+	if !analysis.unknownFlag || !isUnknownFlagParseFailure(parseErr, parseOutput) {
+		if parseOutput != "" {
+			firstLine, _, _ := strings.Cut(strings.TrimSpace(parseOutput), "\n")
+			if firstLine != "" {
+				fmt.Fprintf(
+					os.Stderr,
+					"Error: %s\nFor help:\n  %s --help\n",
+					shared.SanitizeTerminal(firstLine),
+					commandName,
+				)
+			}
+			return
+		}
+		fmt.Fprint(os.Stderr, errfmt.FormatStderr(parseErr))
+		return
+	}
+
+	flagName := strings.SplitN(analysis.unknownToken, "=", 2)[0]
+	fmt.Fprintf(os.Stderr, "Unknown flag: %s\n", shared.SanitizeTerminal(flagName))
+	firstLine, usage, found := strings.Cut(parseOutput, "\n")
+	if found && strings.HasPrefix(firstLine, unknownFlagErrorPrefix) {
+		fmt.Fprint(os.Stderr, usage)
+		return
+	}
+	if parseOutput != "" {
+		fmt.Fprint(os.Stderr, parseOutput)
+	}
+}
+
+// parseFailureHelpCommand names the command whose help a parse failure should
+// point to. The scoped parse writers record which command's flag set produced
+// diagnostics during Parse; when nothing was written there is no diagnostic to
+// attribute, so the help target falls back to the deepest command named by the
+// invocation.
+func parseFailureHelpCommand(root *ffcli.Command, args []string, parseOwner string) string {
+	if parseOwner != "" {
+		return parseOwner
+	}
+	return getCommandName(root, args)
+}
+
+func isUnknownFlagParseFailure(parseErr error, parseOutput string) bool {
+	return strings.HasPrefix(parseErr.Error(), unknownFlagErrorPrefix) || strings.HasPrefix(parseOutput, unknownFlagErrorPrefix)
+}
+
+func redirectCommandFlagOutput(command *ffcli.Command, output io.Writer) func() {
+	if command == nil || command.FlagSet == nil {
+		return func() {}
+	}
+	original := command.FlagSet.Output()
+	command.FlagSet.SetOutput(output)
+	return func() { command.FlagSet.SetOutput(original) }
+}
+
+func emitImmediateTelemetry(
+	args []string,
+	root *ffcli.Command,
+	versionInfo string,
+	eventContext telemetry.EventContext,
+) {
+	emitTelemetry(getCommandName(root, args), versionInfo, 0, ExitUsage, eventContext)
+}
+
+type parseOutputBuffer struct {
+	bytes.Buffer
+	owner string
+}
+
+type scopedParseWriter struct {
+	output *parseOutputBuffer
+	owner  string
+}
+
+func (w scopedParseWriter) Write(data []byte) (int, error) {
+	if len(data) > 0 {
+		w.output.owner = w.owner
+	}
+	return w.output.Write(data)
+}
+
+func prepareFlagParsing(command *ffcli.Command, args []string, output *parseOutputBuffer) func() {
+	type preparedFlagSet struct {
+		flagSet *flag.FlagSet
+		output  io.Writer
+	}
+	prepared := []preparedFlagSet{}
+	path := []string{command.Name}
+
+	for command != nil {
+		if command.FlagSet == nil {
+			command.FlagSet = flag.NewFlagSet(command.Name, flag.ContinueOnError)
+		}
+		prepared = append(prepared, preparedFlagSet{
+			flagSet: command.FlagSet,
+			output:  command.FlagSet.Output(),
+		})
+		command.FlagSet.Init(command.FlagSet.Name(), flag.ContinueOnError)
+		command.FlagSet.SetOutput(scopedParseWriter{output: output, owner: strings.Join(path, " ")})
+
+		var next *ffcli.Command
+		var remaining []string
+		for i := 0; i < len(args); {
+			token := args[i]
+			if token == "" {
+				i++
+				continue
+			}
+			if sub := findDirectSubcommand(command, token); sub != nil {
+				next = sub
+				path = append(path, sub.Name)
+				remaining = args[i+1:]
+				break
+			}
+			nextIndex, consumed := consumeFlagToken(command.FlagSet, token, args, i)
+			if consumed {
+				i = nextIndex
+				continue
+			}
+			break
+		}
+		command = next
+		args = remaining
+	}
+	return func() {
+		for _, item := range prepared {
+			item.flagSet.SetOutput(item.output)
+		}
+	}
 }
 
 func shouldCancelRunContextAfterError(err error) bool {
@@ -112,16 +637,11 @@ func shouldCancelRunContextAfterError(err error) bool {
 }
 
 func shouldRunSkillsUpdateCheck(commandName string, runCtx context.Context, runErr error) bool {
-	if commandName == "asc" || commandName == "asc install-skills" {
-		return false
-	}
-	if runCtx != nil && runCtx.Err() != nil {
-		return false
-	}
-	if shouldCancelRunContextAfterError(runErr) {
-		return false
-	}
-	return true
+	// The external `skills check` command is not read-only: current releases
+	// route it through the updater and can rewrite globally installed skills.
+	// Keep automatic execution disabled until a reviewed, read-only protocol
+	// exists. Explicit `asc install-skills` remains available.
+	return false
 }
 
 func isVersionOnlyInvocation(args []string) bool {
@@ -248,6 +768,24 @@ func isBoolFlag(f *flag.Flag) bool {
 	}
 	v, ok := f.Value.(boolFlag)
 	return ok && v.IsBoolFlag()
+}
+
+func writeUsageJUnitReport(commandName string, usageErr error) error {
+	if shared.ReportFormat() != shared.ReportFormatJUnit || shared.ReportFile() == "" {
+		return nil
+	}
+	return writeJUnitReport(commandName, usageErr, 0)
+}
+
+func printUsageJUnitReportFailure(commandName, versionInfo string, analysis invocationAnalysis, err error) {
+	fmt.Fprintf(os.Stderr, "Error: failed to write JUnit report: %v\n", err)
+	emitTelemetry(commandName, versionInfo, 0, ExitError, telemetry.EventContext{
+		InvocationShape: analysis.shape,
+		ErrorKind:       telemetry.ErrorKindOther,
+		FailureStage:    telemetry.FailureStageExecution,
+		OutcomeKind:     telemetry.OutcomeInternalError,
+		AttemptedChild:  attemptedChildToken(analysis),
+	})
 }
 
 // writeJUnitReport writes a JUnit XML report if --report junit --report-file is configured.

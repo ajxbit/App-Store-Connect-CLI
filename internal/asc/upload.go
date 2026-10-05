@@ -13,6 +13,22 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
+
+	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/readonly"
+	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/urlsanitize"
+)
+
+const (
+	// DefaultUploadConcurrency is the number of upload workers used when no
+	// explicit concurrency is configured. App Store Connect upload operations
+	// carry explicit byte offsets, so chunks are safe to upload in parallel.
+	DefaultUploadConcurrency = 4
+
+	// uploadMaxIdleConnsPerHost keeps enough idle connections to the upload
+	// host so concurrent chunk uploads are not throttled by the Go transport
+	// default of 2 idle connections per host.
+	uploadMaxIdleConnsPerHost = 8
 )
 
 // UploadOptions configure how upload operations are executed.
@@ -50,7 +66,11 @@ func WithUploadHTTPClient(client *http.Client) UploadOption {
 func newUploadClient() *http.Client {
 	transport := http.DefaultTransport
 	if base, ok := transport.(*http.Transport); ok {
-		transport = base.Clone()
+		cloned := base.Clone()
+		if cloned.MaxIdleConnsPerHost < uploadMaxIdleConnsPerHost {
+			cloned.MaxIdleConnsPerHost = uploadMaxIdleConnsPerHost
+		}
+		transport = cloned
 	}
 	return &http.Client{
 		Timeout:   ResolveUploadTimeout(),
@@ -60,15 +80,34 @@ func newUploadClient() *http.Client {
 
 // ExecuteUploadOperations performs the file uploads for the provided operations.
 func ExecuteUploadOperations(ctx context.Context, filePath string, operations []UploadOperation, opts ...UploadOption) error {
+	if len(operations) == 0 {
+		return errors.New("no upload operations provided")
+	}
+
+	file, err := openUploadSourceFile(filePath)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+
+	return ExecuteUploadOperationsFromFile(ctx, file, operations, opts...)
+}
+
+// ExecuteUploadOperationsFromFile performs upload operations against an
+// already-opened source file. The caller retains ownership of file.
+func ExecuteUploadOperationsFromFile(ctx context.Context, file *os.File, operations []UploadOperation, opts ...UploadOption) error {
 	if ctx == nil {
 		ctx = context.Background()
+	}
+	if file == nil {
+		return errors.New("upload source file is required")
 	}
 	if len(operations) == 0 {
 		return errors.New("no upload operations provided")
 	}
 
 	uploadOpts := UploadOptions{
-		Concurrency: 1,
+		Concurrency: DefaultUploadConcurrency,
 		Client:      newUploadClient(),
 		RetryOpts:   ResolveRetryOptions(),
 	}
@@ -81,22 +120,17 @@ func ExecuteUploadOperations(ctx context.Context, filePath string, operations []
 	if uploadOpts.Client == nil {
 		uploadOpts.Client = newUploadClient()
 	}
+	uploadOpts.Client = clientWithoutRedirects(uploadOpts.Client)
 	if uploadOpts.Concurrency > len(operations) {
 		uploadOpts.Concurrency = len(operations)
 	}
-
-	file, err := openUploadSourceFile(filePath)
-	if err != nil {
-		return err
-	}
-	defer file.Close()
 
 	info, err := file.Stat()
 	if err != nil {
 		return fmt.Errorf("stat file: %w", err)
 	}
 	if info.IsDir() {
-		return fmt.Errorf("path %q is a directory", filePath)
+		return fmt.Errorf("path %q is a directory", file.Name())
 	}
 	size := info.Size()
 
@@ -129,6 +163,7 @@ func ExecuteUploadOperations(ctx context.Context, filePath string, operations []
 
 	jobs := make(chan uploadTask)
 	var wg sync.WaitGroup
+	var completed atomic.Int64
 
 	worker := func() {
 		defer wg.Done()
@@ -140,6 +175,7 @@ func ExecuteUploadOperations(ctx context.Context, filePath string, operations []
 				setErr(err)
 				return
 			}
+			completed.Add(1)
 		}
 	}
 
@@ -159,7 +195,17 @@ sendLoop:
 	close(jobs)
 
 	wg.Wait()
-	return firstErr
+	if firstErr != nil {
+		return firstErr
+	}
+	completedCount := completed.Load()
+	if completedCount == int64(len(operations)) {
+		return nil
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return fmt.Errorf("upload operations incomplete: completed %d of %d", completedCount, len(operations))
 }
 
 func openUploadSourceFile(filePath string) (*os.File, error) {
@@ -192,12 +238,22 @@ func executeUploadOperation(ctx context.Context, file *os.File, task uploadTask,
 	if method == "" {
 		method = http.MethodPut
 	}
+	replaySafe := method == http.MethodPut
 
 	_, err := WithRetry(ctx, func() (struct{}, error) {
-		reader := io.NewSectionReader(file, task.op.Offset, task.op.Length)
-		req, err := http.NewRequestWithContext(ctx, method, task.op.URL, reader)
-		if err != nil {
+		if err := ctx.Err(); err != nil {
 			return struct{}{}, err
+		}
+		requestCtx, cancel := context.WithTimeout(ctx, ResolveUploadTimeout())
+		defer cancel()
+
+		if err := readonly.Check(requestCtx, method, readonly.Target(task.op.URL)); err != nil {
+			return struct{}{}, err
+		}
+		reader := io.NewSectionReader(file, task.op.Offset, task.op.Length)
+		req, err := http.NewRequestWithContext(requestCtx, method, task.op.URL, reader)
+		if err != nil {
+			return struct{}{}, newSanitizedUploadError("create upload request", task.op.URL, err)
 		}
 		req.ContentLength = task.op.Length
 		for _, header := range task.op.RequestHeaders {
@@ -206,18 +262,22 @@ func executeUploadOperation(ctx context.Context, file *os.File, task uploadTask,
 
 		resp, err := uploadOpts.Client.Do(req)
 		if err != nil {
-			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-				return struct{}{}, err
+			if parentErr := ctx.Err(); parentErr != nil {
+				return struct{}{}, parentErr
 			}
-			return struct{}{}, &RetryableError{Err: fmt.Errorf("upload request failed: %w", err)}
+			requestErr := newSanitizedUploadError("upload request", task.op.URL, err)
+			if replaySafe && (errors.Is(err, context.DeadlineExceeded) || isTransientTransportError(err)) {
+				return struct{}{}, &RetryableError{Err: requestErr}
+			}
+			return struct{}{}, requestErr
 		}
 		defer resp.Body.Close()
 		_, _ = io.Copy(io.Discard, resp.Body)
 
-		if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusServiceUnavailable {
+		if replaySafe && isRetryableHTTPStatus(resp.StatusCode) {
 			retryAfter := parseRetryAfterHeader(resp.Header.Get("Retry-After"))
 			return struct{}{}, &RetryableError{
-				Err:        buildRetryableError(resp.StatusCode, retryAfter, nil),
+				Err:        buildRetryableErrorWithSource(resp.StatusCode, retryAfter, nil, "upload server"),
 				RetryAfter: retryAfter,
 			}
 		}
@@ -233,8 +293,29 @@ func executeUploadOperation(ctx context.Context, file *os.File, task uploadTask,
 	return nil
 }
 
+// newSanitizedUploadError is the single upload-error boundary: presigned upload
+// URLs carry their capability in userinfo, query, and fragment, and net/http
+// renders the whole URL in its own error text.
+func newSanitizedUploadError(operation, rawURL string, err error) error {
+	return urlsanitize.NewTransportError(operation, urlsanitize.RedactURLForError(rawURL), err)
+}
+
 // VerifySourceFileChecksums computes and compares checksums provided by the API.
 func VerifySourceFileChecksums(filePath string, expected *Checksums) (*Checksums, error) {
+	if expected == nil {
+		return nil, nil
+	}
+	file, err := openUploadSourceFile(filePath)
+	if err != nil {
+		return nil, fmt.Errorf("open file for checksum: %w", err)
+	}
+	defer file.Close()
+	return VerifySourceFileChecksumsFromFile(file, expected)
+}
+
+// VerifySourceFileChecksumsFromFile computes and compares API-provided
+// checksums against an already-opened source file.
+func VerifySourceFileChecksumsFromFile(file *os.File, expected *Checksums) (*Checksums, error) {
 	if expected == nil {
 		return nil, nil
 	}
@@ -245,7 +326,7 @@ func VerifySourceFileChecksums(filePath string, expected *Checksums) (*Checksums
 		if expectedHash == "" {
 			return nil, errors.New("file checksum hash is missing")
 		}
-		sum, err := ComputeFileChecksum(filePath, expected.File.Algorithm)
+		sum, err := ComputeFileChecksumFromFile(file, expected.File.Algorithm)
 		if err != nil {
 			return nil, err
 		}
@@ -259,7 +340,7 @@ func VerifySourceFileChecksums(filePath string, expected *Checksums) (*Checksums
 		if expectedHash == "" {
 			return nil, errors.New("composite checksum hash is missing")
 		}
-		sum, err := ComputeFileChecksum(filePath, expected.Composite.Algorithm)
+		sum, err := ComputeFileChecksumFromFile(file, expected.Composite.Algorithm)
 		if err != nil {
 			return nil, err
 		}
@@ -282,7 +363,15 @@ func ComputeFileChecksum(filePath string, algorithm ChecksumAlgorithm) (*Checksu
 		return nil, fmt.Errorf("open file for checksum: %w", err)
 	}
 	defer file.Close()
+	return ComputeFileChecksumFromFile(file, algorithm)
+}
 
+// ComputeFileChecksumFromFile computes a checksum from an already-opened file
+// without changing its current offset.
+func ComputeFileChecksumFromFile(file *os.File, algorithm ChecksumAlgorithm) (*Checksum, error) {
+	if file == nil {
+		return nil, errors.New("checksum source file is required")
+	}
 	var hash hash.Hash
 	switch algorithm {
 	case ChecksumAlgorithmMD5:
@@ -293,7 +382,12 @@ func ComputeFileChecksum(filePath string, algorithm ChecksumAlgorithm) (*Checksu
 		return nil, fmt.Errorf("unsupported checksum algorithm: %s", algorithm)
 	}
 
-	if _, err := io.Copy(hash, file); err != nil {
+	fileInfo, err := file.Stat()
+	if err != nil {
+		return nil, fmt.Errorf("stat file for checksum: %w", err)
+	}
+	reader := io.NewSectionReader(file, 0, fileInfo.Size())
+	if _, err := io.Copy(hash, reader); err != nil {
 		return nil, fmt.Errorf("compute checksum: %w", err)
 	}
 

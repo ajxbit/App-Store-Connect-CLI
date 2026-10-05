@@ -25,7 +25,7 @@ func PassTypeIDsCommand() *ffcli.Command {
 
 Examples:
   asc pass-type-ids list
-  asc pass-type-ids get --pass-type-id "PASS_ID"
+  asc pass-type-ids view --pass-type-id "PASS_ID"
   asc pass-type-ids create --identifier "pass.com.example" --name "Example"
   asc pass-type-ids update --pass-type-id "PASS_ID" --name "New Name"
   asc pass-type-ids delete --pass-type-id "PASS_ID" --confirm
@@ -78,17 +78,25 @@ Examples:
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
+			if err := shared.ValidateNextURL(*next); err != nil {
+				return shared.UsageErrorf("pass-type-ids list: %v", err)
+			}
+			if err := shared.RejectNextFlagConflicts(
+				fs,
+				*next,
+				"pass-type-ids list",
+				"id", "identifier", "name", "sort", "fields", "certificate-fields", "include", "limit-certificates", "limit",
+			); err != nil {
+				return err
+			}
 			if *limit != 0 && (*limit < 1 || *limit > 200) {
-				return fmt.Errorf("pass-type-ids list: --limit must be between 1 and 200")
+				return shared.UsageError("pass-type-ids list: --limit must be between 1 and 200")
 			}
 			if *certificatesLimit != 0 && (*certificatesLimit < 1 || *certificatesLimit > 50) {
-				return fmt.Errorf("pass-type-ids list: --limit-certificates must be between 1 and 50")
-			}
-			if err := shared.ValidateNextURL(*next); err != nil {
-				return fmt.Errorf("pass-type-ids list: %w", err)
+				return shared.UsageError("pass-type-ids list: --limit-certificates must be between 1 and 50")
 			}
 			if err := shared.ValidateSort(*sort, passTypeIDSortList()...); err != nil {
-				return fmt.Errorf("pass-type-ids list: %w", err)
+				return shared.UsageErrorf("pass-type-ids list: %v", err)
 			}
 
 			fieldsValue, err := normalizePassTypeIDFields(*fields, "--fields")
@@ -102,6 +110,14 @@ Examples:
 			includeValue, err := normalizePassTypeIDInclude(*include)
 			if err != nil {
 				return fmt.Errorf("pass-type-ids list: %w", err)
+			}
+			if len(certificateFieldsValue) > 0 && !shared.HasInclude(includeValue, "certificates") {
+				fmt.Fprintln(os.Stderr, "Error: --certificate-fields requires --include certificates")
+				return flag.ErrHelp
+			}
+			if *certificatesLimit != 0 && !shared.HasInclude(includeValue, "certificates") {
+				fmt.Fprintln(os.Stderr, "Error: --limit-certificates requires --include certificates")
+				return flag.ErrHelp
 			}
 
 			client, err := shared.GetASCClient()
@@ -171,9 +187,9 @@ Examples:
 
 // PassTypeIDsGetCommand returns the pass type IDs get subcommand.
 func PassTypeIDsGetCommand() *ffcli.Command {
-	fs := flag.NewFlagSet("get", flag.ExitOnError)
+	fs := flag.NewFlagSet("view", flag.ExitOnError)
 
-	passTypeID := fs.String("pass-type-id", "", "Pass type ID")
+	passTypeID := shared.BindResourceIDFlag(fs, "pass-type-id", "passTypeIds", "Pass type ID")
 	fields := fs.String("fields", "", "Fields to include: "+strings.Join(passTypeIDFieldsList(), ", "))
 	certificateFields := fs.String("certificate-fields", "", "Certificate fields to include: "+strings.Join(certificateFieldsList(), ", "))
 	include := fs.String("include", "", "Include relationships: "+strings.Join(passTypeIDIncludeList(), ", "))
@@ -181,41 +197,49 @@ func PassTypeIDsGetCommand() *ffcli.Command {
 	output := shared.BindOutputFlags(fs)
 
 	return &ffcli.Command{
-		Name:       "get",
-		ShortUsage: "asc pass-type-ids get --pass-type-id \"PASS_ID\"",
-		ShortHelp:  "Get a pass type ID by ID.",
-		LongHelp: `Get a pass type ID by ID.
+		Name:       "view",
+		ShortUsage: "asc pass-type-ids view --pass-type-id \"PASS_ID\"",
+		ShortHelp:  "View a pass type ID by ID.",
+		LongHelp: `View a pass type ID by ID.
 
 Examples:
-  asc pass-type-ids get --pass-type-id "PASS_ID"`,
+  asc pass-type-ids view --pass-type-id "PASS_ID"`,
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
 			passTypeIDValue := strings.TrimSpace(*passTypeID)
 			if passTypeIDValue == "" {
 				fmt.Fprintln(os.Stderr, "Error: --pass-type-id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--pass-type-id")
 			}
 			if *certificatesLimit != 0 && (*certificatesLimit < 1 || *certificatesLimit > 50) {
-				return fmt.Errorf("pass-type-ids get: --limit-certificates must be between 1 and 50")
+				return shared.UsageError("pass-type-ids view: --limit-certificates must be between 1 and 50")
 			}
 
 			fieldsValue, err := normalizePassTypeIDFields(*fields, "--fields")
 			if err != nil {
-				return fmt.Errorf("pass-type-ids get: %w", err)
+				return fmt.Errorf("pass-type-ids view: %w", err)
 			}
 			certificateFieldsValue, err := normalizeCertificateFields(*certificateFields, "--certificate-fields")
 			if err != nil {
-				return fmt.Errorf("pass-type-ids get: %w", err)
+				return fmt.Errorf("pass-type-ids view: %w", err)
 			}
 			includeValue, err := normalizePassTypeIDInclude(*include)
 			if err != nil {
-				return fmt.Errorf("pass-type-ids get: %w", err)
+				return fmt.Errorf("pass-type-ids view: %w", err)
+			}
+			if len(certificateFieldsValue) > 0 && !shared.HasInclude(includeValue, "certificates") {
+				fmt.Fprintln(os.Stderr, "Error: --certificate-fields requires --include certificates")
+				return flag.ErrHelp
+			}
+			if *certificatesLimit != 0 && !shared.HasInclude(includeValue, "certificates") {
+				fmt.Fprintln(os.Stderr, "Error: --limit-certificates requires --include certificates")
+				return flag.ErrHelp
 			}
 
 			client, err := shared.GetASCClient()
 			if err != nil {
-				return fmt.Errorf("pass-type-ids get: %w", err)
+				return fmt.Errorf("pass-type-ids view: %w", err)
 			}
 
 			requestCtx, cancel := shared.ContextWithTimeout(ctx)
@@ -237,7 +261,7 @@ Examples:
 
 			resp, err := client.GetPassTypeID(requestCtx, passTypeIDValue, opts...)
 			if err != nil {
-				return fmt.Errorf("pass-type-ids get: failed to fetch: %w", err)
+				return fmt.Errorf("pass-type-ids view: failed to fetch: %w", err)
 			}
 
 			return shared.PrintOutput(resp, *output.Output, *output.Pretty)
@@ -267,12 +291,12 @@ Examples:
 			identifierValue := strings.TrimSpace(*identifier)
 			if identifierValue == "" {
 				fmt.Fprintln(os.Stderr, "Error: --identifier is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--identifier")
 			}
 			nameValue := strings.TrimSpace(*name)
 			if nameValue == "" {
 				fmt.Fprintln(os.Stderr, "Error: --name is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--name")
 			}
 
 			client, err := shared.GetASCClient()
@@ -301,7 +325,7 @@ Examples:
 func PassTypeIDsUpdateCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("update", flag.ExitOnError)
 
-	passTypeID := fs.String("pass-type-id", "", "Pass type ID")
+	passTypeID := shared.BindResourceIDFlag(fs, "pass-type-id", "passTypeIds", "Pass type ID")
 	name := fs.String("name", "", "Pass type name")
 	output := shared.BindOutputFlags(fs)
 
@@ -319,12 +343,12 @@ Examples:
 			passTypeIDValue := strings.TrimSpace(*passTypeID)
 			if passTypeIDValue == "" {
 				fmt.Fprintln(os.Stderr, "Error: --pass-type-id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--pass-type-id")
 			}
 			nameValue := strings.TrimSpace(*name)
 			if nameValue == "" {
 				fmt.Fprintln(os.Stderr, "Error: --name is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--name")
 			}
 
 			client, err := shared.GetASCClient()
@@ -352,7 +376,7 @@ Examples:
 func PassTypeIDsDeleteCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("delete", flag.ExitOnError)
 
-	passTypeID := fs.String("pass-type-id", "", "Pass type ID")
+	passTypeID := shared.BindResourceIDFlag(fs, "pass-type-id", "passTypeIds", "Pass type ID")
 	confirm := fs.Bool("confirm", false, "Confirm deletion")
 	output := shared.BindOutputFlags(fs)
 
@@ -370,11 +394,11 @@ Examples:
 			passTypeIDValue := strings.TrimSpace(*passTypeID)
 			if passTypeIDValue == "" {
 				fmt.Fprintln(os.Stderr, "Error: --pass-type-id is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--pass-type-id")
 			}
 			if !*confirm {
 				fmt.Fprintln(os.Stderr, "Error: --confirm is required")
-				return flag.ErrHelp
+				return shared.MissingRequiredUsageError("--confirm")
 			}
 
 			client, err := shared.GetASCClient()
