@@ -5,7 +5,6 @@ import (
 	"flag"
 	"fmt"
 	"path/filepath"
-	"strconv"
 	"strings"
 
 	"github.com/peterbourgon/ff/v3/ffcli"
@@ -162,13 +161,4 @@ Examples:
 			return nil
 		},
 	}
-}
-
-func printStageResult(result runResult, format string, pretty bool) error {
-	headers := []string{"Step", "Status", "Duration (ms)", "Message"}
-	rows := make([][]string, 0, len(result.Steps))
-	for _, step := range result.Steps {
-		rows = append(rows, []string{step.Name, step.Status, strconv.FormatInt(step.DurationMS, 10), step.Message})
-	}
-	return shared.PrintOutputRows(result, format, pretty, headers, rows)
 }
