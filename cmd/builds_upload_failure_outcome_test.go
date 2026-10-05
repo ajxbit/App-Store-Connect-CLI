@@ -121,6 +121,13 @@ func TestRunBuildsUploadAppleSideFailureOutcomes(t *testing.T) {
 			wantOutcome: telemetry.OutcomeExpectedNegative,
 			wantCode:    shared.DiagnosticStateNotReady,
 		},
+		{
+			name:        "presigned upload forbidden",
+			putStatus:   http.StatusForbidden,
+			wantStderr:  "status Forbidden; the upload URL may have expired, rerun the upload",
+			wantOutcome: telemetry.OutcomeAPIClientError,
+			wantStatus:  http.StatusForbidden,
+		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
