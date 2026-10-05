@@ -571,7 +571,7 @@ Examples:
 			}
 
 			// Fetch all localizations
-			resp, err := client.GetAppStoreVersionLocalizations(requestCtx, strings.TrimSpace(*versionID))
+			resp, err := client.GetAppStoreVersionLocalizations(requestCtx, strings.TrimSpace(*versionID), asc.WithAppStoreVersionLocalizationsLimit(200))
 			if err != nil {
 				return fmt.Errorf("migrate export: %w", err)
 			}
@@ -641,7 +641,7 @@ Examples:
 				if strings.TrimSpace(appInfoID) == "" {
 					return fmt.Errorf("migrate export: failed to select app info for app")
 				}
-				appInfoLocs, err := client.GetAppInfoLocalizations(requestCtx, appInfoID)
+				appInfoLocs, err := client.GetAppInfoLocalizations(requestCtx, appInfoID, asc.WithAppInfoLocalizationsLimit(200))
 				if err == nil {
 					for _, loc := range appInfoLocs.Data {
 						localeDir, err := migrateExportLocaleDir(loc.Attributes.Locale)

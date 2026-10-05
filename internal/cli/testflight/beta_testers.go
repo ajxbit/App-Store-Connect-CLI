@@ -37,7 +37,7 @@ Examples:
   asc testflight beta-testers import --app "APP_ID" --input "./testflight-testers.csv" --dry-run
   asc testflight beta-testers remove --app "APP_ID" --email "tester@example.com" --confirm
   asc testflight beta-testers add-groups --id "TESTER_ID" --group "GROUP_ID"
-  asc testflight beta-testers remove-groups --id "TESTER_ID" --group "GROUP_ID"
+  asc testflight beta-testers remove-groups --id "TESTER_ID" --group "GROUP_ID" --confirm
   asc testflight beta-testers add-builds --id "TESTER_ID" --build-id "BUILD_ID"
   asc testflight beta-testers remove-builds --id "TESTER_ID" --build-id "BUILD_ID" --confirm
   asc testflight beta-testers remove-apps --id "TESTER_ID" --app "APP_ID" --confirm
