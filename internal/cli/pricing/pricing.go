@@ -187,6 +187,9 @@ Examples:
 			if err := shared.ValidateNextURL(*next); err != nil {
 				return shared.UsageErrorf("pricing price-points: %v", err)
 			}
+			if err := shared.RejectNextFlagConflicts(fs, *next, "pricing price-points", "territory"); err != nil {
+				return err
+			}
 
 			resolvedAppID := shared.ResolveAppID(*appID)
 			if resolvedAppID == "" && strings.TrimSpace(*next) == "" {

@@ -69,6 +69,7 @@ func rootCommandForArgs(version string, args []string) *ffcli.Command {
 	for _, subcommand := range root.Subcommands {
 		if strings.EqualFold(subcommand.Name, parts[1]) {
 			shared.WrapCommandOutputValidation(subcommand)
+			shared.WrapNextLimitConflicts(subcommand)
 			break
 		}
 	}
@@ -89,6 +90,7 @@ func newRootCommand(version string, subcommands []*ffcli.Command) *ffcli.Command
 
 	for _, subcommand := range subcommands {
 		shared.WrapCommandOutputValidation(subcommand)
+		shared.WrapNextLimitConflicts(subcommand)
 	}
 
 	root.FlagSet.BoolVar(&versionRequested, "version", false, "Print version and exit")

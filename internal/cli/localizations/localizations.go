@@ -110,6 +110,9 @@ Examples:
 			if err := shared.ValidateNextURL(*next); err != nil {
 				return shared.UsageErrorf("localizations list: %v", err)
 			}
+			if err := shared.RejectNextFlagConflicts(fs, *next, "localizations list", "locale"); err != nil {
+				return err
+			}
 
 			normalizedType, err := shared.NormalizeLocalizationType(*locType)
 			if err != nil {

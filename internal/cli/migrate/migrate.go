@@ -61,6 +61,7 @@ func MigrateImportCommand() *ffcli.Command {
 	versionID := shared.BindResourceIDFlag(fs, "version-id", "appStoreVersions", "App Store version ID (required unless Deliverfile app_version + platform)")
 	fastlaneDir := fs.String("fastlane-dir", "", "Path to fastlane directory (optional)")
 	dryRun := fs.Bool("dry-run", false, "Preview changes without uploading")
+	checkRemote := fs.Bool("check-remote", false, "Compare remote store assets during a dry run (requires --dry-run)")
 	confirm := fs.Bool("confirm", false, "Confirm uploading the imported metadata, screenshots, and assets (required unless --dry-run)")
 	skipScreenshots := fs.Bool("skip-screenshots", false, "Skip screenshot discovery and upload")
 	skipAppClip := fs.Bool("skip-app-clip", false, "Skip App Clip metadata and header images")
@@ -117,14 +118,24 @@ or conventional metadata/ and screenshots/ directories:
 
 App Preview validation requires ffprobe on PATH (provided by FFmpeg).
 Headers must be PNG at 1800 x 1200; previews must be 15-30 seconds.
+By default, dry-run lists local inputs without comparing remote assets.
+Add --check-remote to read remote store assets and plan their changes without writes.
+This requires authentication and may download delivered media for comparison.
 
 Examples:
   asc migrate import --app "APP_ID" --version-id "VERSION_ID" --fastlane-dir ./fastlane --confirm
   asc migrate import --app "APP_ID" --version-id "VERSION_ID" --fastlane-dir ./fastlane --dry-run
+  asc migrate import --app "APP_ID" --version-id "VERSION_ID" --fastlane-dir ./fastlane --dry-run --check-remote
   asc migrate import --app "APP_ID" --version-id "VERSION_ID" --fastlane-dir ./fastlane --skip-screenshots --confirm`,
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
+			if *checkRemote && !*dryRun {
+				const message = "--check-remote requires --dry-run"
+				fmt.Fprintln(os.Stderr, "Error: "+message)
+				return shared.NewReportedUsageError(shared.UsageErrorInvalidValue, message)
+			}
+
 			// A fastlane directory turns into localization updates, review
 			// information changes, and screenshot uploads, so the same apply
 			// decision the other file-driven importers require is enforced
@@ -289,7 +300,7 @@ Examples:
 			if err != nil {
 				return err
 			}
-			if *dryRun {
+			if *dryRun && !*checkRemote {
 				// A preview has no remote localization list that could exempt an
 				// already existing locale, so run the locale half of the apply
 				// preflight here. Without it a clean plan is followed by a hard
@@ -304,7 +315,7 @@ Examples:
 			// derives its own from ctx, so a long import is not capped by this
 			// deadline.
 			requestCtx := ctx
-			needsClient := !*dryRun ||
+			needsClient := !*dryRun || *checkRemote ||
 				(strings.TrimSpace(*appID) == "" && strings.TrimSpace(inputs.DeliverfileConfig.AppIdentifier) != "") ||
 				(strings.TrimSpace(*versionID) == "" && strings.TrimSpace(inputs.DeliverfileConfig.AppVersion) != "" && strings.TrimSpace(inputs.DeliverfileConfig.Platform) != "")
 			if needsClient {
@@ -345,7 +356,7 @@ Examples:
 				Skipped:              skipped,
 			}
 
-			if *dryRun {
+			if *dryRun && !*checkRemote {
 				shared.WarnIncludeSensitive(os.Stderr, *includeSensitive)
 				return printMigrateOutput(presentableImportResult(result, *includeSensitive), *output.Output, *output.Pretty)
 			}
@@ -384,6 +395,18 @@ Examples:
 			cancelAppInfo()
 			if err != nil {
 				return err
+			}
+
+			if *dryRun {
+				result.RemoteChecked = true
+				for _, change := range assetPlan.Changes() {
+					result.AssetResults = append(result.AssetResults, asc.StoreAssetResult{
+						Kind: change.Kind, Locale: change.Locale, Path: change.Path,
+						Action: change.Action, Status: "planned",
+					})
+				}
+				shared.WarnIncludeSensitive(os.Stderr, *includeSensitive)
+				return printMigrateOutput(presentableImportResult(result, *includeSensitive), *output.Output, *output.Pretty)
 			}
 
 			submitOpts := shared.SubmitReadinessOptions{}
@@ -762,6 +785,7 @@ const (
 
 // MigrateImportResult is the result of a migrate import operation.
 type MigrateImportResult struct {
+	RemoteChecked        bool                          `json:"remoteChecked,omitempty"`
 	AssetResults         []asc.StoreAssetResult        `json:"assetResults,omitempty"`
 	DryRun               bool                          `json:"dryRun"`
 	Status               string                        `json:"status,omitempty"`

@@ -52,7 +52,7 @@ func TestHelpExamplesParseAgainstCurrentCLI(t *testing.T) {
 		}
 		args := fields[1:]
 		root := rootCommandForArgs("dev", args)
-		if requestedHelp(root, args) {
+		if _, helpRequested := requestedHelpArgs(root, args); helpRequested {
 			continue
 		}
 		args = normalizeSpacedBooleanFlags(root, args)
