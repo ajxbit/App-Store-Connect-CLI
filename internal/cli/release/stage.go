@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/peterbourgon/ff/v3/ffcli"
@@ -152,7 +153,7 @@ Examples:
 				StrictValidate:              *strictValidate,
 				CheckpointFile:              absCheckpointPath,
 			})
-			if printErr := shared.PrintOutput(result, *output.Output, *output.Pretty); printErr != nil {
+			if printErr := printStageResult(result, *output.Output, *output.Pretty); printErr != nil {
 				return printErr
 			}
 			if runErr != nil {
@@ -161,4 +162,13 @@ Examples:
 			return nil
 		},
 	}
+}
+
+func printStageResult(result runResult, format string, pretty bool) error {
+	headers := []string{"Step", "Status", "Duration (ms)", "Message"}
+	rows := make([][]string, 0, len(result.Steps))
+	for _, step := range result.Steps {
+		rows = append(rows, []string{step.Name, step.Status, strconv.FormatInt(step.DurationMS, 10), step.Message})
+	}
+	return shared.PrintOutputRows(result, format, pretty, headers, rows)
 }

@@ -1949,6 +1949,17 @@ func PrintOutputWithRenderers(data any, format string, pretty bool, tableRendere
 	return printOutputWithRenderers(data, format, pretty, tableRenderer, markdownRenderer)
 }
 
+// PrintOutputRows prints data as JSON, or as one table of headers and rows.
+func PrintOutputRows(data any, format string, pretty bool, headers []string, rows [][]string) error {
+	return printOutputWithRenderers(
+		data,
+		format,
+		pretty,
+		func() error { return asc.WriteTable(headers, rows) },
+		func() error { return asc.WriteMarkdown(headers, rows) },
+	)
+}
+
 func ValidateOutputFormat(format string, pretty bool) (string, error) {
 	return validateOutputFormat(format, pretty)
 }

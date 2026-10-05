@@ -431,3 +431,44 @@ func (p *BetaTesterUsagesPage) GetData() any {
 	}
 	return p.Data
 }
+
+func betaBuildUsagesRows(resp *BetaBuildUsagesResponse) ([]string, [][]string, error) {
+	headers := []string{"Start", "End", "Installs", "Sessions", "Crashes", "Feedback", "Invites"}
+	if len(resp.Data) == 0 {
+		return headers, nil, nil
+	}
+	var payload struct {
+		Data []struct {
+			DataPoints []struct {
+				Start  string `json:"start"`
+				End    string `json:"end"`
+				Values struct {
+					InstallCount  *int `json:"installCount"`
+					SessionCount  *int `json:"sessionCount"`
+					CrashCount    *int `json:"crashCount"`
+					FeedbackCount *int `json:"feedbackCount"`
+					InviteCount   *int `json:"inviteCount"`
+				} `json:"values"`
+			} `json:"dataPoints"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(resp.Data, &payload); err != nil {
+		return nil, nil, fmt.Errorf("parse beta build usages: %w", err)
+	}
+	var rows [][]string
+	for _, metric := range payload.Data {
+		for _, point := range metric.DataPoints {
+			v := point.Values
+			rows = append(rows, []string{
+				point.Start,
+				point.End,
+				formatOptionalInt(v.InstallCount),
+				formatOptionalInt(v.SessionCount),
+				formatOptionalInt(v.CrashCount),
+				formatOptionalInt(v.FeedbackCount),
+				formatOptionalInt(v.InviteCount),
+			})
+		}
+	}
+	return headers, rows, nil
+}

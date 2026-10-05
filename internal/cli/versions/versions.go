@@ -914,9 +914,9 @@ Examples:
 				return fmt.Errorf("versions delete: %w", err)
 			}
 
-			result := map[string]any{
-				"versionId": strings.TrimSpace(*versionID),
-				"deleted":   true,
+			result := &asc.AppStoreVersionDeleteResult{
+				Deleted:   true,
+				VersionID: strings.TrimSpace(*versionID),
 			}
 
 			return shared.PrintOutput(result, *output.Output, *output.Pretty)

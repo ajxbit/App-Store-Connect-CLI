@@ -500,7 +500,8 @@ func RunAppsCreate(ctx context.Context, opts AppsCreateRunOptions) error {
 
 	fmt.Fprintf(os.Stderr, "Created app successfully (id=%s)\n", strings.TrimSpace(app.Data.ID))
 	if access == "" {
-		return shared.PrintOutput(app, opts.Output, opts.Pretty)
+		row := []string{app.Data.ID, attrs.Name, attrs.BundleID, attrs.SKU}
+		return shared.PrintOutputRows(app, opts.Output, opts.Pretty, []string{"ID", "Name", "Bundle ID", "SKU"}, [][]string{row})
 	}
 
 	accessCtx, accessCancel := shared.ContextWithTimeout(ctx)

@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -173,6 +174,24 @@ type webAuthStatus struct {
 	ProviderID       int64  `json:"providerId,omitempty"`
 	PublicProviderID string `json:"publicProviderId,omitempty"`
 	DeveloperTeamID  string `json:"developerTeamId,omitempty"`
+}
+
+func printWebAuthStatus(status webAuthStatus, format string, pretty bool) error {
+	providerID := ""
+	if status.ProviderID != 0 {
+		providerID = strconv.FormatInt(status.ProviderID, 10)
+	}
+	rows := [][]string{
+		{"Authenticated", strconv.FormatBool(status.Authenticated)},
+		{"Password Stored", strconv.FormatBool(status.PasswordStored)},
+		{"Source", status.Source},
+		{"Apple ID", status.AppleID},
+		{"Team ID", status.TeamID},
+		{"Provider ID", providerID},
+		{"Public Provider ID", status.PublicProviderID},
+		{"Developer Team ID", status.DeveloperTeamID},
+	}
+	return shared.PrintOutputRows(status, format, pretty, []string{"Field", "Value"}, rows)
 }
 
 func expiredWebAuthStatus(appleID string) webAuthStatus {
@@ -1506,7 +1525,7 @@ Examples:
 				PublicProviderID: session.PublicProviderID,
 				DeveloperTeamID:  session.DeveloperTeamID,
 			}
-			return shared.PrintOutput(status, *output.Output, *output.Pretty)
+			return printWebAuthStatus(status, *output.Output, *output.Pretty)
 		},
 	}
 }
@@ -1548,19 +1567,19 @@ If --apple-id is not provided, this checks the last cached session.
 			if err != nil {
 				if errors.Is(err, webcore.ErrCachedSessionExpired) {
 					status := expiredWebAuthStatus(trimmedAppleID)
-					return shared.PrintOutput(status, *output.Output, *output.Pretty)
+					return printWebAuthStatus(status, *output.Output, *output.Pretty)
 				}
 				return fmt.Errorf("web auth status failed: %w", err)
 			}
 
 			if !ok || session == nil {
-				return shared.PrintOutput(webAuthStatus{
+				return printWebAuthStatus(webAuthStatus{
 					Authenticated:  false,
 					PasswordStored: storedWebPasswordStatus(trimmedAppleID),
 					AppleID:        trimmedAppleID,
 				}, *output.Output, *output.Pretty)
 			}
-			return shared.PrintOutput(webAuthStatus{
+			return printWebAuthStatus(webAuthStatus{
 				Authenticated:    true,
 				PasswordStored:   storedWebPasswordStatus(session.UserEmail),
 				Source:           "cache",
