@@ -563,17 +563,32 @@ Examples:
 				return fmt.Errorf("migrate export: %w", err)
 			}
 
-			requestCtx, cancel := shared.ContextWithTimeout(ctx)
-			defer cancel()
-
-			if _, err := shared.ResolveOwnedAppStoreVersionByID(requestCtx, client, resolvedAppID, strings.TrimSpace(*versionID), ""); err != nil {
+			requestCtx, cancel := migrateRequestContext(ctx)
+			_, err = shared.ResolveOwnedAppStoreVersionByID(requestCtx, client, resolvedAppID, strings.TrimSpace(*versionID), "")
+			cancel()
+			if err != nil {
 				return fmt.Errorf("migrate export: %w", err)
 			}
 
-			// Fetch all localizations
-			resp, err := client.GetAppStoreVersionLocalizations(requestCtx, strings.TrimSpace(*versionID), asc.WithAppStoreVersionLocalizationsLimit(200))
+			localizations, err := fetchVersionLocalizationsForPlan(ctx, client, strings.TrimSpace(*versionID))
 			if err != nil {
 				return fmt.Errorf("migrate export: %w", err)
+			}
+
+			// App info is optional, but a selected localization collection must be complete.
+			var appInfoLocalizations []asc.Resource[asc.AppInfoLocalizationAttributes]
+			requestCtx, cancel = migrateRequestContext(ctx)
+			appInfos, err := client.GetAppInfos(requestCtx, resolvedAppID)
+			cancel()
+			if err == nil && len(appInfos.Data) > 0 {
+				appInfoID := shared.SelectBestAppInfoID(appInfos)
+				if strings.TrimSpace(appInfoID) == "" {
+					return fmt.Errorf("migrate export: failed to select app info for app")
+				}
+				appInfoLocalizations, err = fetchAppInfoLocalizationsForPlan(ctx, client, appInfoID)
+				if err != nil {
+					return fmt.Errorf("migrate export: %w", err)
+				}
 			}
 
 			assetPlan, assetWarnings, err := storeassets.ExportPlan(ctx, client, strings.TrimSpace(*versionID), "metadata", true, true)
@@ -599,9 +614,9 @@ Examples:
 			}
 
 			// Write each localization
-			exported := make([]string, 0, len(resp.Data))
+			exported := make([]string, 0, len(localizations))
 			totalFiles := 0
-			for _, loc := range resp.Data {
+			for _, loc := range localizations {
 				locale := loc.Attributes.Locale
 				localeDir, err := migrateExportLocaleDir(locale)
 				if err != nil {
@@ -635,39 +650,29 @@ Examples:
 			}
 
 			// Export App Info localizations (name, subtitle)
-			appInfos, err := client.GetAppInfos(requestCtx, resolvedAppID)
-			if err == nil && len(appInfos.Data) > 0 {
-				appInfoID := shared.SelectBestAppInfoID(appInfos)
-				if strings.TrimSpace(appInfoID) == "" {
-					return fmt.Errorf("migrate export: failed to select app info for app")
+			for _, loc := range appInfoLocalizations {
+				localeDir, err := migrateExportLocaleDir(loc.Attributes.Locale)
+				if err != nil {
+					return fmt.Errorf("migrate export: %w", err)
 				}
-				appInfoLocs, err := client.GetAppInfoLocalizations(requestCtx, appInfoID, asc.WithAppInfoLocalizationsLimit(200))
-				if err == nil {
-					for _, loc := range appInfoLocs.Data {
-						localeDir, err := migrateExportLocaleDir(loc.Attributes.Locale)
-						if err != nil {
-							return fmt.Errorf("migrate export: %w", err)
-						}
-						// Create locale dir if it doesn't exist (may have App Info but no version localizations)
-						if err := root.MkdirAll(localeDir, 0o755); err != nil {
-							return fmt.Errorf("migrate export: failed to create locale directory: %w", err)
-						}
-						files := []struct {
-							name    string
-							content string
-						}{
-							{"name.txt", loc.Attributes.Name},
-							{"subtitle.txt", loc.Attributes.Subtitle},
-							{"privacy_url.txt", loc.Attributes.PrivacyPolicyURL},
-						}
-						for _, file := range files {
-							written, err := writeAndCount(root, filepath.Join(localeDir, file.name), file.content)
-							if err != nil {
-								return fmt.Errorf("migrate export: %w", err)
-							}
-							totalFiles += written
-						}
+				// Create locale dir if it doesn't exist (may have App Info but no version localizations)
+				if err := root.MkdirAll(localeDir, 0o755); err != nil {
+					return fmt.Errorf("migrate export: failed to create locale directory: %w", err)
+				}
+				files := []struct {
+					name    string
+					content string
+				}{
+					{"name.txt", loc.Attributes.Name},
+					{"subtitle.txt", loc.Attributes.Subtitle},
+					{"privacy_url.txt", loc.Attributes.PrivacyPolicyURL},
+				}
+				for _, file := range files {
+					written, err := writeAndCount(root, filepath.Join(localeDir, file.name), file.content)
+					if err != nil {
+						return fmt.Errorf("migrate export: %w", err)
 					}
+					totalFiles += written
 				}
 			}
 
