@@ -195,8 +195,8 @@ func TestRunScreenshotsUploadWritesFailureArtifactAndResumeCompletes(t *testing.
 		}
 	})
 
-	if stderr != "" {
-		t.Fatalf("expected empty stderr for reported upload failure, got %q", stderr)
+	if strings.Count(stderr, "Error:") != 1 || !strings.Contains(stderr, "2 file(s) pending retry") {
+		t.Fatalf("expected one stderr error line for reported upload failure, got %q", stderr)
 	}
 	if err := json.Unmarshal([]byte(stdout), &firstResult); err != nil {
 		t.Fatalf("failed to parse first stdout JSON: %v\nstdout=%s", err, stdout)
@@ -435,8 +435,8 @@ func TestRunScreenshotsUploadFanoutPrintsPartialResultsOnLocaleFailure(t *testin
 		}
 	})
 
-	if stderr != "" {
-		t.Fatalf("expected empty stderr for reported fan-out upload failure, got %q", stderr)
+	if strings.Count(stderr, "Error:") != 1 || !strings.Contains(stderr, "1 file(s) pending retry") {
+		t.Fatalf("expected one stderr error line for reported fan-out upload failure, got %q", stderr)
 	}
 	if err := json.Unmarshal([]byte(stdout), &payload); err != nil {
 		t.Fatalf("failed to parse fan-out stdout JSON: %v\nstdout=%s", err, stdout)

@@ -158,7 +158,7 @@ Examples:
 			if result.Failed > 0 {
 				err := fmt.Errorf("%s: %d of %d locales failed", config.CommandPath, result.Failed, result.Total)
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				return NewReportedError(err)
+				return NewStderrReportedError(err)
 			}
 			return nil
 		},

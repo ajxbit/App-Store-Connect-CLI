@@ -8,8 +8,9 @@ import (
 	"strings"
 )
 
-// ReportedError marks an error as already reported to the user.
-// The main entrypoint should exit non-zero without duplicating output.
+// ReportedError marks an error whose result the command already reported,
+// usually as structured output on stdout. The root still prints one stderr
+// error line unless the error is also marked as printed to stderr.
 type ReportedError interface {
 	error
 	Reported() bool
@@ -84,6 +85,7 @@ func (e processExitError) Reported() bool          { return true }
 func (e processExitError) ascProcessExitCode() int { return e.code }
 func (e processExitError) isASCProcessExit()       {}
 func (e processExitError) isLocalProcessFailure()  {}
+func (e processExitError) printedToStderr()        {}
 
 // NewProcessExitError preserves a child process exit code without duplicating
 // the child's stderr through the root error renderer.
@@ -130,8 +132,9 @@ func (e classifiedUsageError) UsageErrorKind() UsageErrorKind {
 	return e.kind
 }
 
-func (e reportedUsageError) Error() string  { return e.message }
-func (e reportedUsageError) Reported() bool { return true }
+func (e reportedUsageError) Error() string    { return e.message }
+func (e reportedUsageError) Reported() bool   { return true }
+func (e reportedUsageError) printedToStderr() {}
 func (e reportedUsageError) UsageErrorKind() UsageErrorKind {
 	return e.kind
 }
@@ -147,6 +150,12 @@ func (e reportedError) Unwrap() error {
 func (e reportedError) Reported() bool {
 	return true
 }
+
+type stderrReportedError struct {
+	reportedError
+}
+
+func (e stderrReportedError) printedToStderr() {}
 
 func (e validationError) Error() string {
 	return e.err.Error()
@@ -168,12 +177,29 @@ func (e errorWithCause) Unwrap() []error {
 	return []error{e.err, e.cause}
 }
 
-// NewReportedError wraps an error that has already been printed.
+// NewReportedError wraps an error whose result the command already printed
+// to stdout. The root prints err once to stderr as an "Error:" line.
 func NewReportedError(err error) error {
 	if err == nil {
 		return nil
 	}
 	return reportedError{err: err}
+}
+
+// NewStderrReportedError wraps an error the command already printed to
+// stderr, so the root prints nothing more for it.
+func NewStderrReportedError(err error) error {
+	if err == nil {
+		return nil
+	}
+	return stderrReportedError{reportedError{err: err}}
+}
+
+// IsPrintedToStderr reports whether err carries a marker for a failure that
+// was already written to stderr by the command or a child process.
+func IsPrintedToStderr(err error) bool {
+	var printed interface{ printedToStderr() }
+	return errors.As(err, &printed)
 }
 
 // NewReportedUsageError classifies an already-printed usage failure without
@@ -207,6 +233,7 @@ type pendingError struct {
 func (e pendingError) Error() string        { return e.message }
 func (e pendingError) Is(target error) bool { return target == ErrPending }
 func (e pendingError) Reported() bool       { return true }
+func (e pendingError) printedToStderr()     {}
 func (e pendingError) Diagnostic() Diagnostic {
 	return Diagnostic{Code: DiagnosticStateNotReady}
 }
@@ -238,15 +265,16 @@ func NewValidationReportedError(err error) error {
 	return NewReportedError(NewValidationError(err))
 }
 
-// NewNotConfiguredReportedError classifies an already-printed expected
-// negative for a resource that has not been configured yet, such as an app
-// without an availability record. It maps to the validation exit code and the
-// state_not_ready diagnostic instead of a not-found API failure.
+// NewNotConfiguredReportedError classifies an expected negative for a resource
+// that has not been configured yet, such as an app without an availability
+// record, after the command printed its result and a stderr remediation hint.
+// It maps to the validation exit code and the state_not_ready diagnostic
+// instead of a not-found API failure.
 func NewNotConfiguredReportedError(err error) error {
 	if err == nil {
 		return nil
 	}
-	return WithDiagnostic(NewValidationReportedError(err), DiagnosticStateNotReady, "")
+	return WithDiagnostic(NewStderrReportedError(NewValidationError(err)), DiagnosticStateNotReady, "")
 }
 
 // NewErrorWithCause preserves err's rendered message and classification while
