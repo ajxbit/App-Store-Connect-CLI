@@ -79,12 +79,25 @@ func reviewSubscriptionState(subscription webcore.ReviewSubscription) string {
 	return strings.ToUpper(strings.TrimSpace(subscription.State))
 }
 
+// A response without submitWithNextAppStoreVersion is an upstream failure, not
+// an operator mistake. Nothing prints this error first, so it must not be a
+// ReportedError or the command exits silently.
+func reviewSubscriptionUnknownAttachmentError(operation, appID, subscriptionID string) error {
+	return shared.WithDiagnostic(
+		fmt.Errorf(
+			"web review subscriptions %s: App Store Connect did not return the next-version attachment state for subscription %q; check it with `asc web review subscriptions list --app \"%s\"`, then retry",
+			operation,
+			strings.TrimSpace(subscriptionID),
+			appID,
+		),
+		shared.DiagnosticDependencyFailed,
+		"",
+	)
+}
+
 func reviewSubscriptionAttachPreflight(appID string, subscription webcore.ReviewSubscription) error {
 	if !subscription.SubmitWithNextAppStoreVersionKnown {
-		return shared.NewReportedError(fmt.Errorf(
-			"web review subscriptions attach: Apple did not return a reliable next-version attachment state for subscription %q; refresh App Store Connect and retry",
-			strings.TrimSpace(subscription.ID),
-		))
+		return reviewSubscriptionUnknownAttachmentError("attach", appID, subscription.ID)
 	}
 	state := reviewSubscriptionState(subscription)
 	if state == "READY_TO_SUBMIT" {
@@ -862,10 +875,7 @@ func WebReviewSubscriptionsRemoveCommand() *ffcli.Command {
 				Subscription: *selected,
 			}
 			if !selected.SubmitWithNextAppStoreVersionKnown {
-				return shared.NewReportedError(fmt.Errorf(
-					"web review subscriptions remove: Apple did not return a reliable next-version attachment state for subscription %q; refresh App Store Connect and retry",
-					trimmedSubscriptionID,
-				))
+				return reviewSubscriptionUnknownAttachmentError("remove", trimmedAppID, trimmedSubscriptionID)
 			}
 			if selected.SubmitWithNextAppStoreVersion {
 				err = withWebSpinner("Removing subscription from next app version", func() error {
