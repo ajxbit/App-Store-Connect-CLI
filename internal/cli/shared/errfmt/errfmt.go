@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/asc"
+	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/auth"
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/cli/shared"
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/readonly"
 )
@@ -20,6 +21,8 @@ const (
 	requestTimeoutHint = "Increase the request timeout (e.g. set `ASC_TIMEOUT=90s`)."
 	uploadTimeoutHint  = "Increase the upload timeout (e.g. set `ASC_UPLOAD_TIMEOUT=600s`)."
 	systemStatusHint   = "Check Apple's service health with `asc system-status --service \"App Store Connect\"`."
+	missingAuthHint    = "Run `asc auth status` to see configured credentials. To add an API key, create one at " + auth.APIKeysURL +
+		" and run `" + auth.LoginCommandExample + "` (or set ASC_KEY_ID/ASC_ISSUER_ID/ASC_PRIVATE_KEY_PATH)."
 )
 
 func Classify(err error) ClassifiedError {
@@ -44,7 +47,7 @@ func Classify(err error) ClassifiedError {
 	if errors.Is(err, shared.ErrMissingAuth) {
 		return ClassifiedError{
 			Message: err.Error(),
-			Hint:    "Run `asc auth login` or `asc auth init` (or set ASC_KEY_ID/ASC_ISSUER_ID/ASC_PRIVATE_KEY_PATH). Try `asc auth doctor` if you're unsure what's misconfigured.",
+			Hint:    missingAuthHint,
 		}
 	}
 
