@@ -137,7 +137,7 @@ Examples:
 			}
 			if testErr != nil {
 				if result == nil {
-					return fmt.Errorf("xcode test: %w", testErr)
+					return xcodeCommandError("xcode test", testErr)
 				}
 				reportTestFailure(result, testErr)
 				return shared.NewStderrReportedError(fmt.Errorf("xcode test: %w", testErr))

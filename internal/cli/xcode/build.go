@@ -96,7 +96,7 @@ Examples:
 			}
 			if buildErr != nil {
 				if result == nil {
-					return fmt.Errorf("xcode build: %w", buildErr)
+					return xcodeCommandError("xcode build", buildErr)
 				}
 				reportBuildFailure(result, buildErr)
 				return shared.NewStderrReportedError(fmt.Errorf("xcode build: %w", buildErr))
