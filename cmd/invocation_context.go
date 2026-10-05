@@ -173,6 +173,17 @@ func printConciseUnknownFlag(root *ffcli.Command, analysis invocationAnalysis, c
 		)
 		return
 	}
+	if name, ok := flagLookupName(flagName); ok {
+		var accepting []string
+		for _, sub := range analysis.command.Subcommands {
+			if sub != nil && sub.FlagSet != nil && sub.FlagSet.Lookup(name) != nil && !isDeprecatedCommandHelp(sub.ShortHelp) {
+				accepting = append(accepting, sub.Name)
+			}
+		}
+		if len(accepting) > 0 {
+			fmt.Fprintf(os.Stderr, "Did you mean a subcommand? These accept `--%s`: %s\n", name, strings.Join(accepting, ", "))
+		}
+	}
 
 	printFlagSuggestions(os.Stderr, unknownFlagSuggestions(
 		analysis.command.FlagSet,
