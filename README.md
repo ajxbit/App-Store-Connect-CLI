@@ -352,6 +352,7 @@ asc review doctor --app "123456789"
 ```bash
 asc localizations list --app "123456789" --type app-info
 asc metadata init --dir "./metadata" --version "1.2.3" --locale "en-US"
+# Fill in the values to apply and delete keys to leave unchanged; empty values are rejected.
 asc metadata apply --app "123456789" --version "1.2.3" --dir "./metadata" --dry-run
 asc metadata keywords audit --app "123456789" --version "1.2.3" --blocked-terms-file "./blocked-terms.txt"
 asc apps info view --app "123456789" --output json --pretty
@@ -368,7 +369,7 @@ and optional blocked terms from repeated `--blocked-term` flags or a text file.
 asc screenshots plan --app "123456789" --version "1.2.3" --review-output-dir "./screenshots/review"
 asc screenshots apply --app "123456789" --version "1.2.3" --review-output-dir "./screenshots/review" --confirm
 asc screenshots list --version-localization "VERSION_LOCALIZATION_ID"
-asc video-previews list --app "123456789"
+asc video-previews list --version-localization "VERSION_LOCALIZATION_ID"
 ```
 
 Uploading screenshots for a single locale:
@@ -377,7 +378,7 @@ Uploading screenshots for a single locale:
 asc apps list
 asc versions list --app "APP_ID"
 asc localizations list --version "VERSION_ID" --output json --locale "en-US" | jsonpp
-asc screenshots upload --version-localization "VERSION_LOCALIZATION_ID" --path "./screenshots/en-US" --device-type "IPHONE_65" --replace --max-screenshots 10
+asc screenshots upload --version-localization "VERSION_LOCALIZATION_ID" --path "./screenshots/en-US" --device-type "IPHONE_65" --replace --confirm --max-screenshots 10
 ```
 
 `VERSION_LOCALIZATION_ID` is the App Store version localization resource ID
@@ -468,7 +469,7 @@ asc xcode-cloud run --workflow-id "WORKFLOW_ID" --pull-request-id "PR_ID"
 asc xcode-cloud run --source-run-id "BUILD_RUN_ID" --clean
 
 # Fetch a single build run by ID
-asc xcode-cloud build-runs get --id "BUILD_RUN_ID"
+asc xcode-cloud build-runs view --id "BUILD_RUN_ID"
 ```
 
 ### Apple Ads campaign management
