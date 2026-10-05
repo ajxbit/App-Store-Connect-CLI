@@ -724,7 +724,7 @@ func localizationUploadReportedError(failed int, uploadErr error, artifactError 
 	if strings.TrimSpace(artifactError) != "" {
 		message += "; write failure artifact: " + artifactError
 	}
-	return shared.NewReportedError(fmt.Errorf("%s", message))
+	return shared.NewReportedError(shared.NewErrorWithCause(errors.New(message), shared.KeepReadOnlyRefusal(nil, uploadErr)))
 }
 
 func sharedVersionLocalizationValuesNeedUpdateContext(valuesByLocale map[string]map[string]string) bool {
